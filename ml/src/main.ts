@@ -9,6 +9,11 @@
  * The vision layer emits device-space coordinates (x / y in [-1, 1], +Y up),
  * deltas and state events; the CAD layer consumes only those — nothing in
  * src/cad or src/ui imports from src/vision.
+ *
+ * Interaction modes (VIEW / SELECT / CREATE) are picked on the vision
+ * overlay's button bar and gate the gesture routing below: pinches are inert
+ * in VIEW, pick / drag meshes in SELECT, and build primitives in CREATE.
+ * Camera gestures (fist orbit / two-fist zoom) stay live in every mode.
  */
 
 import { GestureEngine } from './vision/GestureEngine';
@@ -70,7 +75,12 @@ const engine = new GestureEngine({
   },
 });
 
-const overlay = new DebugOverlay(canvas);
+const overlay = new DebugOverlay(canvas, {
+  // Mode switcher on the vision overlay: the button bar (mouse click, finger
+  // dwell or pinch) requests engine mode changes; the engine feeds the
+  // active mode back through the per-frame event, which renders the button.
+  onModeRequest: (mode) => engine.setMode(mode),
+});
 
 /* ---- CAD ---- */
 const cadScene = new CadScene(viewport);
@@ -95,12 +105,22 @@ function logGestureEvent(event: GestureSignalEvent): void {
 
 /* ---- Vision -> CAD bridge (device-space coordinates only) ---- */
 
-// Footprint: pinch start/drag raycast onto the CAD ground plane.
-engine.onPinchStart((e) => builder.onPinchStart(e.position.x, e.position.y));
-engine.onPinchDrag((e) =>
-  builder.onPinchDrag(e.currentPos.x, e.currentPos.y, e.startPos.x, e.startPos.y)
-);
-engine.onPinchEnd(() => builder.onPinchEnd());
+// Mode-routed pinches (the classifier never emits pinches in VIEW mode):
+// - SELECT: pick a committed mesh / drag it on the ground plane; a pinch on
+//   empty ground deselects.
+// - CREATE: draw a footprint (pinch start/drag raycast onto the ground plane).
+engine.onPinchStart((e) => {
+  if (engine.mode === 'select') builder.pickAt(e.position.x, e.position.y);
+  else builder.onPinchStart(e.position.x, e.position.y);
+});
+engine.onPinchDrag((e) => {
+  if (engine.mode === 'select') builder.dragTo(e.currentPos.x, e.currentPos.y);
+  else builder.onPinchDrag(e.currentPos.x, e.currentPos.y, e.startPos.x, e.startPos.y);
+});
+engine.onPinchEnd(() => {
+  if (engine.mode === 'select') builder.endDrag();
+  else builder.onPinchEnd();
+});
 
 // Two-hand build: pinch both hands and pull apart to size the base (spawned
 // at the origin); release the upper pinch, then drag the lower one vertically
@@ -143,13 +163,27 @@ engine.on('state_change', (event) => {
   const change = event as { to: string; reason: string };
   statusOutput.dataset.state = change.to;
   statusOutput.title = `${change.to} — ${change.reason}`;
-  setStatus(`State: ${change.to} (${change.reason})`);
+  setStatus(`Mode: ${engine.mode.toUpperCase()} — State: ${change.to} (${change.reason})`);
+});
+
+// A mode switch aborts any in-flight build / selection drag so the new mode
+// starts from a clean slate (committed meshes are untouched).
+engine.on('mode_change', (event) => {
+  if (event.type !== 'mode_change') return;
+  builder.cancel();
+  builder.endDrag();
+  statusOutput.dataset.mode = event.to;
+  setStatus(`Mode: ${event.to.toUpperCase()} — State: ${engine.state}`);
 });
 
 // Debug overlay: re-render on every processed frame.
 engine.on('frame', (event) => {
   if (event.type === 'frame') overlay.render(event);
 });
+
+// Start in VIEW mode (pure camera navigation): nothing can be created or
+// moved until the user picks another mode on the overlay's button bar.
+engine.setMode('view');
 
 /** Start webcam + hand tracking (invoked from the toolbar). */
 function startCamera(): void {
