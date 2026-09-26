@@ -174,10 +174,13 @@ as a floating thumbnail (top-left, click ⤢ to expand/collapse) over it.
 Interaction modes are switched with the button bar along the top of the
 camera overlay — mouse click, index-finger dwell (500 ms, with a progress
 bar) or a pinch over a button; the app starts in **VIEW** and the active
-mode is shown inverted with an indicator bar (and in the bottom-left HUD):
+mode is shown inverted with an indicator bar (and in the bottom-left HUD).
+In **CREATE** mode a smaller shape row pops up beneath the mode bar —
+**CUBE** (default), **CUBOID**, **CYLINDER**, **SPHERE** — picked the same way
+(dwell / pinch / click); it sets the shape for the next build:
 
 1. **Two-hand build** — pinch with both hands: a translucent wireframe
-   preview of the selected tool spawns centered on the origin `(0, 0, 0)`,
+   preview of the selected shape spawns centered on the origin `(0, 0, 0)`,
    its base sized by the two pinches (`baseSizeScale` world units per unit
    of video width):
    - **Box** — square, side = straight-line pinch gap;
@@ -291,6 +294,11 @@ The `<canvas id="overlay">` (pure Canvas 2D) mirrors the feed and draws:
   inverted (solid light fill + high-contrast indicator bar). Activated by
   mouse click, index-tip (landmark 8) dwell (500 ms, with a progress bar) or
   a pinch over the button (via `DebugOverlay`'s `onModeRequest` callback);
+- in CREATE mode, the **shape row** beneath it (`CUBE CUBOID CYLINDER
+  SPHERE`, from the `shapes` option; `onShapeRequest` reports picks, CUBE is
+  the default). Buttons share one press model, `ButtonPointer` (pure, unit
+  tested): a dwell fires once until the finger leaves the button, and a held
+  pinch fires once and cannot scrub across buttons;
 - all 21 landmarks per hand + MediaPipe skeleton connections,
 - state color-coding: **green** = pinch/draw, **cyan** = selecting, **blue**
   = one-fist move, **purple** = two-fist zoom / turn (ring = anchor fist,

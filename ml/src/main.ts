@@ -20,7 +20,7 @@ import { GestureEngine } from './vision/GestureEngine';
 import { DebugOverlay } from './vision/DebugOverlay';
 import type { GestureSignalEvent } from './vision/types';
 import { CadScene } from './cad/CadScene';
-import { CadBuilder } from './cad/CadBuilder';
+import { CadBuilder, type CadTool } from './cad/CadBuilder';
 import { Toolbar } from './ui/Toolbar';
 
 const video = document.querySelector<HTMLVideoElement>('#video');
@@ -75,16 +75,26 @@ const engine = new GestureEngine({
   },
 });
 
-const overlay = new DebugOverlay(canvas, {
+/* ---- CAD ---- */
+const cadScene = new CadScene(viewport);
+const builder = new CadBuilder(cadScene);
+
+const overlay = new DebugOverlay<CadTool>(canvas, {
   // Mode switcher on the vision overlay: the button bar (mouse click, finger
   // dwell or pinch) requests engine mode changes; the engine feeds the
   // active mode back through the per-frame event, which renders the button.
   onModeRequest: (mode) => engine.setMode(mode),
+  // CREATE mode pops up a shape row under the mode bar; the picked shape is
+  // the builder's tool for the next build (default: cube).
+  shapes: [
+    { id: 'box', label: 'CUBE' },
+    { id: 'cuboid', label: 'CUBOID' },
+    { id: 'cylinder', label: 'CYLINDER' },
+    { id: 'sphere', label: 'SPHERE' },
+  ],
+  activeShape: builder.activeTool,
+  onShapeRequest: (shape) => builder.setTool(shape),
 });
-
-/* ---- CAD ---- */
-const cadScene = new CadScene(viewport);
-const builder = new CadBuilder(cadScene);
 
 /* ---- UI ---- */
 const toolbar = new Toolbar(toolbarRoot, {

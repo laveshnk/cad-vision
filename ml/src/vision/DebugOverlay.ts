@@ -7,8 +7,11 @@
  * Along the top edge it renders the interaction-mode switcher ([ VIEW ],
  * [ SELECT ], [ CREATE ]): boxy, mutually exclusive toggle buttons that
  * respond to mouse clicks, an index-tip dwell (>= `dwellMs`) or a pinch —
- * reported through the `onModeRequest` callback. The stats HUD is anchored
- * bottom-left so the buttons own the top edge.
+ * reported through the `onModeRequest` callback. While CREATE is active a
+ * second, smaller row of shape buttons pops up beneath it (e.g. CUBE /
+ * CUBOID / CYLINDER / SPHERE), pressed the same way and reported through
+ * `onShapeRequest`. Finger presses go through `ButtonPointer`. The stats HUD
+ * is anchored bottom-left so the buttons own the top edge.
  *
  * Alignment: the <video> is CSS-mirrored (`scaleX(-1)`) and displayed with
  * `object-fit: cover`, which center-crops it into its container (the floating
@@ -21,6 +24,7 @@
  */
 
 import { HandLandmarker } from '@mediapipe/tasks-vision';
+import { ButtonPointer } from './ButtonPointer';
 import type { FrameEvent, GestureState, HandSnapshot, InteractionMode } from './types';
 
 const THUMB_TIP = 4;
@@ -81,8 +85,17 @@ interface ViewTransform {
   dispH: number;
 }
 
-/** Options for the debug overlay. */
-export interface DebugOverlayOptions {
+/** A shape button in the CREATE-mode shape row. */
+export interface OverlayShape<S extends string> {
+  id: S;
+  label: string;
+}
+
+/**
+ * Options for the debug overlay. `S` is the host's shape id type — the
+ * overlay treats shape ids as opaque strings (no CAD dependency).
+ */
+export interface DebugOverlayOptions<S extends string = string> {
   /** Hand skeleton connections (defaults to MediaPipe HAND_CONNECTIONS). */
   connections?: ReadonlyArray<SkeletonConnection>;
   /**
@@ -91,44 +104,56 @@ export interface DebugOverlayOptions {
    * decides what to do with the request (typically `engine.setMode`).
    */
   onModeRequest?: (mode: InteractionMode) => void;
-  /** Index-tip dwell time (ms) before a hovered mode button activates. Default 500. */
+  /** Index-tip dwell time (ms) before a hovered button activates. Default 500. */
   dwellMs?: number;
+  /** Shape buttons shown beneath the mode bar while in CREATE mode (none by default). */
+  shapes?: ReadonlyArray<OverlayShape<S>>;
+  /** Initially highlighted shape (defaults to the first of `shapes`). */
+  activeShape?: S;
+  /** Called when a shape button is activated (click, dwell or pinch). */
+  onShapeRequest?: (shape: S) => void;
 }
 
-/** A hit-testable rectangle in CSS pixels. */
-interface ButtonRect {
+/** A rendered, hit-testable button (rect in CSS pixels). */
+interface OverlayButton {
+  /** Stable key (`mode:<mode>` / `shape:<id>`) used for dwell tracking. */
+  key: string;
+  label: string;
+  active: boolean;
   x: number;
   y: number;
   width: number;
   height: number;
+  activate: () => void;
 }
 
 /** Mode buttons, left to right, along the top edge of the overlay. */
 const MODE_BUTTONS: readonly InteractionMode[] = ['view', 'select', 'create'];
 
-export class DebugOverlay {
+export class DebugOverlay<S extends string = string> {
   private readonly canvas: HTMLCanvasElement;
   private readonly ctx: CanvasRenderingContext2D;
   private readonly connections: ReadonlyArray<SkeletonConnection>;
   private readonly onModeRequest: ((mode: InteractionMode) => void) | null;
-  private readonly dwellMs: number;
-  /** Last rendered button rects (CSS px) — hit targets for mouse + finger. */
-  private buttonRects: ButtonRect[] = [];
-  /** Button the index tip is dwelling over (-1 = none). */
-  private dwellTarget = -1;
-  private dwellElapsed = 0;
-  private lastFrameTimestamp: number | null = null;
-  /** Latch: one pinch activates at most one button until it leaves the bar. */
-  private pinchLatched = false;
+  private readonly onShapeRequest: ((shape: S) => void) | null;
+  private readonly shapes: ReadonlyArray<OverlayShape<S>>;
+  private activeShapeId: S | null;
+  /** Finger press logic (dwell + pinch) shared by every overlay button. */
+  private readonly pointer: ButtonPointer;
+  /** Last laid-out buttons (CSS px) — hit targets for mouse + finger. */
+  private buttons: OverlayButton[] = [];
 
-  constructor(canvas: HTMLCanvasElement, options: DebugOverlayOptions = {}) {
+  constructor(canvas: HTMLCanvasElement, options: DebugOverlayOptions<S> = {}) {
     this.canvas = canvas;
     const ctx = canvas.getContext('2d');
     if (!ctx) throw new Error('DebugOverlay: 2D canvas context unavailable');
     this.ctx = ctx;
     this.connections = options.connections ?? HandLandmarker.HAND_CONNECTIONS;
     this.onModeRequest = options.onModeRequest ?? null;
-    this.dwellMs = options.dwellMs ?? 500;
+    this.onShapeRequest = options.onShapeRequest ?? null;
+    this.shapes = options.shapes ?? [];
+    this.activeShapeId = options.activeShape ?? this.shapes[0]?.id ?? null;
+    this.pointer = new ButtonPointer({ dwellMs: options.dwellMs });
     canvas.addEventListener('click', this.onCanvasClick);
     canvas.addEventListener('mousemove', this.onCanvasMouseMove);
   }
@@ -139,15 +164,24 @@ export class DebugOverlay {
     this.canvas.removeEventListener('mousemove', this.onCanvasMouseMove);
   }
 
-  /** Click anywhere inside a rendered mode button activates it. */
+  /** Highlighted shape in the CREATE-mode shape row. */
+  get activeShape(): S | null {
+    return this.activeShapeId;
+  }
+
+  /** Highlight a shape button (e.g. when the host changes the shape itself). */
+  setActiveShape(shape: S): void {
+    this.activeShapeId = shape;
+  }
+
+  /** Click anywhere inside a rendered button activates it. */
   private readonly onCanvasClick = (event: MouseEvent): void => {
-    const index = this.hitButton(event.offsetX, event.offsetY);
-    if (index >= 0) this.requestMode(index);
+    this.hitButton(event.offsetX, event.offsetY)?.activate();
   };
 
-  /** Pointer feedback while hovering the mode buttons. */
+  /** Pointer feedback while hovering the buttons. */
   private readonly onCanvasMouseMove = (event: MouseEvent): void => {
-    const hovering = this.hitButton(event.offsetX, event.offsetY) >= 0;
+    const hovering = this.hitButton(event.offsetX, event.offsetY) !== null;
     this.canvas.style.cursor = hovering ? 'pointer' : 'default';
   };
 
@@ -161,8 +195,9 @@ export class DebugOverlay {
     }
     this.drawDualHandsLink(frame, view, cssWidth);
     this.drawZoomAnchor(frame, view);
-    this.drawModeButtons(frame, cssWidth);
-    this.updateModeInteraction(frame, view);
+    this.layoutButtons(frame, cssWidth);
+    this.updateFingerInteraction(frame, view);
+    this.drawButtons(cssWidth);
     this.drawHud(frame, cssWidth, cssHeight);
   }
 
@@ -358,120 +393,126 @@ export class DebugOverlay {
   }
 
   /* ------------------------------------------------------------------ */
-  /* Mode switcher buttons (top edge of the overlay)                    */
+  /* Mode switcher + CREATE-mode shape row (top edge of the overlay)    */
   /* ------------------------------------------------------------------ */
 
-  /** CSS-pixel hit test against the last rendered mode buttons. */
-  private hitButton(px: number, py: number): number {
-    for (let i = 0; i < this.buttonRects.length; i++) {
-      const r = this.buttonRects[i];
-      if (px >= r.x && px <= r.x + r.width && py >= r.y && py <= r.y + r.height) return i;
+  /** CSS-pixel hit test against the last laid-out buttons. */
+  private hitButton(px: number, py: number): OverlayButton | null {
+    for (const b of this.buttons) {
+      if (px >= b.x && px <= b.x + b.width && py >= b.y && py <= b.y + b.height) return b;
     }
-    return -1;
-  }
-
-  private requestMode(index: number): void {
-    this.onModeRequest?.(MODE_BUTTONS[index]);
+    return null;
   }
 
   /**
-   * Finger interaction with the mode buttons: the index tip (landmark 8)
-   * dwelling over a button for `dwellMs` activates it; a pinch while the tip
-   * is over a button activates it immediately (latched once per pinch so the
-   * same pinch cannot scrub across buttons).
+   * Lay out this frame's buttons: the mode bar across the top edge and, in
+   * CREATE mode, a shorter shape row directly beneath it.
    */
-  private updateModeInteraction(frame: FrameEvent, view: ViewTransform): void {
-    let dwellTarget = -1;
-    let pinchTarget = -1;
-    for (const hand of frame.hands) {
-      const tip = this.toCanvas(hand, INDEX_TIP, view);
-      const index = this.hitButton(tip.x, tip.y);
-      if (index < 0) continue;
-      if (dwellTarget < 0) dwellTarget = index;
-      if (pinchTarget < 0 && hand.pinchActive) pinchTarget = index;
-    }
-
-    if (pinchTarget >= 0 && !this.pinchLatched) {
-      this.requestMode(pinchTarget);
-      this.pinchLatched = true;
-    }
-    if (pinchTarget < 0) this.pinchLatched = false;
-
-    // Dwell clock from frame timestamps; capped so a stalled camera feed
-    // cannot complete a dwell in one jump.
-    const dt =
-      this.lastFrameTimestamp === null
-        ? 0
-        : Math.max(0, Math.min(frame.timestamp - this.lastFrameTimestamp, 500));
-    this.lastFrameTimestamp = frame.timestamp;
-    if (dwellTarget !== this.dwellTarget) {
-      this.dwellTarget = dwellTarget;
-      this.dwellElapsed = 0;
-    } else if (dwellTarget >= 0 && dt > 0) {
-      this.dwellElapsed += dt;
-    }
-    if (this.dwellTarget >= 0 && this.dwellElapsed >= this.dwellMs) {
-      this.requestMode(this.dwellTarget);
-      this.dwellTarget = -1;
-      this.dwellElapsed = 0;
-    }
-  }
-
-  /**
-   * Boxy mode switcher across the top edge: three sharp-cornered, mutually
-   * exclusive toggle buttons. The active one is inverted — solid light fill,
-   * dark text, high-contrast indicator bar — while a dwell fills a progress
-   * bar along the bottom edge of the hovered button.
-   */
-  private drawModeButtons(frame: FrameEvent, cssWidth: number): void {
-    const ctx = this.ctx;
+  private layoutButtons(frame: FrameEvent, cssWidth: number): void {
     const scale = this.fontScale(cssWidth);
     const margin = Math.round(8 * scale);
     const gap = Math.round(6 * scale);
-    const height = Math.max(22, Math.round(32 * scale));
-    const width = (cssWidth - margin * 2 - gap * (MODE_BUTTONS.length - 1)) / MODE_BUTTONS.length;
+    const modeHeight = Math.max(22, Math.round(32 * scale));
+    const shapeHeight = Math.max(18, Math.round(26 * scale));
+    this.buttons = [];
 
-    this.buttonRects = [];
+    const row = (count: number, i: number) =>
+      margin + i * ((cssWidth - margin * 2 - gap * (count - 1)) / count + gap);
+    const rowWidth = (count: number) => (cssWidth - margin * 2 - gap * (count - 1)) / count;
+
+    MODE_BUTTONS.forEach((mode, i) => {
+      this.buttons.push({
+        key: `mode:${mode}`,
+        label: `[ ${mode.toUpperCase()} ]`,
+        active: frame.mode === mode,
+        x: row(MODE_BUTTONS.length, i),
+        y: margin,
+        width: rowWidth(MODE_BUTTONS.length),
+        height: modeHeight,
+        activate: () => this.onModeRequest?.(mode),
+      });
+    });
+
+    if (frame.mode !== 'create' || this.shapes.length === 0) return;
+    const y = margin + modeHeight + gap;
+    this.shapes.forEach((shape, i) => {
+      this.buttons.push({
+        key: `shape:${shape.id}`,
+        label: shape.label,
+        active: this.activeShapeId === shape.id,
+        x: row(this.shapes.length, i),
+        y,
+        width: rowWidth(this.shapes.length),
+        height: shapeHeight,
+        activate: () => {
+          this.activeShapeId = shape.id;
+          this.onShapeRequest?.(shape.id);
+        },
+      });
+    });
+  }
+
+  /**
+   * Finger interaction with the buttons (see `ButtonPointer`): the index tip
+   * (landmark 8) dwelling over a button for `dwellMs` activates it; a pinch
+   * while the tip is over a button activates it immediately.
+   */
+  private updateFingerInteraction(frame: FrameEvent, view: ViewTransform): void {
+    const samples = frame.hands.map((hand) => {
+      const tip = this.toCanvas(hand, INDEX_TIP, view);
+      return { target: this.hitButton(tip.x, tip.y)?.key ?? null, pinching: hand.pinchActive };
+    });
+    const activated = this.pointer.update(samples, frame.timestamp);
+    if (activated === null) return;
+    this.buttons.find((b) => b.key === activated)?.activate();
+  }
+
+  /**
+   * Boxy, sharp-cornered toggle buttons. The active one is inverted — solid
+   * light fill, dark text, high-contrast indicator bar — while a dwell fills
+   * a progress bar along the bottom edge of the hovered button.
+   */
+  private drawButtons(cssWidth: number): void {
+    const ctx = this.ctx;
+    const scale = this.fontScale(cssWidth);
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    MODE_BUTTONS.forEach((mode, i) => {
-      const x = margin + i * (width + gap);
-      this.buttonRects.push({ x, y: margin, width, height });
-      const label = `[ ${mode.toUpperCase()} ]`;
+    for (const b of this.buttons) {
+      const small = b.key.startsWith('shape:');
+      const { x, y, width, height } = b;
       // Shrink the label to fit the button.
-      let fontSize = Math.max(9, Math.round(13 * scale));
+      let fontSize = Math.max(8, Math.round((small ? 11 : 13) * scale));
       ctx.font = `bold ${fontSize}px ui-monospace, monospace`;
-      while (fontSize > 8 && ctx.measureText(label).width > width - 8) {
+      while (fontSize > 7 && ctx.measureText(b.label).width > width - 6) {
         fontSize -= 1;
         ctx.font = `bold ${fontSize}px ui-monospace, monospace`;
       }
 
-      const active = frame.mode === mode;
-      if (active) {
+      if (b.active) {
         ctx.fillStyle = '#f8fafc'; // solid inverted background
-        ctx.fillRect(x, margin, width, height);
+        ctx.fillRect(x, y, width, height);
         ctx.lineWidth = 2;
         ctx.strokeStyle = '#0f172a';
-        ctx.strokeRect(x + 1, margin + 1, width - 2, height - 2);
+        ctx.strokeRect(x + 1, y + 1, width - 2, height - 2);
         ctx.fillStyle = '#0284c7'; // high-contrast indicator bar
-        ctx.fillRect(x + 3, margin + height - 7, width - 6, 4);
+        ctx.fillRect(x + 3, y + height - (small ? 5 : 7), width - 6, small ? 3 : 4);
         ctx.fillStyle = '#0f172a';
       } else {
-        const dwelling = this.dwellTarget === i;
+        const dwelling = this.pointer.hovered === b.key;
         ctx.fillStyle = dwelling ? 'rgba(15, 23, 42, 0.85)' : 'rgba(15, 23, 42, 0.6)';
-        ctx.fillRect(x, margin, width, height);
+        ctx.fillRect(x, y, width, height);
         ctx.lineWidth = dwelling ? 2 : 1.5;
         ctx.strokeStyle = dwelling ? '#e2e8f0' : 'rgba(148, 163, 184, 0.55)';
-        ctx.strokeRect(x + 1, margin + 1, width - 2, height - 2);
-        if (dwelling && this.dwellMs > 0) {
-          const progress = Math.min(1, this.dwellElapsed / this.dwellMs);
+        ctx.strokeRect(x + 1, y + 1, width - 2, height - 2);
+        const progress = dwelling ? this.pointer.progress : 0;
+        if (progress > 0) {
           ctx.fillStyle = '#38bdf8';
-          ctx.fillRect(x + 2, margin + height - 5, (width - 4) * progress, 3);
+          ctx.fillRect(x + 2, y + height - 5, (width - 4) * progress, 3);
         }
         ctx.fillStyle = dwelling ? '#f8fafc' : '#cbd5e1';
       }
-      ctx.fillText(label, x + width / 2, margin + height / 2);
-    });
+      ctx.fillText(b.label, x + width / 2, y + height / 2);
+    }
     ctx.textAlign = 'left';
     ctx.textBaseline = 'alphabetic';
   }
