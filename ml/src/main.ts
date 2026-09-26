@@ -120,11 +120,11 @@ engine.on('zoom_start', (event) => {
   if (event.type === 'zoom_start') builder.commit();
 });
 
-// Camera move: one fist "grabs" the scene — the view follows the hand
-// (fist right = camera left, fist up = camera down), and rolling the wrist
-// (twisting the fist like a doorknob) turns the scene with the twist.
+// Camera move: one fist orbits the view around the locked origin (the camera
+// never pans) — the scene follows the hand, and rolling the wrist (twisting
+// the fist like a doorknob) turns the scene with the twist.
 engine.onOrbit((e) => {
-  cadScene.onPan({ deltaX: e.deltaX, deltaY: e.deltaY });
+  cadScene.onOrbit({ deltaX: e.deltaX, deltaY: e.deltaY });
   if (e.deltaRoll !== 0) cadScene.onRotate({ deltaAngle: e.deltaRoll });
 });
 
