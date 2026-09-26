@@ -4,9 +4,10 @@
  * Owns the WebGLRenderer, a PerspectiveCamera on a damped spherical orbit
  * rig, soft studio lighting (hemisphere + shadow-casting key light), a
  * shadow-catching floor and an "infinite" grid faded into the background by
- * fog. The only external control input is `onOrbit({ deltaX, deltaY })` with
- * device-space deltas, keeping this module fully decoupled from the vision
- * layer.
+ * fog. External control inputs are plain device-space data — `onPan({ deltaX, deltaY })`
+ * (truck the camera sideways / vertically), `onZoom({ deltaScale })` (dolly in / out) and
+ * `onOrbit({ deltaX, deltaY })` — keeping this module fully decoupled from the
+ * vision layer.
  */
 
 import * as THREE from 'three';
@@ -24,6 +25,14 @@ export interface CadSceneOptions {
   targetHeight?: number;
   /** Radians of orbit per device-space unit (hand travel). */
   orbitSpeed?: number;
+  /** World units of sideways pan per device-space unit, per unit of camera distance. */
+  panSpeed?: number;
+  /** Exponent applied to zoom ratios (higher = more zoom per hand movement). */
+  zoomSpeed?: number;
+  /** Closest allowed camera distance (world units). */
+  minDistance?: number;
+  /** Farthest allowed camera distance (world units). */
+  maxDistance?: number;
   /** Exponential damping rate for camera motion (higher = snappier). */
   damping?: number;
   /** Ground grid extent (world units). */
@@ -58,7 +67,11 @@ export class CadScene {
   readonly axes: THREE.Group;
 
   private readonly options: Required<CadSceneOptions>;
+  /** Current (smoothed) orbit target. */
   private readonly target = new THREE.Vector3();
+  /** Desired orbit target (driven by `onPan`). */
+  private readonly targetGoal = new THREE.Vector3();
+  private readonly panRight = new THREE.Vector3();
   /** Current (smoothed) camera spherical coordinates. */
   private readonly spherical = new THREE.Spherical();
   /** Desired camera spherical coordinates (driven by `onOrbit`). */
@@ -77,6 +90,10 @@ export class CadScene {
       cameraPolar: options.cameraPolar ?? 1.05,
       targetHeight: options.targetHeight ?? 0.5,
       orbitSpeed: options.orbitSpeed ?? 1.75,
+      panSpeed: options.panSpeed ?? 0.6,
+      zoomSpeed: options.zoomSpeed ?? 1.5,
+      minDistance: options.minDistance ?? 2,
+      maxDistance: options.maxDistance ?? 40,
       damping: options.damping ?? 9,
       gridSize: options.gridSize ?? 40,
       gridDivisions: options.gridDivisions ?? 40,
@@ -103,6 +120,7 @@ export class CadScene {
 
     this.camera = new THREE.PerspectiveCamera(50, 1, 0.1, 500);
     this.target.set(0, this.options.targetHeight, 0);
+    this.targetGoal.copy(this.target);
     this.spherical.set(
       this.options.cameraDistance,
       this.options.cameraPolar,
@@ -183,6 +201,35 @@ export class CadScene {
     );
   }
 
+  /**
+   * "Grab the scene" pan by a device-space delta (+X right, +Y up): the scene
+   * follows the hand, so the camera trucks the opposite way (hand right =
+   * camera left, hand up = camera down). Scales with camera distance so the
+   * pan feels the same when zoomed in or out. Motion is damped every frame.
+   */
+  onPan(delta: { deltaX: number; deltaY: number }): void {
+    const theta = this.sphericalTarget.theta;
+    const scale = this.options.panSpeed * this.sphericalTarget.radius;
+    // Camera right vector on the ground plane for azimuth `theta`.
+    this.panRight.set(Math.cos(theta), 0, -Math.sin(theta));
+    this.targetGoal.addScaledVector(this.panRight, -delta.deltaX * scale);
+    this.targetGoal.y -= delta.deltaY * scale;
+  }
+
+  /**
+   * Dolly the camera by a hand-distance ratio: `deltaScale > 1` (hands moving
+   * apart) moves closer (zoom in), `< 1` (hands closer) moves away (zoom out).
+   * Clamped to [minDistance, maxDistance].
+   */
+  onZoom(delta: { deltaScale: number }): void {
+    if (!(delta.deltaScale > 0) || !Number.isFinite(delta.deltaScale)) return;
+    this.sphericalTarget.radius = THREE.MathUtils.clamp(
+      this.sphericalTarget.radius / Math.pow(delta.deltaScale, this.options.zoomSpeed),
+      this.options.minDistance,
+      this.options.maxDistance
+    );
+  }
+
   /** Match the drawing buffer to the container size. */
   resize(): void {
     const container = this.renderer.domElement.parentElement;
@@ -218,6 +265,8 @@ export class CadScene {
     const blend = 1 - Math.exp(-this.options.damping * dt);
     this.spherical.theta += (this.sphericalTarget.theta - this.spherical.theta) * blend;
     this.spherical.phi += (this.sphericalTarget.phi - this.spherical.phi) * blend;
+    this.spherical.radius += (this.sphericalTarget.radius - this.spherical.radius) * blend;
+    this.target.lerp(this.targetGoal, blend);
     this.updateCameraPosition();
     this.renderer.render(this.scene, this.camera);
   };

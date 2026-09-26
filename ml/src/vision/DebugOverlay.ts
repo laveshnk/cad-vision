@@ -26,12 +26,13 @@ export interface SkeletonConnection {
   end: number;
 }
 
-/** State color-coding: green = pinch/draw, blue = orbit, yellow = idle. */
+/** State color-coding: green = pinch/draw, blue = orbit, purple = zoom, yellow = idle. */
 export const STATE_COLORS: Record<GestureState, string> = {
   IDLE: '#facc15', // yellow
   DRAWING_BASE: '#22c55e', // green
   EXTRUDING: '#f97316', // orange
   ORBITING: '#3b82f6', // blue
+  ZOOMING: '#a855f7', // purple
 };
 
 interface HandStyle {
@@ -44,6 +45,9 @@ interface HandStyle {
 function styleFor(hand: HandSnapshot, state: GestureState): HandStyle {
   if (hand.pinchActive || state === 'DRAWING_BASE' || state === 'EXTRUDING') {
     return { skeleton: '#22c55e', joint: '#86efac', jointFill: '#bbf7d0', label: '#22c55e' };
+  }
+  if (state === 'ZOOMING') {
+    return { skeleton: '#a855f7', joint: '#d8b4fe', jointFill: '#e9d5ff', label: '#a855f7' };
   }
   if (hand.fistActive || state === 'ORBITING') {
     return { skeleton: '#3b82f6', joint: '#93c5fd', jointFill: '#bfdbfe', label: '#3b82f6' };
@@ -274,6 +278,11 @@ export class DebugOverlay {
     if (frame.metrics.orbitDelta) {
       lines.push(
         `orbit Δ: (${frame.metrics.orbitDelta.x.toFixed(3)}, ${frame.metrics.orbitDelta.y.toFixed(3)})`
+      );
+    }
+    if (frame.metrics.zoomDistance !== null) {
+      lines.push(
+        `zoom D: ${frame.metrics.zoomDistance.toFixed(3)} ×${(frame.metrics.zoomScaleFactor ?? 1).toFixed(2)}`
       );
     }
 

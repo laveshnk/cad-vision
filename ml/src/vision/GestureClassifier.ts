@@ -2,10 +2,13 @@
  * GestureClassifier: deterministic gesture classification + finite state machine.
  *
  * Pipeline per frame (input = smoothed, normalized `HandFrame`s):
- *   1. Per-hand metric updates: pinch distance (EMA + hysteresis), fist
- *      detection (per-finger curl test + pinch guard), palm-center tracking.
+ *   1. Per-hand metric updates: hand shape (fold / thumb-tuck ratios), pinch
+ *      distance (EMA + hysteresis), fist detection (all fingers folded into
+ *      the palm + thumb tucked, with enter/hold hysteresis), palm center.
  *   2. Lost-hand finalization (grace frames, then synthetic release events).
- *   3. State machine: IDLE <-> DRAWING_BASE <-> EXTRUDING <-> ORBITING.
+ *   3. State machine: IDLE <-> DRAWING_BASE <-> EXTRUDING <-> ORBITING <-> ZOOMING.
+ *      One closed fist = ORBITING (camera navigation deltas); two closed
+ *      fists = ZOOMING (palm-center distance drives the camera zoom).
  *
  * The classifier is a pure function of its inputs: `process()` returns the
  * events to emit and never touches the DOM, which keeps it unit-testable.
@@ -13,6 +16,7 @@
 
 import { centroid, distance3, midpoint3, subtract3 } from './coordinates';
 import { EmaScalar } from './filters';
+import { measureHandShape, type HandShape } from './handShape';
 import type {
   ExtrudeMode,
   GestureMetrics,
@@ -36,20 +40,36 @@ export interface GestureClassifierOptions {
    */
   pinchDistanceSmoothing?: number | null;
   /**
-   * Fingertip-to-MCP proximity below which a finger counts as curled even
-   * when the tip-vs-PIP wrist comparison is inconclusive. Normalized units.
+   * A finger counts as folded into the palm when
+   * `dist(tip, wrist) < fistFoldRatio * dist(mcp, wrist)` — the fingertip
+   * rests on the palm, below its own knuckle. A claw / hook curl keeps the
+   * tip at or beyond the knuckle and fails this. Unitless ratio.
    */
-  fistCurlMcpDistance?: number;
+  fistFoldRatio?: number;
+  /** Folded fingers (of index / middle / ring / pinky) required to enter a fist. */
+  fistMinFoldedFingers?: number;
+  /**
+   * The thumb must be tucked: thumb-tip distance to the nearest index /
+   * middle / ring knuckle below `fistThumbTuckRatio * palmSize` (wrist →
+   * middle MCP). Rejects thumbs-up / splayed thumbs. `Infinity` disables it.
+   */
+  fistThumbTuckRatio?: number;
+  /**
+   * Hysteresis while a fist is held: ratio thresholds are relaxed by this
+   * amount and one finger may loosen, so a held fist does not flicker.
+   */
+  fistHoldSlack?: number;
   /**
    * Thumb-tip <-> index-tip distance below which the hand counts as
-   * pinching, which vetoes fist classification. Normalized units.
+   * pinching (with the index finger not folded), which vetoes a fist.
+   * Normalized units.
    */
   fistPinchGuardDistance?: number;
   /** Consecutive fist-positive frames required to engage the FIST state. */
   fistEnterFrames?: number;
   /** Consecutive non-fist frames required to leave the FIST state. */
   fistExitFrames?: number;
-  /** Frames an orbiting hand may open (palm drag) before the orbit ends. */
+  /** Frames an orbiting / zooming hand may open (palm drag) before the gesture ends. */
   orbitOpenPalmGraceFrames?: number;
   /** Frames a hand may vanish before its gesture state is finalized. */
   handLossGraceFrames?: number;
@@ -85,16 +105,8 @@ export interface ClassifierFrameResult {
 
 const THUMB_TIP = 4;
 const INDEX_TIP = 8;
-const WRIST = 0;
 /** Palm center landmarks: wrist + the four MCP joints. */
 const PALM_INDICES = [0, 5, 9, 13, 17];
-/** [fingertip, PIP, MCP] triples (index / middle / ring / pinky) for the fist test. */
-const FINGERS: ReadonlyArray<readonly [number, number, number]> = [
-  [8, 6, 5],
-  [12, 10, 9],
-  [16, 14, 13],
-  [20, 18, 17],
-];
 
 export class GestureClassifier {
   private readonly options: Required<
@@ -102,7 +114,10 @@ export class GestureClassifier {
       GestureClassifierOptions,
       | 'pinchStartThreshold'
       | 'pinchReleaseThreshold'
-      | 'fistCurlMcpDistance'
+      | 'fistFoldRatio'
+      | 'fistMinFoldedFingers'
+      | 'fistThumbTuckRatio'
+      | 'fistHoldSlack'
       | 'fistPinchGuardDistance'
       | 'fistEnterFrames'
       | 'fistExitFrames'
@@ -114,6 +129,11 @@ export class GestureClassifier {
   private state: GestureState = 'IDLE';
   private readonly tracks = new Map<Handedness, HandTrack>();
   private orbitHand: Handedness | null = null;
+
+  private zoomReferenceDistance: number | null = null;
+  private zoomPrevDistance: number | null = null;
+  private lastZoomDistance: number | null = null;
+  private lastZoomScale: number | null = null;
 
   private extrudeMode: ExtrudeMode | null = null;
   private extrudeReferenceDistance: number | null = null;
@@ -134,7 +154,10 @@ export class GestureClassifier {
       // `null` explicitly disables smoothing; `??` would swallow it.
       pinchDistanceSmoothing:
         options.pinchDistanceSmoothing !== undefined ? options.pinchDistanceSmoothing : 0.5,
-      fistCurlMcpDistance: options.fistCurlMcpDistance ?? 0.08,
+      fistFoldRatio: options.fistFoldRatio ?? 0.9,
+      fistMinFoldedFingers: options.fistMinFoldedFingers ?? 4,
+      fistThumbTuckRatio: options.fistThumbTuckRatio ?? 0.75,
+      fistHoldSlack: options.fistHoldSlack ?? 0.15,
       fistPinchGuardDistance: options.fistPinchGuardDistance ?? 0.07,
       fistEnterFrames: options.fistEnterFrames ?? 2,
       fistExitFrames: options.fistExitFrames ?? 2,
@@ -151,6 +174,7 @@ export class GestureClassifier {
     this.state = 'IDLE';
     this.tracks.clear();
     this.orbitHand = null;
+    this.clearZoomReference();
     this.extrudeMode = null;
     this.extrudeReferenceDistance = null;
     this.extrudePrevDistance = null;
@@ -209,8 +233,9 @@ export class GestureClassifier {
     for (const hand of presentHands.values()) {
       const track = this.getOrCreateTrack(hand);
       track.missedFrames = 0;
-      this.updatePinch(track, hand, timestamp, events);
-      this.updateFist(track, hand);
+      const shape = measureHandShape(hand);
+      this.updatePinch(track, hand, shape, timestamp, events);
+      this.updateFist(track, shape);
       this.updatePalmCenter(track, hand);
     }
 
@@ -241,10 +266,14 @@ export class GestureClassifier {
   /**
    * Pinch hysteresis on the smoothed thumb-tip <-> index-tip distance:
    * engage below `pinchStartThreshold`, release above `pinchReleaseThreshold`.
+   * A pinch never engages while the hand is (becoming) a fist or the index
+   * finger is folded into the palm — a thumb resting on a closed fist is not
+   * a pinch.
    */
   private updatePinch(
     track: HandTrack,
     hand: HandFrame,
+    shape: HandShape,
     timestamp: number,
     events: GestureSignalEvent[]
   ): void {
@@ -256,8 +285,13 @@ export class GestureClassifier {
 
     const center = midpoint3(thumb.device, index.device);
 
+    const fistLike =
+      track.fistActive ||
+      track.fistFrames > 0 ||
+      shape.foldRatios[0] < this.options.fistFoldRatio;
+
     if (!track.pinchActive) {
-      if (dist < this.options.pinchStartThreshold) {
+      if (dist < this.options.pinchStartThreshold && !fistLike) {
         track.pinchActive = true;
         track.pinchStartPos = center;
         track.lastPinchCenter = center;
@@ -290,40 +324,34 @@ export class GestureClassifier {
   }
 
   /**
-   * Fist detection: robust, angle-invariant per-finger curl test.
+   * Fist detection: a *real* closed fist, not just curled fingers.
    *
-   * A non-thumb finger is *curled* when either
-   *   1. `dist(tip, wrist) < dist(pip, wrist)` — the tip folds back toward
-   *      the wrist past its own PIP joint (a distance-ratio test that holds
-   *      regardless of camera angle or hand tilt), or
-   *   2. `dist(tip, mcp) < fistCurlMcpDistance` — the tip is physically
-   *      near its MCP joint (fully closed joint).
+   * Entering requires, on the same frame:
+   *   1. at least `fistMinFoldedFingers` (default all 4) fingers folded into
+   *      the palm: `dist(tip, wrist) < fistFoldRatio * dist(mcp, wrist)`.
+   *      Claw / hook curls and half-curls keep the tips at or beyond the
+   *      knuckles and fail this;
+   *   2. the thumb tucked over / alongside the fingers
+   *      (`thumbTuckRatio < fistThumbTuckRatio`) — rejects a thumbs-up;
+   *   3. not a pinch (thumb-index guard, only while the index is unfolded).
    *
-   * A fist is confirmed when at least 3 of the 4 non-thumb fingers are
-   * curled AND the hand is not pinching (thumb-tip to index-tip distance
-   * above `fistPinchGuardDistance`). Temporal debouncing prevents
-   * IDLE/ORBITING flicker.
+   * All tests are ratios within the hand (size / distance / rotation
+   * invariant). Once engaged, thresholds relax by `fistHoldSlack` and one
+   * finger may loosen, and frame debouncing (`fistEnterFrames` /
+   * `fistExitFrames`) prevents IDLE/ORBITING flicker.
    */
-  private updateFist(track: HandTrack, hand: HandFrame): void {
-    const wrist = hand.landmarks[WRIST].normalized;
-    let curledFingers = 0;
-    for (const [tip, pip, mcp] of FINGERS) {
-      const tipToWrist = distance3(hand.landmarks[tip].normalized, wrist);
-      const pipToWrist = distance3(hand.landmarks[pip].normalized, wrist);
-      const tipToMcp = distance3(
-        hand.landmarks[tip].normalized,
-        hand.landmarks[mcp].normalized
-      );
-      if (tipToWrist < pipToWrist || tipToMcp < this.options.fistCurlMcpDistance) {
-        curledFingers++;
-      }
-    }
-    const thumbIndexDistance = distance3(
-      hand.landmarks[THUMB_TIP].normalized,
-      hand.landmarks[INDEX_TIP].normalized
-    );
-    const isFist =
-      curledFingers >= 3 && thumbIndexDistance > this.options.fistPinchGuardDistance;
+  private updateFist(track: HandTrack, shape: HandShape): void {
+    const slack = track.fistActive ? this.options.fistHoldSlack : 0;
+    const foldLimit = this.options.fistFoldRatio + slack;
+    const minFolded = track.fistActive
+      ? Math.max(1, this.options.fistMinFoldedFingers - 1)
+      : this.options.fistMinFoldedFingers;
+    const folded = shape.foldRatios.filter((r) => r < foldLimit).length;
+    const thumbTucked = shape.thumbTuckRatio < this.options.fistThumbTuckRatio + slack;
+    const indexFolded = shape.foldRatios[0] < foldLimit;
+    const pinching =
+      !indexFolded && shape.thumbIndexDistance < this.options.fistPinchGuardDistance;
+    const isFist = folded >= minFolded && thumbTucked && !pinching;
 
     if (isFist) {
       track.fistFrames++;
@@ -370,6 +398,9 @@ export class GestureClassifier {
       events.push({ type: 'orbit_end', timestamp, hand: track.handedness });
       this.orbitHand = null;
       this.setState('IDLE', 'orbit hand lost', timestamp, events);
+    }
+    if (this.state === 'ZOOMING') {
+      this.endZoom('zoom hand lost', timestamp, events);
     }
   }
 
@@ -426,6 +457,11 @@ export class GestureClassifier {
       // Hand absent within the grace window: hold state, emit nothing.
     }
 
+    // --- ZOOMING: two fists; palm-center distance drives the zoom. ---
+    if (this.state === 'ZOOMING') {
+      this.handleZoom(presentHands, timestamp, events);
+    }
+
     // --- Pinch-driven states: DRAWING_BASE / EXTRUDING. ---
     if (activePinches.length >= 2) {
       this.handleDualHandExtrude(activePinches, presentHands, timestamp, events);
@@ -443,17 +479,99 @@ export class GestureClassifier {
       this.setState('IDLE', 'extrusion released', timestamp, events);
     }
 
-    // --- ORBITING engagement: only from IDLE with no active pinch. ---
-    if (this.state === 'IDLE' && activePinches.length === 0) {
-      const fistHand = [...presentHands.values()].find(
+    // --- Fist engagement: only with no active pinch. Two fists zoom (also
+    // upgrading a running single-fist orbit); one fist from IDLE orbits. ---
+    if (activePinches.length === 0 && (this.state === 'IDLE' || this.state === 'ORBITING')) {
+      const fistHands = [...presentHands.values()].filter(
         (h) => this.tracks.get(h.handedness)?.fistActive
       );
-      if (fistHand) {
-        this.orbitHand = fistHand.handedness;
+      if (fistHands.length >= 2) {
+        if (this.state === 'ORBITING' && this.orbitHand) {
+          events.push({ type: 'orbit_end', timestamp, hand: this.orbitHand });
+          this.orbitHand = null;
+        }
+        this.clearZoomReference();
+        this.setState('ZOOMING', 'two closed fists detected', timestamp, events);
+        events.push({ type: 'zoom_start', timestamp });
+        for (const track of this.tracks.values()) track.orbitOpenFrames = 0;
+        this.handleZoom(presentHands, timestamp, events);
+      } else if (fistHands.length === 1 && this.state === 'IDLE') {
+        this.orbitHand = fistHands[0].handedness;
         this.setState('ORBITING', 'closed fist detected', timestamp, events);
         events.push({ type: 'orbit_start', timestamp, hand: this.orbitHand });
       }
     }
+  }
+
+  /**
+   * Two-fist zoom: distance between the two palm centers (normalized space).
+   * Ends when a pinch starts, a hand is lost, or one hand stays open longer
+   * than `orbitOpenPalmGraceFrames`. The first frame (and the first frame
+   * after a hand reappears) only records the reference, so there is no jump.
+   */
+  private handleZoom(
+    presentHands: Map<Handedness, HandFrame>,
+    timestamp: number,
+    events: GestureSignalEvent[]
+  ): void {
+    const tracks = [...this.tracks.values()];
+    if (tracks.some((t) => t.pinchActive)) {
+      this.endZoom('pinch started while zooming', timestamp, events);
+      return;
+    }
+    if (tracks.length < 2) {
+      this.endZoom('zoom hand lost', timestamp, events);
+      return;
+    }
+    for (const track of tracks) {
+      if (!presentHands.has(track.handedness)) continue;
+      track.orbitOpenFrames = track.fistActive ? 0 : track.orbitOpenFrames + 1;
+      if (track.orbitOpenFrames > this.options.orbitOpenPalmGraceFrames) {
+        this.endZoom('zoom released (open palm)', timestamp, events);
+        return;
+      }
+    }
+
+    const present = [...presentHands.values()];
+    if (present.length < 2) {
+      // One hand absent within grace: hold state, re-reference on return.
+      this.zoomPrevDistance = null;
+      return;
+    }
+
+    const [a, b] = present;
+    const distance = distance3(
+      centroid(PALM_INDICES.map((i) => a.landmarks[i].normalized)),
+      centroid(PALM_INDICES.map((i) => b.landmarks[i].normalized))
+    );
+    if (distance <= 1e-6) return;
+    if (this.zoomReferenceDistance === null) this.zoomReferenceDistance = distance;
+    if (this.zoomPrevDistance === null) {
+      this.zoomPrevDistance = distance;
+      this.lastZoomDistance = distance;
+      this.lastZoomScale = distance / this.zoomReferenceDistance;
+      return;
+    }
+
+    const deltaScale = distance / this.zoomPrevDistance;
+    const scaleFactor = distance / this.zoomReferenceDistance;
+    this.zoomPrevDistance = distance;
+    this.lastZoomDistance = distance;
+    this.lastZoomScale = scaleFactor;
+    events.push({ type: 'zoom', timestamp, distance, scaleFactor, deltaScale });
+  }
+
+  private endZoom(reason: string, timestamp: number, events: GestureSignalEvent[]): void {
+    events.push({ type: 'zoom_end', timestamp });
+    this.clearZoomReference();
+    this.setState('IDLE', reason, timestamp, events);
+  }
+
+  private clearZoomReference(): void {
+    this.zoomReferenceDistance = null;
+    this.zoomPrevDistance = null;
+    this.lastZoomDistance = null;
+    this.lastZoomScale = null;
   }
 
   /**
@@ -631,6 +749,8 @@ export class GestureClassifier {
       extrusionDeltaDistance: this.lastExtrudeDelta,
       extrusionHeight: this.state === 'EXTRUDING' ? this.extrudeHeight : null,
       orbitDelta: this.lastOrbitDelta,
+      zoomDistance: this.state === 'ZOOMING' ? this.lastZoomDistance : null,
+      zoomScaleFactor: this.state === 'ZOOMING' ? this.lastZoomScale : null,
     };
   }
 }

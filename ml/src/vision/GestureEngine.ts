@@ -7,7 +7,7 @@
  *     -> HandednessStabilizer (label flicker / collision / mislabel correction)
  *     -> HandSmootherBank (EMA over all 21 landmarks, per-hand history)
  *     -> coordinate conditioning (normalized / pixel / device spaces)
- *     -> GestureClassifier (FSM: pinch/draw, extrude, orbit)
+ *     -> GestureClassifier (FSM: pinch/draw, extrude, orbit, zoom)
  *     -> listeners (typed `on(...)` + convenience subscriptions)
  *
  * Device space is mirrored X in [-1, 1] with +Y up — ready for CAD viewports.
@@ -30,6 +30,7 @@ import type {
   PinchEndEvent,
   PinchStartEvent,
   RawHand,
+  ZoomEvent,
   Unsubscribe,
 } from './types';
 
@@ -136,6 +137,11 @@ export class GestureEngine {
 
   onOrbit(listener: SignalListener<OrbitEvent>): Unsubscribe {
     return this.on('orbit', listener as GestureListener);
+  }
+
+  /** Two-fist zoom deltas (`deltaScale > 1` = fists apart, `< 1` = fists closer). */
+  onZoom(listener: SignalListener<ZoomEvent>): Unsubscribe {
+    return this.on('zoom', listener as GestureListener);
   }
 
   /* ------------------------------------------------------------------------ */

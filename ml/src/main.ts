@@ -51,9 +51,12 @@ const engine = new GestureEngine({
     pinchStartThreshold: 0.045,
     pinchReleaseThreshold: 0.065,
     pinchDistanceSmoothing: 0.5,
-    fistCurlMcpDistance: 0.08,
+    fistFoldRatio: 0.9,
+    fistMinFoldedFingers: 4,
+    fistThumbTuckRatio: 0.75,
+    fistHoldSlack: 0.15,
     fistPinchGuardDistance: 0.07,
-    fistEnterFrames: 2,
+    fistEnterFrames: 3,
     fistExitFrames: 2,
     orbitOpenPalmGraceFrames: 10,
     handLossGraceFrames: 3,
@@ -104,9 +107,16 @@ engine.on('extrude_end', (event) => {
 engine.on('orbit_start', (event) => {
   if (event.type === 'orbit_start') builder.commit();
 });
+engine.on('zoom_start', (event) => {
+  if (event.type === 'zoom_start') builder.commit();
+});
 
-// Camera orbit: fist + hand motion becomes damped camera deltas.
-engine.onOrbit((e) => cadScene.onOrbit({ deltaX: e.deltaX, deltaY: e.deltaY }));
+// Camera move: one fist "grabs" the scene — the view follows the hand
+// (fist right = camera left, fist up = camera down).
+engine.onOrbit((e) => cadScene.onPan({ deltaX: e.deltaX, deltaY: e.deltaY }));
+
+// Camera zoom: two fists — farther apart zooms in, closer together zooms out.
+engine.onZoom((e) => cadScene.onZoom({ deltaScale: e.deltaScale }));
 
 /* ---- Misc wiring ---- */
 

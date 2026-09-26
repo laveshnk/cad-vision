@@ -6,3 +6,5 @@ dist/
 # Reproducible via `npm run setup:assets` (postinstall)
 public/models/
 public/mediapipe/
+
+*.diff

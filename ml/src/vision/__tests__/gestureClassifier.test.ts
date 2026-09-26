@@ -17,7 +17,12 @@ const TEST_OPTIONS = {
 interface HandSpec {
   /** Thumb-tip <-> index-tip distance (normalized units). */
   pinchDist?: number;
+  /** Real closed fist: fingertips folded into the palm, thumb wrapped over. */
   fist?: boolean;
+  /** Claw / hook: fingers curled at PIP + DIP, knuckles straight (not a fist). */
+  hook?: boolean;
+  /** In a fist pose, stick the thumb up (thumbs-up — not a fist). */
+  thumbUp?: boolean;
   /** MCP indices (5 / 9 / 13 / 17) forced open in a fist pose (partial fist). */
   extend?: number[];
   /** Raw-frame offset applied to the whole hand. */
@@ -27,33 +32,53 @@ interface HandSpec {
 
 /**
  * Synthetic MediaPipe-style hand: a vertical hand anchored at the wrist with
- * four fingers + thumb. `pinchDist` controls the thumb-tip (4) / index-tip (8)
- * distance; `fist` curls all fingertips toward the wrist (unless listed in
- * `extend`, which keeps individual fingers open for partial-fist poses).
+ * four fingers + thumb (palm size wrist -> middle MCP = 0.08). `pinchDist`
+ * controls the thumb-tip (4) / index-tip (8) distance. `fist` folds each
+ * finger toward the camera (-z) and back so the tip rests on the palm below
+ * its knuckle (unless listed in `extend`); `hook` curls only the PIP / DIP
+ * joints so the tips stay out at knuckle height.
  */
 function makeHand(handedness: 'Left' | 'Right', spec: HandSpec = {}): HandFrame {
-  const { pinchDist = 0.2, fist = false, extend = [], dx = 0, dy = 0 } = spec;
+  const {
+    pinchDist = 0.2,
+    fist = false,
+    hook = false,
+    thumbUp = false,
+    extend = [],
+    dx = 0,
+    dy = 0,
+  } = spec;
   const wx = 0.5 + dx;
   const wy = 0.62 + dy;
   const lm: RawLandmark[] = Array.from({ length: 21 }, () => ({ x: wx, y: wy, z: 0 }));
   lm[0] = { x: wx, y: wy, z: 0 }; // wrist
   const mcpXs = [-0.03, -0.01, 0.01, 0.03];
   [5, 9, 13, 17].forEach((mcp, i) => {
-    const curled = fist && !extend.includes(mcp);
-    lm[mcp] = { x: wx + mcpXs[i], y: wy - 0.08, z: 0 };
-    lm[mcp + 1] = { x: wx + mcpXs[i], y: wy - 0.12, z: 0 }; // PIP
-    lm[mcp + 2] = { x: wx + mcpXs[i], y: wy - 0.14, z: 0 }; // DIP
-    const tipY = curled ? wy - 0.05 : wy - 0.18;
-    lm[mcp + 3] = { x: wx + mcpXs[i], y: tipY, z: 0 }; // fingertip
+    const x = wx + mcpXs[i];
+    lm[mcp] = { x, y: wy - 0.08, z: 0 };
+    if (fist && !extend.includes(mcp)) {
+      lm[mcp + 1] = { x, y: wy - 0.1, z: -0.03 }; // PIP (knuckle bent toward camera)
+      lm[mcp + 2] = { x, y: wy - 0.07, z: -0.045 }; // DIP
+      lm[mcp + 3] = { x, y: wy - 0.045, z: -0.03 }; // tip on the palm
+    } else if (hook) {
+      lm[mcp + 1] = { x, y: wy - 0.12, z: 0 }; // PIP (knuckle straight)
+      lm[mcp + 2] = { x, y: wy - 0.12, z: -0.025 }; // DIP
+      lm[mcp + 3] = { x, y: wy - 0.105, z: -0.04 }; // tip out at knuckle height
+    } else {
+      lm[mcp + 1] = { x, y: wy - 0.12, z: 0 }; // PIP
+      lm[mcp + 2] = { x, y: wy - 0.14, z: 0 }; // DIP
+      lm[mcp + 3] = { x, y: wy - 0.18, z: 0 }; // fingertip
+    }
   });
   lm[1] = { x: wx - 0.03, y: wy - 0.02, z: 0 };
   lm[2] = { x: wx - 0.05, y: wy - 0.05, z: 0 };
   lm[3] = { x: wx - 0.06, y: wy - 0.08, z: 0 };
-  if (fist) {
-    // Thumb wrapped over the knuckles, clear of the index tip so the pose is
-    // a fist and not a pinch (dist(4, 8) ≈ 0.102 > fistPinchGuardDistance).
-    lm[4] = { x: wx - 0.09, y: wy - 0.03, z: 0 };
-    if (!extend.includes(5)) lm[8] = { x: wx + 0.01, y: wy - 0.05, z: 0 };
+  if (hook) {
+    lm[4] = { x: wx - 0.08, y: wy - 0.09, z: 0 }; // relaxed thumb out to the side
+  } else if (fist) {
+    lm[4] = thumbUp
+      ? { x: wx - 0.06, y: wy - 0.2, z: 0 } // thumbs-up
+      : { x: wx - 0.01, y: wy - 0.085, z: -0.06 }; // wrapped over the knuckles
   } else {
     // Thumb tip / index tip symmetric around (wx, wy - 0.10).
     lm[4] = { x: wx - pinchDist / 2, y: wy - 0.1, z: 0 };
@@ -167,15 +192,191 @@ describe('GestureClassifier — fist / orbit', () => {
   });
 });
 
-describe('GestureClassifier — robust fist detection', () => {
-  it('detects a fist with one finger still extended (3 of 4 curled)', () => {
+describe('GestureClassifier — single-fist camera move', () => {
+  it('reports rightward fist motion as a positive device deltaX', () => {
     const classifier = new GestureClassifier(TEST_OPTIONS);
     let t = 0;
-    const result = classifier.process(
-      [makeHand('Right', { fist: true, extend: [13] })],
+    classifier.process([makeHand('Right', { fist: true })], (t += 100));
+    // Raw -x is device +x (mirrored selfie view): the hand moved right on screen.
+    const result = classifier.process([makeHand('Right', { fist: true, dx: -0.05 })], (t += 100));
+    const move = result.events.find((e) => e.type === 'orbit');
+    expect(move?.type === 'orbit' && move.deltaX).toBeCloseTo(0.1);
+  });
+});
+
+describe('GestureClassifier — two-fist zoom', () => {
+  it('enters ZOOMING with two fists and reports closer hands as deltaScale < 1', () => {
+    const classifier = new GestureClassifier(TEST_OPTIONS);
+    let t = 0;
+    let result = classifier.process(
+      [makeHand('Left', { fist: true, dx: -0.2 }), makeHand('Right', { fist: true, dx: 0.2 })],
       (t += 100)
     );
+    expect(typesOf(result.events)).toEqual(['state_change', 'zoom_start']);
+    expect(classifier.currentState).toBe('ZOOMING');
+
+    // Fists move closer: 0.4 -> 0.2 apart (zoom in).
+    result = classifier.process(
+      [makeHand('Left', { fist: true, dx: -0.1 }), makeHand('Right', { fist: true, dx: 0.1 })],
+      (t += 100)
+    );
+    const zoomIn = result.events.find((e) => e.type === 'zoom');
+    expect(zoomIn?.type).toBe('zoom');
+    if (zoomIn?.type === 'zoom') {
+      expect(zoomIn.distance).toBeCloseTo(0.2);
+      expect(zoomIn.deltaScale).toBeCloseTo(0.5);
+      expect(zoomIn.scaleFactor).toBeCloseTo(0.5);
+    }
+    expect(result.metrics.zoomScaleFactor).toBeCloseTo(0.5);
+
+    // Fists move apart: 0.2 -> 0.3 (zoom out).
+    result = classifier.process(
+      [makeHand('Left', { fist: true, dx: -0.15 }), makeHand('Right', { fist: true, dx: 0.15 })],
+      (t += 100)
+    );
+    const zoomOut = result.events.find((e) => e.type === 'zoom');
+    if (zoomOut?.type === 'zoom') expect(zoomOut.deltaScale).toBeCloseTo(1.5);
+    expect(typesOf(result.events)).not.toContain('orbit');
+  });
+
+  it('upgrades a single-fist move to a zoom when the second fist closes', () => {
+    const classifier = new GestureClassifier(TEST_OPTIONS);
+    let t = 0;
+    classifier.process(
+      [makeHand('Left', { dx: -0.2 }), makeHand('Right', { fist: true, dx: 0.2 })],
+      (t += 100)
+    );
+    expect(classifier.currentState).toBe('ORBITING');
+    const result = classifier.process(
+      [makeHand('Left', { fist: true, dx: -0.2 }), makeHand('Right', { fist: true, dx: 0.2 })],
+      (t += 100)
+    );
+    const types = typesOf(result.events);
+    expect(types).toContain('orbit_end');
+    expect(types).toContain('zoom_start');
+    expect(types.indexOf('orbit_end')).toBeLessThan(types.indexOf('zoom_start'));
+    expect(classifier.currentState).toBe('ZOOMING');
+  });
+
+  it('falls back to a single-fist move when one hand opens past the grace window', () => {
+    const classifier = new GestureClassifier(TEST_OPTIONS);
+    let t = 0;
+    const bothFists = () => [
+      makeHand('Left', { fist: true, dx: -0.2 }),
+      makeHand('Right', { fist: true, dx: 0.2 }),
+    ];
+    const leftOpen = () => [makeHand('Left', { dx: -0.2 }), makeHand('Right', { fist: true, dx: 0.2 })];
+    classifier.process(bothFists(), (t += 100));
+    for (let i = 0; i < 3; i++) classifier.process(leftOpen(), (t += 100));
+    expect(classifier.currentState).toBe('ZOOMING');
+    const result = classifier.process(leftOpen(), (t += 100));
+    expect(typesOf(result.events)).toEqual([
+      'zoom_end',
+      'state_change',
+      'state_change',
+      'orbit_start',
+    ]);
+    expect(classifier.currentState).toBe('ORBITING');
+  });
+
+  it('ends the zoom when a zooming hand is lost', () => {
+    const classifier = new GestureClassifier(TEST_OPTIONS);
+    let t = 0;
+    classifier.process(
+      [makeHand('Left', { fist: true, dx: -0.2 }), makeHand('Right', { fist: true, dx: 0.2 })],
+      (t += 100)
+    );
+    // Right hand absent within grace: hold, no zoom deltas.
+    for (let i = 0; i < 3; i++) {
+      const held = classifier.process([makeHand('Left', { fist: true, dx: -0.2 })], (t += 100));
+      expect(typesOf(held.events)).not.toContain('zoom');
+      expect(classifier.currentState).toBe('ZOOMING');
+    }
+    const result = classifier.process([makeHand('Left', { fist: true, dx: -0.2 })], (t += 100));
+    expect(typesOf(result.events)).toContain('zoom_end');
+    expect(classifier.currentState).toBe('ORBITING');
+  });
+
+  it('lets a pinch end the zoom', () => {
+    const classifier = new GestureClassifier(TEST_OPTIONS);
+    let t = 0;
+    classifier.process(
+      [makeHand('Left', { fist: true, dx: -0.2 }), makeHand('Right', { fist: true, dx: 0.2 })],
+      (t += 100)
+    );
+    const pinching = () => [
+      makeHand('Left', { fist: true, dx: -0.2 }),
+      makeHand('Right', { pinchDist: 0.03, dx: 0.2 }),
+    ];
+    // First open frame releases the fist (a pinch never engages from a fist)…
+    let result = classifier.process(pinching(), (t += 100));
+    expect(typesOf(result.events)).not.toContain('pinch_start');
+    // …then the pinch engages and wins over the zoom.
+    result = classifier.process(pinching(), (t += 100));
+    expect(typesOf(result.events)).toContain('zoom_end');
+    expect(classifier.currentState).toBe('DRAWING_BASE');
+  });
+});
+
+describe('GestureClassifier — robust fist detection', () => {
+  it('detects a real fist: all fingertips folded into the palm, thumb wrapped', () => {
+    const classifier = new GestureClassifier(TEST_OPTIONS);
+    const result = classifier.process([makeHand('Right', { fist: true })], 100);
     expect(typesOf(result.events)).toEqual(['state_change', 'orbit_start']);
+    expect(result.snapshots[0].fistActive).toBe(true);
+  });
+
+  it('rejects a claw / hook curl (tips stay out at knuckle height)', () => {
+    const classifier = new GestureClassifier(TEST_OPTIONS);
+    let t = 0;
+    for (let i = 0; i < 5; i++) {
+      const result = classifier.process([makeHand('Right', { hook: true })], (t += 100));
+      expect(result.snapshots[0].fistActive).toBe(false);
+    }
+    expect(classifier.currentState).toBe('IDLE');
+  });
+
+  it('rejects a thumbs-up (fingers folded, thumb not tucked)', () => {
+    const classifier = new GestureClassifier(TEST_OPTIONS);
+    let t = 0;
+    for (let i = 0; i < 5; i++) {
+      const result = classifier.process(
+        [makeHand('Right', { fist: true, thumbUp: true })],
+        (t += 100)
+      );
+      expect(result.snapshots[0].fistActive).toBe(false);
+    }
+    expect(classifier.currentState).toBe('IDLE');
+  });
+
+  it('does not enter a fist with one finger still extended (3 of 4 folded)', () => {
+    const classifier = new GestureClassifier(TEST_OPTIONS);
+    let t = 0;
+    for (let i = 0; i < 5; i++) {
+      classifier.process([makeHand('Right', { fist: true, extend: [13] })], (t += 100));
+    }
+    expect(classifier.currentState).toBe('IDLE');
+  });
+
+  it('holds an engaged fist when one finger loosens (hold hysteresis)', () => {
+    const classifier = new GestureClassifier(TEST_OPTIONS);
+    let t = 0;
+    classifier.process([makeHand('Right', { fist: true })], (t += 100));
+    expect(classifier.currentState).toBe('ORBITING');
+    for (let i = 0; i < 5; i++) {
+      const result = classifier.process(
+        [makeHand('Right', { fist: true, extend: [13] })],
+        (t += 100)
+      );
+      expect(result.snapshots[0].fistActive).toBe(true);
+    }
+    expect(classifier.currentState).toBe('ORBITING');
+  });
+
+  it('never starts a pinch from a closed fist (thumb resting on the knuckles)', () => {
+    const classifier = new GestureClassifier({ ...TEST_OPTIONS, pinchStartThreshold: 0.2 });
+    const result = classifier.process([makeHand('Right', { fist: true })], 100);
+    expect(typesOf(result.events)).not.toContain('pinch_start');
     expect(classifier.currentState).toBe('ORBITING');
   });
 

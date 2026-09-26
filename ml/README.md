@@ -2,7 +2,7 @@
 
 Self-contained TypeScript application that turns webcam hand tracking into an
 interactive CAD tool. The MediaPipe-based gesture engine emits **normalized CAD
-gesture events** (pinch/draw, extrude, orbit); a decoupled Three.js module
+gesture events** (pinch/draw, extrude, camera move, zoom); a decoupled Three.js module
 (orbit rig, ground-plane building, STL export) and a glassmorphism toolbar
 consume them. The camera renders as a floating video-call-style thumbnail
 (landmarks, skeleton, HUD overlay) over the full-bleed 3D viewport.
@@ -41,7 +41,8 @@ src/
     ├── filters.ts             # EMA / One-Euro, LandmarkSmoother, HandSmootherBank
     ├── HandTracker.ts         # webcam + MediaPipe HandLandmarker
     ├── HandednessStabilizer.ts # temporal + geometric Left/Right label stabilization
-    ├── GestureClassifier.ts   # pinch/fist/orbit detection + finite state machine
+    ├── handShape.ts           # fold / thumb-tuck ratios for real-fist detection
+    ├── GestureClassifier.ts   # pinch/fist/orbit/zoom detection + finite state machine
     ├── GestureEngine.ts       # facade: pipeline + event emitter
     ├── DebugOverlay.ts        # 2D canvas renderer (landmarks, skeleton, HUD)
     └── index.ts               # public API barrel
@@ -54,7 +55,7 @@ HandTracker (raw MediaPipe hands)
   → HandednessStabilizer  Left/Right label votes + chirality, flicker/collision-proof
   → HandSmootherBank     EMA over all 21 landmarks, per-hand identity
   → coordinates          normalized / pixel / device spaces
-  → GestureClassifier    FSM: IDLE | DRAWING_BASE | EXTRUDING | ORBITING
+  → GestureClassifier    FSM: IDLE | DRAWING_BASE | EXTRUDING | ORBITING | ZOOMING
   → listeners            typed events + per-frame debug event
 ```
 
@@ -100,11 +101,13 @@ hands on the mirrored preview.
 | **Pinch / draw** | 3D Euclidean distance between landmarks 4 (thumb tip) and 8 (index tip); trigger `< 0.045`, hysteresis release `> 0.065` (both configurable) | `pinch_start`, `pinch_drag` (position, delta in device space), `pinch_end` |
 | **Extrude (dual-hand)** | both hands pinch; pull distance `D` between pinch centers `center = (P_thumb + P_index) / 2` | `extrude_start`, `extrude` (`distance`, `scaleFactor = D / D₀`, `deltaDistance`), `extrude_end` |
 | **Extrude (single-hand)** | while EXTRUDING with one pinch: vertical drag of landmark 8 | `extrude` (`deltaHeight`, `cumulativeHeight`, +Y up) |
-| **Orbit** | closed fist — per-finger curl test: fingertip closer to the wrist than its own PIP joint, or tip within 0.08 of its MCP (≥ 3 of 4 non-thumb fingers curled) and not pinching (thumb-index distance > 0.07); needs 2 consecutive frames, only engaged from IDLE with no active pinch | `orbit_start`, `orbit` (`deltaX`, `deltaY` device units), `orbit_end` |
+| **Camera move (one fist)** | a *real* closed fist, not just curled fingers (`handShape.ts`): all 4 fingertips folded into the palm — `dist(tip, wrist) < 0.9 · dist(MCP, wrist)`, which rejects claw / hook curls and half-curls — and the thumb tucked over the fingers (thumb tip within 0.75 × palm size of an index / middle / ring knuckle, rejecting a thumbs-up); all ratios, so size / distance / rotation invariant. Needs 3 consecutive frames (app default); once held, thresholds relax by `fistHoldSlack` and one finger may loosen. Only engaged from IDLE with no active pinch, and a pinch never engages from a fist. Palm-center motion is reported as deltas; the app pans the view so the scene follows the fist (fist right → camera left, fist up → camera down) | `orbit_start`, `orbit` (`deltaX`, `deltaY` device units), `orbit_end` |
+| **Zoom (two fists)** | both hands closed fists (same test); distance `D` between the two palm centers. Fists farther apart → zoom in, closer together → zoom out. Engaged from IDLE, or upgraded from a one-fist move when the second fist closes; ends on a pinch, a lost hand, or one hand open longer than `orbitOpenPalmGraceFrames` (then falls back to a one-fist move if the other fist is still closed) | `zoom_start`, `zoom` (`distance`, `scaleFactor = D / D₀`, `deltaScale = D / D_prev`), `zoom_end` |
 
-Finite state machine: `IDLE ↔ DRAWING_BASE ↔ EXTRUDING ↔ ORBITING`. Pinch
-always wins over orbit; a lost hand finalizes its gesture after a small grace
-window (synthetic `pinch_end` / `orbit_end`) so states never get stuck.
+Finite state machine: `IDLE ↔ DRAWING_BASE ↔ EXTRUDING ↔ ORBITING ↔ ZOOMING`.
+Pinch always wins over fist gestures; a lost hand finalizes its gesture after a
+small grace window (synthetic `pinch_end` / `orbit_end` / `zoom_end`) so
+states never get stuck.
 
 Smoothing: EMA over all 21 landmarks (`alpha = 0.35` by default, or the
 One-Euro filter via `strategy: 'one-euro'`). The `HandSmootherBank` keeps one
@@ -139,8 +142,12 @@ as a floating thumbnail (top-left, click ⤢ to expand/collapse) over it:
 3. **Commit** — releasing the extrude gesture (or engaging a fist / open
    palm) freezes the preview into a solid matte mesh with crisp
    `EdgesGeometry` outlines.
-4. **Orbit** — closed fist and move: the camera rig orbits with damping;
-   open palm stops.
+4. **Move the camera** — make a fist and move it: the scene follows your
+   hand ("grab and drag") — fist right moves the camera left, fist up moves
+   it down — with damping (`CadScene.onPan`); open palm stops.
+5. **Zoom** — make fists with both hands: pull them apart to zoom in, bring
+   them closer together to zoom out (`CadScene.onZoom`, clamped between
+   `minDistance` and `maxDistance`).
 
 Toolbar (mouse or programmatic): **Start camera / Stop** (webcam + tracking
 lifecycle), **Box / Cylinder / Sphere** tool selection (swaps the in-progress
@@ -165,7 +172,8 @@ engine.onPinchStart((e) => { /* e.position (device), e.distance */ });
 engine.onPinchDrag((e) => { /* e.currentPos, e.delta, e.startPos */ });
 engine.onPinchEnd((e) => { /* e.endPos, e.delta */ });
 engine.onExtrude((e) => { /* e.mode, e.scaleFactor | e.deltaHeight */ });
-engine.onOrbit((e) => { /* e.deltaX, e.deltaY */ });
+engine.onOrbit((e) => { /* e.deltaX, e.deltaY (one fist) */ });
+engine.onZoom((e) => { /* e.deltaScale, e.scaleFactor, e.distance (two fists) */ });
 
 // Debug overlay / HUD data (fires once per processed frame):
 engine.on('frame', (frame) => { /* state, hands, metrics, fps */ });
@@ -189,15 +197,17 @@ on-screen view), +Y up — ready to map into a CAD viewport.
   `reentryFrames` (10) for Left/Right label stabilization.
 - `smoothing` — `HandSmootherBankOptions`: `strategy: 'ema' | 'one-euro'`,
   `alpha` (default 0.35), teleport/stale-history thresholds.
-- `classifier` — `GestureClassifierOptions`: pinch thresholds, fist curl/guard distances
-  & debounce frames, orbit open-palm grace, hand-loss grace frames.
+- `classifier` — `GestureClassifierOptions`: pinch thresholds, fist shape
+  (`fistFoldRatio` 0.9, `fistMinFoldedFingers` 4, `fistThumbTuckRatio` 0.75,
+  `fistHoldSlack` 0.15, `fistPinchGuardDistance`) & debounce frames, orbit open-palm grace, hand-loss grace frames.
 
 ## Debug overlay
 
 The `<canvas id="overlay">` (pure Canvas 2D) mirrors the feed and draws:
 
 - all 21 landmarks per hand + MediaPipe skeleton connections,
-- state color-coding: **green** = pinch/draw, **blue** = orbit, **yellow** = idle
+- state color-coding: **green** = pinch/draw, **blue** = one-fist move,
+  **purple** = two-fist zoom, **yellow** = idle
   (orange for EXTRUDING),
 - thumb↔index pinch line with live distance, dual-hand extrusion link with
   `D` and scale factor,

@@ -56,7 +56,7 @@ export interface HandFrame {
 }
 
 /** High-level CAD gesture state driven by the classifier's finite state machine. */
-export type GestureState = 'IDLE' | 'DRAWING_BASE' | 'EXTRUDING' | 'ORBITING';
+export type GestureState = 'IDLE' | 'DRAWING_BASE' | 'EXTRUDING' | 'ORBITING' | 'ZOOMING';
 
 export interface PinchStartEvent {
   type: 'pinch_start';
@@ -138,7 +138,7 @@ export interface OrbitStartEvent {
   hand: Handedness;
 }
 
-/** Camera orbit/navigation delta, in device space units. */
+/** Single-fist camera navigation delta, in device space units. */
 export interface OrbitEvent {
   type: 'orbit';
   timestamp: number;
@@ -151,6 +151,31 @@ export interface OrbitEndEvent {
   type: 'orbit_end';
   timestamp: number;
   hand: Handedness;
+}
+
+export interface ZoomStartEvent {
+  type: 'zoom_start';
+  timestamp: number;
+}
+
+/**
+ * Two-fist camera zoom. `distance` is the gap between the two palm centers
+ * (normalized units); the app zooms in as the fists move apart, out as they close.
+ */
+export interface ZoomEvent {
+  type: 'zoom';
+  timestamp: number;
+  /** Current distance between the two palm centers (normalized units). */
+  distance: number;
+  /** `distance / distance_at_zoom_start` — cumulative ratio. */
+  scaleFactor: number;
+  /** `distance / distance_prev_frame` — per-frame ratio (< 1 = fists closer, > 1 = fists apart). */
+  deltaScale: number;
+}
+
+export interface ZoomEndEvent {
+  type: 'zoom_end';
+  timestamp: number;
 }
 
 export interface StateChangeEvent {
@@ -180,6 +205,10 @@ export interface GestureMetrics {
   extrusionDeltaDistance: number | null;
   extrusionHeight: number | null;
   orbitDelta: Vec2 | null;
+  /** Palm-center distance while ZOOMING (normalized units). */
+  zoomDistance: number | null;
+  /** Cumulative zoom ratio (`distance / distance_at_zoom_start`) while ZOOMING. */
+  zoomScaleFactor: number | null;
 }
 
 /** Emitted once per processed camera frame (used by the 2D debug overlay). */
@@ -204,6 +233,9 @@ export type GestureSignalEvent =
   | OrbitStartEvent
   | OrbitEvent
   | OrbitEndEvent
+  | ZoomStartEvent
+  | ZoomEvent
+  | ZoomEndEvent
   | StateChangeEvent;
 
 /** Every event the engine can emit. */

@@ -277,6 +277,11 @@ button:disabled {
   box-shadow: 0 0 8px rgba(59, 130, 246, 0.6);
 }
 
+.status[data-state='ZOOMING']::before {
+  background: #a855f7;
+  box-shadow: 0 0 8px rgba(168, 85, 247, 0.6);
+}
+
 /* ---- CAD viewport (Three.js canvas fills the panel) ---- */
 .viewport {
   position: relative;
