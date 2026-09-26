@@ -97,8 +97,21 @@ are swapped by default (`swapHandedness: true`) to match the mirrored preview.
 ### Gesture thresholds (defaults, all configurable)
 
 - Pinch: engage < 0.045, release > 0.065 (thumb tip ↔ index tip, 3D distance).
-- Fist/orbit: ≥ 3 of 4 non-thumb fingers curled (tip-to-wrist < pip-to-wrist or
-  tip-to-MCP < 0.08), thumb-index > 0.07 guard, 2-frame debounce, IDLE only.
+- Fist (one = camera move, two = zoom): a real fist — all 4 fingertips folded
+  into the palm (tip-to-wrist < 0.9 × MCP-to-wrist) and thumb tucked (tip within
+  0.75 × palm size of an index/middle/ring knuckle); looser while held
+  (`fistHoldSlack`, one finger may loosen), 3-frame debounce in the app, IDLE only.
+  A pinch never engages from a fist. Geometry lives in `vision/handShape.ts`.
+- One-fist wrist roll (knuckle line rotating around wrist → middle MCP) →
+  `orbit.deltaRoll` (radians) after a 0.15 rad engage threshold per fist →
+  `CadScene.onRotate` turns the scene around the vertical axis.
+- Two fists: steadier fist = anchor/pivot (speed EMA, switch at 0.5× ratio);
+  only the moving fist relative to it counts → `zoom.deltaScale` (distance) and
+  `zoom.deltaAngle` (sweep around the anchor, 0.12 rad engage).
+- Camera moves are deliberately *not* live: one-fist pan deltas go through
+  `vision/PathStraightener.ts` (straight segments, averaged heading, corner at
+  0.05 sideways drift, 0.004 deadband) and `CadScene` damping is gentle (5) to
+  avoid motion sickness. Pinch / extrude (building) stays live and unfiltered.
 - Pinch always wins over orbit; lost hands emit synthetic `*_end` after a
   3-frame grace so the FSM never sticks.
 
