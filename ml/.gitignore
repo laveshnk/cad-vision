@@ -1,0 +1,8 @@
+node_modules/
+dist/
+*.local
+.DS_Store
+
+# Reproducible via `npm run setup:assets` (postinstall)
+public/models/
+public/mediapipe/

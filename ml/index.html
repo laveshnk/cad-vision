@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CAD Vision — Gesture-Driven CAD</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <!-- Top toolbar: primitive tools + scene utilities (mounted by src/ui/Toolbar.ts) -->
+      <header id="toolbar"></header>
+
+      <main id="workspace" class="workspace">
+        <!-- 3D CAD viewport fills the entire workspace (Three.js) -->
+        <section id="cad-panel" class="panel">
+          <div id="viewport" class="viewport"></div>
+        </section>
+
+        <!-- Floating camera thumbnail (video-call style PiP):
+             webcam feed + 2D gesture debug overlay, expandable on click -->
+        <aside id="vision-thumb" class="vision-thumb">
+          <div id="stage" class="stage">
+            <video id="video" playsinline muted autoplay></video>
+            <!-- 2D canvas overlay: landmarks, skeleton + HUD. No WebGL. -->
+            <canvas id="overlay"></canvas>
+          </div>
+          <div class="vision-thumb-header">
+            <span id="status" class="status">Idle</span>
+            <button
+              id="thumb-expand"
+              type="button"
+              title="Expand camera thumbnail"
+              aria-label="Expand camera thumbnail"
+            >
+              ⤢
+            </button>
+          </div>
+        </aside>
+      </main>
+
+      <footer class="footer">
+        <p>
+          Pinch (thumb + index) and drag on the grid to draw a base, release, then pinch with
+          both hands and pull apart (or drag up with one pinching hand) to extrude. A closed
+          fist orbits the camera; open palm stops. Committed meshes export as
+          <code>model.stl</code>. Gesture events are logged to the console as JSON.
+        </p>
+      </footer>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
