@@ -57,6 +57,12 @@
  *                          mesh to an anchored angle + d, with a compass
  *                          ring (circle + yaw needle) rendered around it in
  *                          the 3D viewport and the AR mirror.
+ *   setSelectedColor(h)   → live-repaint the selected mesh's body material
+ *                          from a `#rgb` / `#rrggbb` hex string (SELECT-mode
+ *                          color wheel; the selection highlight is kept).
+ *   selectedProjection()  → the selected mesh's center projected onto a
+ *                          width × height canvas (CSS px) so the host can
+ *                          anchor selection-adjacent UI (the color wheel).
  *   endDrag() / deselect() → finish the drag / clear the selection.
  */
 
@@ -607,6 +613,41 @@ export class CadBuilder {
     };
   }
 
+  /**
+   * Live-repaint the active selection's body material from a CSS hex string
+   * (`#rgb` or `#rrggbb`, case-insensitive — the SELECT-mode color wheel's
+   * format). The selection highlight (emissive tint + accent edges) is kept,
+   * so the mesh stays visibly selected in its new color.
+   * @returns true when the color was applied; false when nothing is selected
+   * or the hex is malformed (the scene is left untouched).
+   */
+  setSelectedColor(hexColor: string): boolean {
+    const mesh = this.selected;
+    const hex = parseHexColor(hexColor);
+    if (!mesh || hex === null) return false;
+    (mesh.material as THREE.MeshStandardMaterial).color.setHex(hex);
+    return true;
+  }
+
+  /**
+   * The selected mesh's center projected through the live scene camera onto
+   * a `canvasWidth × canvasHeight` canvas (CSS px, top-left origin — the
+   * same mapping the AR mirror uses). Lets the orchestrator anchor
+   * selection-adjacent UI (the SELECT-mode color wheel) in lockstep with the
+   * 3D viewport without leaking Three.js types.
+   * @returns null when nothing is selected or the center is behind the camera.
+   */
+  selectedProjection(
+    canvasWidth: number,
+    canvasHeight: number
+  ): { x: number; y: number } | null {
+    const mesh = this.selected;
+    if (!mesh) return null;
+    const projected = this.scene.projectToCanvas(mesh.position, canvasWidth, canvasHeight);
+    if (projected.z > 1) return null; // behind the camera
+    return { x: projected.x, y: projected.y };
+  }
+
   /** End the active selection drag (the selection itself persists). */
   endDrag(): void {
     this.selectionDrag = null;
@@ -949,4 +990,24 @@ function disposeMesh(mesh: THREE.Mesh): void {
       (child.material as THREE.Material).dispose();
     }
   }
+}
+
+/**
+ * Parse a strict CSS hex color (`#rgb` or `#rrggbb`, case-insensitive) into
+ * a `0xrrggbb` integer; null when malformed. Never throws, so a bad value
+ * leaves the scene untouched.
+ */
+function parseHexColor(hexColor: string): number | null {
+  const match = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(hexColor);
+  if (!match) return null;
+  const digits = match[1];
+  if (digits.length === 3) {
+    // #rgb expands by digit duplication (#f00 → #ff0000).
+    return (
+      (parseInt(digits[0], 16) * 17) << 16 |
+      (parseInt(digits[1], 16) * 17) << 8 |
+      parseInt(digits[2], 16) * 17
+    );
+  }
+  return parseInt(digits, 16);
 }

@@ -12,17 +12,21 @@
  *
  * Interaction modes (VIEW / SELECT / CREATE) are picked on the vision
  * overlay's button bar and gate the gesture routing below: pinches are inert
- * in VIEW, pick / drag meshes in SELECT, and build primitives in CREATE.
- * Camera gestures (fist orbit / two-fist zoom) stay live in every mode.
+ * in VIEW, pick / drag / recolor meshes in SELECT (a floating color wheel
+ * follows the selection; hand 2 sweeps it while hand 1 holds the pinch), and
+ * build primitives in CREATE. Camera gestures (fist orbit / two-fist zoom)
+ * stay live in every mode.
  */
 
 import { GestureEngine } from './vision/GestureEngine';
 import { DebugOverlay } from './vision/DebugOverlay';
-import type { GestureSignalEvent } from './vision/types';
+import type { FrameEvent, GestureSignalEvent, Handedness } from './vision/types';
 import { CadScene } from './cad/CadScene';
 import { CadBuilder } from './cad/CadBuilder';
 import { buildArSceneFrame } from './cad/ArMirror';
+import { ndcToCanvas } from './cad/arProjection';
 import { Toolbar } from './ui/Toolbar';
+import { ColorWheel } from './ui/ColorWheel';
 
 const video = document.querySelector<HTMLVideoElement>('#video');
 const canvas = document.querySelector<HTMLCanvasElement>('#overlay');
@@ -49,6 +53,7 @@ const statusOutput: HTMLElement = statusText;
 // module-level null-check narrowing above.
 const videoElement: HTMLVideoElement = video;
 const overlayCanvas: HTMLCanvasElement = canvas;
+const viewportElement: HTMLElement = viewport;
 
 /* ---- Vision ---- */
 const engine = new GestureEngine({
@@ -100,11 +105,19 @@ const overlay = new DebugOverlay(canvas, {
 
 /* ---- UI ---- */
 const toolbar = new Toolbar(toolbarRoot, {
-  onClearScene: () => builder.clear(),
+  onClearScene: () => {
+    builder.clear();
+    colorWheel.hide(); // no selection left to anchor the wheel
+  },
   onExportStl: () => builder.exportStl(),
   onCameraStart: () => startCamera(),
   onCameraStop: () => stopCamera(),
 });
+
+// Floating HSL color wheel (SELECT mode): pure UI mounted into the CAD
+// viewport — the bridge below feeds it viewport-local pixels and applies
+// the picked hex through CadBuilder.setSelectedColor.
+const colorWheel = new ColorWheel(viewport);
 
 function setStatus(text: string): void {
   statusOutput.textContent = text;
@@ -117,24 +130,67 @@ function logGestureEvent(event: GestureSignalEvent): void {
 
 /* ---- Vision -> CAD bridge (device-space coordinates only) ---- */
 
+/** MediaPipe index fingertip — hand 2's cursor on the color wheel. */
+const INDEX_TIP = 8;
+
+/**
+ * The hand currently holding the SELECT-mode pinch on the selected mesh.
+ * While it is set, the *other* hand's index fingertip drives the color
+ * wheel, and that hand's pinch (confirming a hue) never steals the drag.
+ */
+let selectHand: Handedness | null = null;
+
+/** Device space ([-1, 1], +Y up — identical to the 3D camera's NDC frustum) → viewport-local CSS px. */
+function deviceToViewport(x: number, y: number): { x: number; y: number } {
+  return ndcToCanvas(x, y, 0, viewportElement.clientWidth, viewportElement.clientHeight);
+}
+
 // Mode-routed pinches (the classifier never emits pinches in VIEW mode):
 // - SELECT: pick a committed mesh / drag it (ground plane or vertical lift,
 //   per the active constraint toggle); a pinch on empty ground deselects.
+//   A pinch landing on the floating color wheel repaints the selection with
+//   the hue beneath it instead of re-picking the 3D scene behind the disc,
+//   and only the hand that grabbed the mesh drags it — the other hand stays
+//   free to pick colors.
 // - CREATE: draw a footprint (pinch start/drag raycast onto the ground plane).
 engine.onPinchStart((e) => {
   // A pinch that lands on an overlay UI button (mode bar / constraint
   // stack) toggles that button — it must not also pick or draw in the scene.
   if (overlay.isUiAtDevice(e.position.x, e.position.y)) return;
-  if (engine.mode === 'select') builder.pickAt(e.position.x, e.position.y);
-  else builder.onPinchStart(e.position.x, e.position.y);
+  if (engine.mode === 'select') {
+    const point = deviceToViewport(e.position.x, e.position.y);
+    const wheelColor = colorWheel.pickColorAt(point.x, point.y);
+    if (wheelColor) {
+      builder.setSelectedColor(wheelColor);
+      return;
+    }
+    selectHand = builder.pickAt(e.position.x, e.position.y) ? e.hand : null;
+  } else {
+    builder.onPinchStart(e.position.x, e.position.y);
+  }
 });
 engine.onPinchDrag((e) => {
-  if (engine.mode === 'select') builder.dragTo(e.currentPos.x, e.currentPos.y);
-  else builder.onPinchDrag(e.currentPos.x, e.currentPos.y, e.startPos.x, e.startPos.y);
+  if (engine.mode === 'select') {
+    // Only the grabbing hand drags the mesh; hand 2 hovering (or confirming
+    // a color on the wheel) never fights the drag.
+    if (selectHand === null || e.hand === selectHand) {
+      builder.dragTo(e.currentPos.x, e.currentPos.y);
+    }
+  } else {
+    builder.onPinchDrag(e.currentPos.x, e.currentPos.y, e.startPos.x, e.startPos.y);
+  }
 });
-engine.onPinchEnd(() => {
-  if (engine.mode === 'select') builder.endDrag();
-  else builder.onPinchEnd();
+engine.onPinchEnd((e) => {
+  if (engine.mode === 'select') {
+    // Only the grabbing hand's release ends the drag — hand 2 releasing a
+    // color-confirming pinch must not drop the held object.
+    if (selectHand === null || e.hand === selectHand) {
+      builder.endDrag();
+      selectHand = null;
+    }
+  } else {
+    builder.onPinchEnd();
+  }
 });
 
 // SELECT-mode secondary-hand rotation: while one hand holds a pinch on a
@@ -194,18 +250,50 @@ engine.on('mode_change', (event) => {
   if (event.type !== 'mode_change') return;
   builder.cancel();
   builder.endDrag();
+  selectHand = null; // the next frame hides the wheel outside SELECT mode
   statusOutput.dataset.mode = event.to;
   setStatus(`Mode: ${event.to.toUpperCase()} — State: ${engine.state}`);
 });
 
-// Debug overlay: re-render on every processed frame.
+// Debug overlay: re-render on every processed frame; the SELECT-mode color
+// wheel rides along — re-anchored beside the selection's live screen
+// projection and repainting the mesh under the other hand's index fingertip.
 engine.on('frame', (event) => {
-  if (event.type === 'frame') overlay.render(event);
+  if (event.type !== 'frame') return;
+  overlay.render(event);
+  updateColorWheel(event);
 });
 
 // Start in VIEW mode (pure camera navigation): nothing can be created or
 // moved until the user picks another mode on the overlay's button bar.
 engine.setMode('view');
+
+/**
+ * SELECT-mode color wheel: anchored adjacent to the selected mesh's live
+ * screen projection (it tracks drags and camera orbits), and while one hand
+ * holds the selection pinch, the *other* hand's index fingertip acts as a
+ * live color cursor — every hue it sweeps over repaints the mesh instantly.
+ * Hidden outside SELECT mode or when nothing is selected.
+ */
+function updateColorWheel(frame: FrameEvent): void {
+  const anchor =
+    engine.mode === 'select'
+      ? builder.selectedProjection(viewportElement.clientWidth, viewportElement.clientHeight)
+      : null;
+  if (!anchor) {
+    colorWheel.hide();
+    return;
+  }
+  colorWheel.show(anchor.x, anchor.y);
+  if (selectHand === null) return;
+  // Hand 2: whichever hand is not holding the selection pinch.
+  const cursor = frame.hands.find((hand) => hand.handedness !== selectHand);
+  const fingertip = cursor?.landmarks[INDEX_TIP];
+  if (!fingertip) return;
+  const point = deviceToViewport(fingertip.device.x, fingertip.device.y);
+  const hex = colorWheel.pickColorAt(point.x, point.y);
+  if (hex) builder.setSelectedColor(hex);
+}
 
 /** Start webcam + hand tracking (invoked from the toolbar). */
 function startCamera(): void {
@@ -228,6 +316,8 @@ function startCamera(): void {
 function stopCamera(): void {
   engine.stop();
   builder.cancel(); // drop any pending preview so the scene stays clean
+  selectHand = null;
+  colorWheel.hide(); // tracking stopped: the floating wheel must not linger
   toolbar.setCameraRunning(false);
   statusOutput.dataset.state = 'IDLE';
   statusOutput.title = '';
@@ -245,5 +335,7 @@ thumbExpand.addEventListener('click', () => {
 });
 
 // Expose for experimentation from the browser console.
-Object.assign(window, { cadVision: { engine, overlay, cadScene, builder, toolbar } });
+Object.assign(window, {
+  cadVision: { engine, overlay, cadScene, builder, toolbar, colorWheel },
+});
 
