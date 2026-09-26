@@ -78,7 +78,6 @@ const builder = new CadBuilder(cadScene);
 
 /* ---- UI ---- */
 const toolbar = new Toolbar(toolbarRoot, {
-  onToolSelect: (tool) => builder.setTool(tool),
   onClearScene: () => builder.clear(),
   onExportStl: () => builder.exportStl(),
   onCameraStart: () => startCamera(),

@@ -8,7 +8,7 @@
   </head>
   <body>
     <div id="app">
-      <!-- Top toolbar: primitive tools + scene utilities (mounted by src/ui/Toolbar.ts) -->
+      <!-- Top toolbar: camera toggle + scene utilities (mounted by src/ui/Toolbar.ts) -->
       <header id="toolbar"></header>
 
       <main id="workspace" class="workspace">
@@ -41,13 +41,12 @@
 
       <footer class="footer">
         <p>
-          Pinch (thumb + index) and drag on the grid to draw a base, release, then pinch with
-          both hands and pull apart (or drag up with one pinching hand) to extrude. A closed
-          fist grabs the scene and drags it with your hand (left / right / up / down) — roll
-          your wrist while holding it to rotate the scene. With two fists, hold one still as the
+          Pinch (thumb + index) and drag on the grid to draw a box, release, then pull apart with
+          two pinching hands (or drag up with one) to extrude. A closed fist grabs the scene —
+          move it to pan, roll your wrist to rotate. With two fists, hold one still as the
           anchor: move the other away to zoom in, toward it to zoom out, or circle it to turn
-          the scene; open palm stops. Committed meshes export as
-          <code>model.stl</code>. Gesture events are logged to the console as JSON.
+          the scene. Committed meshes export as <code>model.stl</code>; gesture events are
+          logged to the console as JSON.
         </p>
       </footer>
     </div>
