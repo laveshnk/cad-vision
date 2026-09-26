@@ -8,3 +8,4 @@ public/models/
 public/mediapipe/
 
 *.diff
+*.zip

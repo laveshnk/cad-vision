@@ -41,7 +41,7 @@ src/
     ├── filters.ts             # EMA / One-Euro, LandmarkSmoother, HandSmootherBank
     ├── HandTracker.ts         # webcam + MediaPipe HandLandmarker
     ├── HandednessStabilizer.ts # temporal + geometric Left/Right label stabilization
-    ├── handShape.ts           # fold / thumb-tuck ratios for real-fist detection
+    ├── handShape.ts           # fold / thumb-tuck ratios (real fist) + wrist roll
     ├── GestureClassifier.ts   # pinch/fist/orbit/zoom detection + finite state machine
     ├── GestureEngine.ts       # facade: pipeline + event emitter
     ├── DebugOverlay.ts        # 2D canvas renderer (landmarks, skeleton, HUD)
@@ -101,7 +101,7 @@ hands on the mirrored preview.
 | **Pinch / draw** | 3D Euclidean distance between landmarks 4 (thumb tip) and 8 (index tip); trigger `< 0.045`, hysteresis release `> 0.065` (both configurable) | `pinch_start`, `pinch_drag` (position, delta in device space), `pinch_end` |
 | **Extrude (dual-hand)** | both hands pinch; pull distance `D` between pinch centers `center = (P_thumb + P_index) / 2` | `extrude_start`, `extrude` (`distance`, `scaleFactor = D / D₀`, `deltaDistance`), `extrude_end` |
 | **Extrude (single-hand)** | while EXTRUDING with one pinch: vertical drag of landmark 8 | `extrude` (`deltaHeight`, `cumulativeHeight`, +Y up) |
-| **Camera move (one fist)** | a *real* closed fist, not just curled fingers (`handShape.ts`): all 4 fingertips folded into the palm — `dist(tip, wrist) < 0.9 · dist(MCP, wrist)`, which rejects claw / hook curls and half-curls — and the thumb tucked over the fingers (thumb tip within 0.75 × palm size of an index / middle / ring knuckle, rejecting a thumbs-up); all ratios, so size / distance / rotation invariant. Needs 3 consecutive frames (app default); once held, thresholds relax by `fistHoldSlack` and one finger may loosen. Only engaged from IDLE with no active pinch, and a pinch never engages from a fist. Palm-center motion is reported as deltas; the app pans the view so the scene follows the fist (fist right → camera left, fist up → camera down) | `orbit_start`, `orbit` (`deltaX`, `deltaY` device units), `orbit_end` |
+| **Camera move (one fist)** | a *real* closed fist, not just curled fingers (`handShape.ts`): all 4 fingertips folded into the palm — `dist(tip, wrist) < 0.9 · dist(MCP, wrist)`, which rejects claw / hook curls and half-curls — and the thumb tucked over the fingers (thumb tip within 0.75 × palm size of an index / middle / ring knuckle, rejecting a thumbs-up); all ratios, so size / distance / rotation invariant. Needs 3 consecutive frames (app default); once held, thresholds relax by `fistHoldSlack` and one finger may loosen. Only engaged from IDLE with no active pinch, and a pinch never engages from a fist. Palm-center motion is reported as deltas; the app pans the view so the scene follows the fist (fist right → camera left, fist up → camera down). **Wrist roll** — twisting the fist like a doorknob, measured as the rotation of the knuckle line (index MCP → pinky MCP) around the wrist → middle-MCP axis — turns the scene around the vertical axis with the twist; reported only after the twist exceeds `rollEngageAngle` (0.15 rad ≈ 9°) per fist, per-frame jitter under `rollDeadzone` dropped | `orbit_start`, `orbit` (`deltaX`, `deltaY` device units, `deltaRoll` radians), `orbit_end` |
 | **Zoom (two fists)** | both hands closed fists (same test); distance `D` between the two palm centers. Fists farther apart → zoom in, closer together → zoom out. Engaged from IDLE, or upgraded from a one-fist move when the second fist closes; ends on a pinch, a lost hand, or one hand open longer than `orbitOpenPalmGraceFrames` (then falls back to a one-fist move if the other fist is still closed) | `zoom_start`, `zoom` (`distance`, `scaleFactor = D / D₀`, `deltaScale = D / D_prev`), `zoom_end` |
 
 Finite state machine: `IDLE ↔ DRAWING_BASE ↔ EXTRUDING ↔ ORBITING ↔ ZOOMING`.
@@ -145,6 +145,10 @@ as a floating thumbnail (top-left, click ⤢ to expand/collapse) over it:
 4. **Move the camera** — make a fist and move it: the scene follows your
    hand ("grab and drag") — fist right moves the camera left, fist up moves
    it down — with damping (`CadScene.onPan`); open palm stops.
+   **Rotate** by rolling your wrist while holding the fist (twist it like a
+   doorknob): the scene turns around the vertical axis with your twist
+   (`CadScene.onRotate`, `rotateSpeed` 1.5×). Open and re-close the fist to
+   ratchet further.
 5. **Zoom** — make fists with both hands: pull them apart to zoom in, bring
    them closer together to zoom out (`CadScene.onZoom`, clamped between
    `minDistance` and `maxDistance`).
@@ -172,7 +176,7 @@ engine.onPinchStart((e) => { /* e.position (device), e.distance */ });
 engine.onPinchDrag((e) => { /* e.currentPos, e.delta, e.startPos */ });
 engine.onPinchEnd((e) => { /* e.endPos, e.delta */ });
 engine.onExtrude((e) => { /* e.mode, e.scaleFactor | e.deltaHeight */ });
-engine.onOrbit((e) => { /* e.deltaX, e.deltaY (one fist) */ });
+engine.onOrbit((e) => { /* e.deltaX, e.deltaY, e.deltaRoll (one fist) */ });
 engine.onZoom((e) => { /* e.deltaScale, e.scaleFactor, e.distance (two fists) */ });
 
 // Debug overlay / HUD data (fires once per processed frame):
@@ -199,7 +203,8 @@ on-screen view), +Y up — ready to map into a CAD viewport.
   `alpha` (default 0.35), teleport/stale-history thresholds.
 - `classifier` — `GestureClassifierOptions`: pinch thresholds, fist shape
   (`fistFoldRatio` 0.9, `fistMinFoldedFingers` 4, `fistThumbTuckRatio` 0.75,
-  `fistHoldSlack` 0.15, `fistPinchGuardDistance`) & debounce frames, orbit open-palm grace, hand-loss grace frames.
+  `fistHoldSlack` 0.15, `fistPinchGuardDistance`) & debounce frames, wrist
+  roll (`rollEngageAngle` 0.15 rad, `rollDeadzone` 0.003 rad), orbit open-palm grace, hand-loss grace frames.
 
 ## Debug overlay
 

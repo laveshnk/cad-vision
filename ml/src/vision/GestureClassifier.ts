@@ -16,7 +16,7 @@
 
 import { centroid, distance3, midpoint3, subtract3 } from './coordinates';
 import { EmaScalar } from './filters';
-import { measureHandShape, type HandShape } from './handShape';
+import { measureHandShape, measureWristRoll, wrapAngle, type HandShape } from './handShape';
 import type {
   ExtrudeMode,
   GestureMetrics,
@@ -69,6 +69,13 @@ export interface GestureClassifierOptions {
   fistEnterFrames?: number;
   /** Consecutive non-fist frames required to leave the FIST state. */
   fistExitFrames?: number;
+  /**
+   * Cumulative wrist roll (radians) a one-fist gesture must twist before roll
+   * deltas are reported — keeps plain fist movement from rotating the view.
+   */
+  rollEngageAngle?: number;
+  /** Per-frame roll changes smaller than this (radians) are treated as jitter. */
+  rollDeadzone?: number;
   /** Frames an orbiting / zooming hand may open (palm drag) before the gesture ends. */
   orbitOpenPalmGraceFrames?: number;
   /** Frames a hand may vanish before its gesture state is finalized. */
@@ -92,6 +99,9 @@ interface HandTrack {
   /** Palm center (device space) used for orbit deltas. */
   palmCenter: Vec3;
   prevPalmCenter: Vec3;
+  /** Wrist roll angle (radians) this / previous frame; `null` if undefined. */
+  roll: number | null;
+  prevRoll: number | null;
   /** Consecutive non-fist frames while orbiting. */
   orbitOpenFrames: number;
 }
@@ -119,6 +129,8 @@ export class GestureClassifier {
       | 'fistThumbTuckRatio'
       | 'fistHoldSlack'
       | 'fistPinchGuardDistance'
+      | 'rollEngageAngle'
+      | 'rollDeadzone'
       | 'fistEnterFrames'
       | 'fistExitFrames'
       | 'orbitOpenPalmGraceFrames'
@@ -146,6 +158,9 @@ export class GestureClassifier {
   private lastExtrudeScale: number | null = null;
   private lastExtrudeDelta: number | null = null;
   private lastOrbitDelta: Vec2 | null = null;
+  /** Cumulative wrist roll since the current one-fist gesture started. */
+  private orbitRollTotal = 0;
+  private rollEngaged = false;
 
   constructor(options: GestureClassifierOptions = {}) {
     this.options = {
@@ -159,6 +174,8 @@ export class GestureClassifier {
       fistThumbTuckRatio: options.fistThumbTuckRatio ?? 0.75,
       fistHoldSlack: options.fistHoldSlack ?? 0.15,
       fistPinchGuardDistance: options.fistPinchGuardDistance ?? 0.07,
+      rollEngageAngle: options.rollEngageAngle ?? 0.15,
+      rollDeadzone: options.rollDeadzone ?? 0.003,
       fistEnterFrames: options.fistEnterFrames ?? 2,
       fistExitFrames: options.fistExitFrames ?? 2,
       orbitOpenPalmGraceFrames: options.orbitOpenPalmGraceFrames ?? 10,
@@ -185,6 +202,8 @@ export class GestureClassifier {
     this.lastExtrudeScale = null;
     this.lastExtrudeDelta = null;
     this.lastOrbitDelta = null;
+    this.orbitRollTotal = 0;
+    this.rollEngaged = false;
   }
 
   private getOrCreateTrack(hand: HandFrame): HandTrack {
@@ -207,6 +226,8 @@ export class GestureClassifier {
         openFrames: 0,
         palmCenter,
         prevPalmCenter: palmCenter,
+        roll: null,
+        prevRoll: null,
         orbitOpenFrames: 0,
       };
       this.tracks.set(hand.handedness, track);
@@ -232,11 +253,12 @@ export class GestureClassifier {
     // Phase 1: update present hands.
     for (const hand of presentHands.values()) {
       const track = this.getOrCreateTrack(hand);
-      track.missedFrames = 0;
       const shape = measureHandShape(hand);
       this.updatePinch(track, hand, shape, timestamp, events);
       this.updateFist(track, shape);
+      // Reads `missedFrames` to avoid jump deltas on reappearance; reset after.
       this.updatePalmCenter(track, hand);
+      track.missedFrames = 0;
     }
 
     // Phase 2: finalize hands lost beyond the grace window.
@@ -368,12 +390,16 @@ export class GestureClassifier {
     }
   }
 
-  /** Track the palm center (device space) used to derive orbit deltas. */
+  /** Track the palm center (device space) and wrist roll used for orbit deltas. */
   private updatePalmCenter(track: HandTrack, hand: HandFrame): void {
     const center = centroid(PALM_INDICES.map((i) => hand.landmarks[i].device));
+    const roll = measureWristRoll(hand);
     // No jump delta on (re)appearance after an absence.
-    track.prevPalmCenter = track.missedFrames > 0 ? center : track.palmCenter;
+    const reappeared = track.missedFrames > 0;
+    track.prevPalmCenter = reappeared ? center : track.palmCenter;
     track.palmCenter = center;
+    track.prevRoll = reappeared ? roll : track.roll;
+    track.roll = roll;
   }
 
   /** Emit synthetic release events when a hand disappears mid-gesture. */
@@ -444,6 +470,7 @@ export class GestureClassifier {
         }
         if (this.orbitHand) {
           const delta = subtract3(track.palmCenter, track.prevPalmCenter);
+          const deltaRoll = this.rollDelta(track);
           this.lastOrbitDelta = { x: delta.x, y: delta.y };
           events.push({
             type: 'orbit',
@@ -451,6 +478,7 @@ export class GestureClassifier {
             hand: this.orbitHand,
             deltaX: delta.x,
             deltaY: delta.y,
+            deltaRoll,
           });
         }
       }
@@ -497,10 +525,31 @@ export class GestureClassifier {
         this.handleZoom(presentHands, timestamp, events);
       } else if (fistHands.length === 1 && this.state === 'IDLE') {
         this.orbitHand = fistHands[0].handedness;
+        this.orbitRollTotal = 0;
+        this.rollEngaged = false;
         this.setState('ORBITING', 'closed fist detected', timestamp, events);
         events.push({ type: 'orbit_start', timestamp, hand: this.orbitHand });
       }
     }
+  }
+
+  /**
+   * Wrist-roll delta for this frame (radians, + = counter-clockwise twist about
+   * the wrist → knuckles axis as seen on screen). Nothing is reported until the
+   * cumulative twist since the fist closed exceeds `rollEngageAngle` (then the
+   * whole accumulated twist is released at once); after that, per-frame
+   * changes below `rollDeadzone` are dropped as jitter.
+   */
+  private rollDelta(track: HandTrack): number {
+    if (track.roll === null || track.prevRoll === null) return 0;
+    const raw = wrapAngle(track.roll - track.prevRoll);
+    this.orbitRollTotal += raw;
+    if (!this.rollEngaged) {
+      if (Math.abs(this.orbitRollTotal) < this.options.rollEngageAngle) return 0;
+      this.rollEngaged = true;
+      return this.orbitRollTotal;
+    }
+    return Math.abs(raw) < this.options.rollDeadzone ? 0 : raw;
   }
 
   /**
@@ -749,6 +798,7 @@ export class GestureClassifier {
       extrusionDeltaDistance: this.lastExtrudeDelta,
       extrusionHeight: this.state === 'EXTRUDING' ? this.extrudeHeight : null,
       orbitDelta: this.lastOrbitDelta,
+      orbitRoll: this.state === 'ORBITING' ? this.orbitRollTotal : null,
       zoomDistance: this.state === 'ZOOMING' ? this.lastZoomDistance : null,
       zoomScaleFactor: this.state === 'ZOOMING' ? this.lastZoomScale : null,
     };

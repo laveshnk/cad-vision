@@ -280,6 +280,9 @@ export class DebugOverlay {
         `orbit Δ: (${frame.metrics.orbitDelta.x.toFixed(3)}, ${frame.metrics.orbitDelta.y.toFixed(3)})`
       );
     }
+    if (frame.metrics.orbitRoll !== null) {
+      lines.push(`roll: ${((frame.metrics.orbitRoll * 180) / Math.PI).toFixed(0)}°`);
+    }
     if (frame.metrics.zoomDistance !== null) {
       lines.push(
         `zoom D: ${frame.metrics.zoomDistance.toFixed(3)} ×${(frame.metrics.zoomScaleFactor ?? 1).toFixed(2)}`

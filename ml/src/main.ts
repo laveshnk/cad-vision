@@ -57,6 +57,8 @@ const engine = new GestureEngine({
     fistHoldSlack: 0.15,
     fistPinchGuardDistance: 0.07,
     fistEnterFrames: 3,
+    rollEngageAngle: 0.15,
+    rollDeadzone: 0.003,
     fistExitFrames: 2,
     orbitOpenPalmGraceFrames: 10,
     handLossGraceFrames: 3,
@@ -112,8 +114,12 @@ engine.on('zoom_start', (event) => {
 });
 
 // Camera move: one fist "grabs" the scene — the view follows the hand
-// (fist right = camera left, fist up = camera down).
-engine.onOrbit((e) => cadScene.onPan({ deltaX: e.deltaX, deltaY: e.deltaY }));
+// (fist right = camera left, fist up = camera down), and rolling the wrist
+// (twisting the fist like a doorknob) turns the scene with the twist.
+engine.onOrbit((e) => {
+  cadScene.onPan({ deltaX: e.deltaX, deltaY: e.deltaY });
+  if (e.deltaRoll !== 0) cadScene.onRotate({ deltaRoll: e.deltaRoll });
+});
 
 // Camera zoom: two fists — farther apart zooms in, closer together zooms out.
 engine.onZoom((e) => cadScene.onZoom({ deltaScale: e.deltaScale }));

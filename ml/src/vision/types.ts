@@ -145,6 +145,12 @@ export interface OrbitEvent {
   hand: Handedness;
   deltaX: number;
   deltaY: number;
+  /**
+   * Wrist-roll change this frame (radians): twisting the fist like a
+   * doorknob. + = counter-clockwise about the wrist → knuckles axis as seen
+   * on the mirrored screen. 0 until the twist passes `rollEngageAngle`.
+   */
+  deltaRoll: number;
 }
 
 export interface OrbitEndEvent {
@@ -205,6 +211,8 @@ export interface GestureMetrics {
   extrusionDeltaDistance: number | null;
   extrusionHeight: number | null;
   orbitDelta: Vec2 | null;
+  /** Cumulative wrist roll (radians) since the one-fist gesture started. */
+  orbitRoll: number | null;
   /** Palm-center distance while ZOOMING (normalized units). */
   zoomDistance: number | null;
   /** Cumulative zoom ratio (`distance / distance_at_zoom_start`) while ZOOMING. */

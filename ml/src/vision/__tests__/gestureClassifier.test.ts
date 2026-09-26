@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { buildLandmark } from '../coordinates';
 import { GestureClassifier } from '../GestureClassifier';
+import { measureWristRoll, wrapAngle } from '../handShape';
 import type { GestureSignalEvent, HandFrame, RawLandmark } from '../types';
 
 /** Fast, deterministic classifier options for tests. */
@@ -25,6 +26,11 @@ interface HandSpec {
   thumbUp?: boolean;
   /** MCP indices (5 / 9 / 13 / 17) forced open in a fist pose (partial fist). */
   extend?: number[];
+  /**
+   * Wrist roll (radians): rigid rotation about the vertical axis through the
+   * wrist, like twisting a doorknob.
+   */
+  twist?: number;
   /** Raw-frame offset applied to the whole hand. */
   dx?: number;
   dy?: number;
@@ -45,6 +51,7 @@ function makeHand(handedness: 'Left' | 'Right', spec: HandSpec = {}): HandFrame 
     hook = false,
     thumbUp = false,
     extend = [],
+    twist = 0,
     dx = 0,
     dy = 0,
   } = spec;
@@ -84,10 +91,17 @@ function makeHand(handedness: 'Left' | 'Right', spec: HandSpec = {}): HandFrame 
     lm[4] = { x: wx - pinchDist / 2, y: wy - 0.1, z: 0 };
     lm[8] = { x: wx + pinchDist / 2, y: wy - 0.1, z: 0 };
   }
+  const c = Math.cos(twist);
+  const s = Math.sin(twist);
+  const twisted = lm.map((p) => ({
+    x: wx + (p.x - wx) * c + p.z * s,
+    y: p.y,
+    z: -(p.x - wx) * s + p.z * c,
+  }));
   return {
     handedness,
     score: 0.9,
-    landmarks: lm.map((p) => buildLandmark(p, 1000, 1000)),
+    landmarks: twisted.map((p) => buildLandmark(p, 1000, 1000)),
   };
 }
 
@@ -201,6 +215,76 @@ describe('GestureClassifier — single-fist camera move', () => {
     const result = classifier.process([makeHand('Right', { fist: true, dx: -0.05 })], (t += 100));
     const move = result.events.find((e) => e.type === 'orbit');
     expect(move?.type === 'orbit' && move.deltaX).toBeCloseTo(0.1);
+  });
+});
+
+describe('GestureClassifier — wrist roll (one fist)', () => {
+  it('stays silent below rollEngageAngle, then releases the accumulated twist', () => {
+    const classifier = new GestureClassifier(TEST_OPTIONS);
+    let t = 0;
+    const rollOf = (twist: number): number => {
+      const result = classifier.process([makeHand('Right', { fist: true, twist })], (t += 100));
+      const orbit = result.events.find((e) => e.type === 'orbit');
+      return orbit?.type === 'orbit' ? orbit.deltaRoll : NaN;
+    };
+    classifier.process([makeHand('Right', { fist: true })], (t += 100));
+    expect(classifier.currentState).toBe('ORBITING');
+    expect(rollOf(0.1)).toBe(0); // 0.1 rad < 0.15 engage angle
+    expect(rollOf(0.3)).toBeCloseTo(0.3); // engaged: whole twist released
+    expect(rollOf(0.4)).toBeCloseTo(0.1); // then per-frame deltas
+    expect(rollOf(0.2)).toBeCloseTo(-0.2); // and back the other way
+    expect(classifier.process([makeHand('Right', { fist: true, twist: 0.2 })], (t += 100))
+      .metrics.orbitRoll).toBeCloseTo(0.2);
+  });
+
+  it('does not report roll when the fist only moves (no twist)', () => {
+    const classifier = new GestureClassifier(TEST_OPTIONS);
+    let t = 0;
+    classifier.process([makeHand('Right', { fist: true })], (t += 100));
+    for (let i = 1; i <= 5; i++) {
+      const result = classifier.process(
+        [makeHand('Right', { fist: true, dx: 0.03 * i, dy: -0.02 * i })],
+        (t += 100)
+      );
+      const orbit = result.events.find((e) => e.type === 'orbit');
+      expect(orbit?.type === 'orbit' && orbit.deltaRoll).toBe(0);
+    }
+  });
+
+  it('re-arms the engage threshold for each new fist', () => {
+    const classifier = new GestureClassifier(TEST_OPTIONS);
+    let t = 0;
+    classifier.process([makeHand('Right', { fist: true })], (t += 100));
+    classifier.process([makeHand('Right', { fist: true, twist: 0.5 })], (t += 100));
+    // Open past the grace window, then close a new fist and twist a little.
+    for (let i = 0; i < 4; i++) classifier.process([makeHand('Right', {})], (t += 100));
+    expect(classifier.currentState).toBe('IDLE');
+    classifier.process([makeHand('Right', { fist: true })], (t += 100));
+    const result = classifier.process([makeHand('Right', { fist: true, twist: 0.1 })], (t += 100));
+    const orbit = result.events.find((e) => e.type === 'orbit');
+    expect(orbit?.type === 'orbit' && orbit.deltaRoll).toBe(0);
+  });
+});
+
+describe('measureWristRoll', () => {
+  it('measures a doorknob twist as a change in roll angle, sign included', () => {
+    const base = measureWristRoll(makeHand('Right', { fist: true }));
+    const ccw = measureWristRoll(makeHand('Right', { fist: true, twist: 0.4 }));
+    const cw = measureWristRoll(makeHand('Right', { fist: true, twist: -0.4 }));
+    expect(base).not.toBeNull();
+    expect(wrapAngle((ccw ?? 0) - (base ?? 0))).toBeCloseTo(0.4);
+    expect(wrapAngle((cw ?? 0) - (base ?? 0))).toBeCloseTo(-0.4);
+  });
+
+  it('is unaffected by moving the hand around the frame', () => {
+    const a = measureWristRoll(makeHand('Left', { fist: true }));
+    const b = measureWristRoll(makeHand('Left', { fist: true, dx: 0.2, dy: -0.1 }));
+    expect(wrapAngle((b ?? 0) - (a ?? 0))).toBeCloseTo(0);
+  });
+
+  it('wraps angle differences across ±π', () => {
+    expect(wrapAngle(3.1 - -3.1)).toBeCloseTo(6.2 - 2 * Math.PI);
+    expect(wrapAngle(-3.1 - 3.1)).toBeCloseTo(2 * Math.PI - 6.2);
   });
 });
 

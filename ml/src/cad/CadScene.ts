@@ -5,7 +5,8 @@
  * rig, soft studio lighting (hemisphere + shadow-casting key light), a
  * shadow-catching floor and an "infinite" grid faded into the background by
  * fog. External control inputs are plain device-space data — `onPan({ deltaX, deltaY })`
- * (truck the camera sideways / vertically), `onZoom({ deltaScale })` (dolly in / out) and
+ * (truck the camera sideways / vertically), `onRotate({ deltaRoll })` (turn the
+ * scene around the vertical axis), `onZoom({ deltaScale })` (dolly in / out) and
  * `onOrbit({ deltaX, deltaY })` — keeping this module fully decoupled from the
  * vision layer.
  */
@@ -25,6 +26,8 @@ export interface CadSceneOptions {
   targetHeight?: number;
   /** Radians of orbit per device-space unit (hand travel). */
   orbitSpeed?: number;
+  /** Scene rotation (radians) per radian of wrist roll. */
+  rotateSpeed?: number;
   /** World units of sideways pan per device-space unit, per unit of camera distance. */
   panSpeed?: number;
   /** Exponent applied to zoom ratios (higher = more zoom per hand movement). */
@@ -90,6 +93,7 @@ export class CadScene {
       cameraPolar: options.cameraPolar ?? 1.05,
       targetHeight: options.targetHeight ?? 0.5,
       orbitSpeed: options.orbitSpeed ?? 1.75,
+      rotateSpeed: options.rotateSpeed ?? 1.5,
       panSpeed: options.panSpeed ?? 0.6,
       zoomSpeed: options.zoomSpeed ?? 1.5,
       minDistance: options.minDistance ?? 2,
@@ -214,6 +218,15 @@ export class CadScene {
     this.panRight.set(Math.cos(theta), 0, -Math.sin(theta));
     this.targetGoal.addScaledVector(this.panRight, -delta.deltaX * scale);
     this.targetGoal.y -= delta.deltaY * scale;
+  }
+
+  /**
+   * Turn the scene around the vertical axis by a wrist-roll delta (radians,
+   * + = counter-clockwise twist as seen on screen). The scene follows the
+   * twist, so the camera orbits the opposite way. Damped every frame.
+   */
+  onRotate(delta: { deltaRoll: number }): void {
+    this.sphericalTarget.theta -= delta.deltaRoll * this.options.rotateSpeed;
   }
 
   /**

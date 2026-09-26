@@ -9,7 +9,7 @@ export type { HandTrackerOptions, HandResultHandler } from './HandTracker';
 export { HandednessStabilizer, chiralitySign } from './HandednessStabilizer';
 export type { HandednessStabilizerOptions } from './HandednessStabilizer';
 export { DebugOverlay, STATE_COLORS } from './DebugOverlay';
-export { measureHandShape } from './handShape';
+export { measureHandShape, measureWristRoll, wrapAngle, isotropicPoints } from './handShape';
 export type { HandShape } from './handShape';
 export { HandSmootherBank, LandmarkSmoother, Vec3Smoother, EmaScalar, OneEuroScalar } from './filters';
 export type {
