@@ -130,7 +130,7 @@ export class CadBuilder {
       extrudeScale: options.extrudeScale ?? 4.5,
       redrawDistance: options.redrawDistance ?? 0.35,
       groundRadius: options.groundRadius ?? 16,
-      previewColor: options.previewColor ?? 0x38bdf8,
+      previewColor: options.previewColor ?? 0x0284c7,
       bodyColor: options.bodyColor ?? 0x3f3f46,
       edgeColor: options.edgeColor ?? 0xc9d2de,
     };

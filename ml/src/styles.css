@@ -1,12 +1,12 @@
 :root {
-  color-scheme: dark;
+  color-scheme: light;
   font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
-  --bg: #0b0e14;
-  --panel: #0d1117;
-  --panel-border: #1f2937;
-  --text: #e5e7eb;
-  --text-dim: #9ca3af;
-  --accent: #38bdf8;
+  --bg: #f4f6fa;
+  --panel: #ffffff;
+  --panel-border: #e2e8f0;
+  --text: #0f172a;
+  --text-dim: #64748b;
+  --accent: #0284c7;
 }
 
 * {
@@ -31,19 +31,19 @@ body {
   min-height: 100vh;
 }
 
-/* ---- Top toolbar (glassmorphism) ---- */
+/* ---- Top toolbar (light glassmorphism) ---- */
 .toolbar {
   position: sticky;
   top: 0;
   z-index: 40;
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 12px;
   padding: 10px 18px;
-  background: rgba(13, 17, 23, 0.72);
-  backdrop-filter: blur(16px) saturate(150%);
-  -webkit-backdrop-filter: blur(16px) saturate(150%);
-  border-bottom: 1px solid rgba(148, 163, 184, 0.14);
+  background: rgba(255, 255, 255, 0.78);
+  backdrop-filter: blur(12px) saturate(140%);
+  -webkit-backdrop-filter: blur(12px) saturate(140%);
+  border-bottom: 1px solid rgba(15, 23, 42, 0.08);
 }
 
 .toolbar-brand {
@@ -63,15 +63,9 @@ body {
   display: flex;
   gap: 4px;
   padding: 4px;
-  background: rgba(15, 23, 42, 0.55);
-  border: 1px solid rgba(148, 163, 184, 0.12);
+  background: rgba(241, 245, 249, 0.7);
+  border: 1px solid rgba(15, 23, 42, 0.06);
   border-radius: 10px;
-}
-
-.toolbar-separator {
-  width: 1px;
-  align-self: stretch;
-  background: rgba(148, 163, 184, 0.15);
 }
 
 .toolbar-spacer {
@@ -84,14 +78,15 @@ button {
   font-size: 13px;
   padding: 6px 14px;
   border-radius: 7px;
-  border: 1px solid #374151;
-  background: #1f2937;
+  border: 1px solid #cbd5e1;
+  background: #ffffff;
   color: var(--text);
   cursor: pointer;
 }
 
 button:hover:not(:disabled) {
-  background: #374151;
+  background: #f1f5f9;
+  border-color: #94a3b8;
 }
 
 button:disabled {
@@ -114,29 +109,27 @@ button:disabled {
 }
 
 .toolbar-button:hover:not(:disabled) {
-  background: rgba(148, 163, 184, 0.12);
+  background: rgba(15, 23, 42, 0.06);
   color: var(--text);
 }
 
-.tool-button.active,
-.tool-button[aria-pressed='true'] {
-  background: rgba(56, 189, 248, 0.16);
-  border-color: rgba(56, 189, 248, 0.45);
-  color: var(--accent);
+.utility-button.danger {
+  color: #b91c1c;
 }
 
 .utility-button.danger:hover:not(:disabled) {
-  color: #f87171;
-  background: rgba(248, 113, 113, 0.1);
+  color: #dc2626;
+  background: rgba(220, 38, 38, 0.08);
+  border-color: rgba(220, 38, 38, 0.3);
 }
 
 .utility-button.accent {
-  border-color: rgba(56, 189, 248, 0.4);
   color: var(--accent);
 }
 
 .utility-button.accent:hover:not(:disabled) {
-  background: rgba(56, 189, 248, 0.16);
+  background: rgba(2, 132, 199, 0.1);
+  border-color: rgba(2, 132, 199, 0.3);
 }
 
 /* ---- Workspace: full-bleed 3D viewport + floating camera thumbnail ---- */
@@ -156,6 +149,7 @@ button:disabled {
   border: 1px solid var(--panel-border);
   border-radius: 12px;
   overflow: hidden;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06);
 }
 
 #cad-panel {
@@ -172,13 +166,13 @@ button:disabled {
   width: clamp(220px, 24vw, 340px);
   display: flex;
   flex-direction: column;
-  background: rgba(13, 17, 23, 0.82);
-  backdrop-filter: blur(16px) saturate(150%);
-  -webkit-backdrop-filter: blur(16px) saturate(150%);
-  border: 1px solid rgba(148, 163, 184, 0.18);
+  background: rgba(255, 255, 255, 0.9);
+  backdrop-filter: blur(12px) saturate(140%);
+  -webkit-backdrop-filter: blur(12px) saturate(140%);
+  border: 1px solid rgba(15, 23, 42, 0.1);
   border-radius: 12px;
   overflow: hidden;
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.14);
   transition: width 200ms ease;
 }
 
@@ -191,7 +185,7 @@ button:disabled {
   align-items: center;
   gap: 8px;
   padding: 4px 8px 4px 12px;
-  border-top: 1px solid rgba(148, 163, 184, 0.08);
+  border-top: 1px solid rgba(15, 23, 42, 0.06);
 }
 
 #thumb-expand {
@@ -252,34 +246,34 @@ button:disabled {
   height: 7px;
   border-radius: 50%;
   flex: none;
-  background: #64748b;
-  box-shadow: 0 0 8px rgba(100, 116, 139, 0.6);
+  background: #94a3b8;
+  box-shadow: 0 0 6px rgba(100, 116, 139, 0.4);
   transition: background 150ms ease, box-shadow 150ms ease;
 }
 
 .status[data-state='IDLE']::before {
-  background: #facc15;
-  box-shadow: 0 0 8px rgba(250, 204, 21, 0.5);
+  background: #d97706;
+  box-shadow: 0 0 6px rgba(217, 119, 6, 0.4);
 }
 
 .status[data-state='DRAWING_BASE']::before {
-  background: #22c55e;
-  box-shadow: 0 0 8px rgba(34, 197, 94, 0.6);
+  background: #16a34a;
+  box-shadow: 0 0 6px rgba(22, 163, 74, 0.45);
 }
 
 .status[data-state='EXTRUDING']::before {
-  background: #f97316;
-  box-shadow: 0 0 8px rgba(249, 115, 22, 0.6);
+  background: #ea580c;
+  box-shadow: 0 0 6px rgba(234, 88, 12, 0.45);
 }
 
 .status[data-state='ORBITING']::before {
-  background: #3b82f6;
-  box-shadow: 0 0 8px rgba(59, 130, 246, 0.6);
+  background: #2563eb;
+  box-shadow: 0 0 6px rgba(37, 99, 235, 0.45);
 }
 
 .status[data-state='ZOOMING']::before {
-  background: #a855f7;
-  box-shadow: 0 0 8px rgba(168, 85, 247, 0.6);
+  background: #9333ea;
+  box-shadow: 0 0 6px rgba(147, 51, 234, 0.45);
 }
 
 /* ---- CAD viewport (Three.js canvas fills the panel) ---- */
@@ -301,7 +295,7 @@ button:disabled {
   color: var(--text-dim);
   margin: 0;
   padding: 10px 18px;
-  border-top: 1px solid rgba(148, 163, 184, 0.08);
+  border-top: 1px solid rgba(15, 23, 42, 0.06);
   line-height: 1.6;
 }
 
