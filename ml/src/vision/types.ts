@@ -118,6 +118,12 @@ export interface ExtrudeEvent {
   scaleFactor?: number;
   /** Per-frame pull delta `D - D_prev` (normalized units). dual-hand only. */
   deltaDistance?: number;
+  /**
+   * Horizontal / vertical gap between the two pinch centers (absolute,
+   * aspect-corrected units of video width). dual-hand only.
+   */
+  spanX?: number;
+  spanY?: number;
   /** Per-frame vertical delta of landmark 8 in device units. single-hand only. */
   deltaHeight?: number;
   /** Cumulative vertical delta since single-hand mode began. single-hand only. */
@@ -130,6 +136,13 @@ export interface ExtrudeEndEvent {
   type: 'extrude_end';
   timestamp: number;
   mode: ExtrudeMode;
+  /**
+   * True when the extrusion ended from single-hand height mode (the upper
+   * pinch released first, then the lower hand set the height). False when
+   * both pinches released together or the lower pinch released first while
+   * the upper one was still held — consumers treat that as a flat build.
+   */
+  heightSet: boolean;
 }
 
 export interface OrbitStartEvent {
