@@ -9,9 +9,9 @@
  * through the `onModeRequest` callback. In SELECT mode a second stack of
  * mutually exclusive toggles, [ XZ PLANE ] (default) and
  * [ Y AXIS (ELEVATE) ], sits vertically below the mode bar in the top-left
- * corner (`onDragConstraintRequest`); in CREATE mode a row of shape buttons
- * (e.g. [ CUBE ] [ CUBOID ] [ CYLINDER ] [ SPHERE ], from the `shapes`
- * option) sits below it instead (`onShapeRequest`).
+ * corner (`onDragConstraintRequest`); in CREATE mode a column of shape
+ * icon buttons (cube / cuboid / cylinder / sphere, from the `shapes` option)
+ * is stacked vertically down the right edge instead (`onShapeRequest`).
  *
  * Every button responds to a mouse click or to a **pointing** hand (index
  * finger up, other fingers curled — `HandSnapshot.pointing`) holding its
@@ -202,8 +202,14 @@ const AR_RING_NEEDLE_STROKE = 'rgba(251, 191, 36, 0.95)';
 /** A CREATE-mode shape button: `id` is the host's opaque shape key. */
 export interface OverlayShape<S extends string = string> {
   id: S;
+  /** Name of the shape (drawn as text only when no `icon` is given). */
   label: string;
+  /** Line icon drawn on the button instead of the label. */
+  icon?: OverlayShapeIcon;
 }
+
+/** Built-in line icons for the CREATE-mode shape buttons. */
+export type OverlayShapeIcon = 'cube' | 'cuboid' | 'cylinder' | 'sphere';
 
 /**
  * Options for the debug overlay. `S` is the host's shape id type — shape ids
@@ -1021,62 +1027,117 @@ export class DebugOverlay<S extends string = string> {
   }
 
   /**
-   * CREATE-mode shape row directly below the mode bar: equal-width,
-   * mutually exclusive boxy toggles (inverted when active) with the same
-   * dwell progress bar as the mode buttons. The active shape needs no dwell
-   * feedback (re-selecting it is a no-op).
+   * CREATE-mode shape picker: square icon buttons stacked vertically down
+   * the right edge, below the mode bar — mutually exclusive boxy toggles
+   * (inverted when active) with the same dwell progress bar as the mode
+   * buttons. Shapes without an `icon` fall back to their text label.
    */
   private drawShapeButtons(cssWidth: number): void {
     this.shapeRects = [];
-    const count = this.shapes.length;
-    if (count === 0) return;
+    if (this.shapes.length === 0) return;
     const ctx = this.ctx;
     const scale = this.fontScale(cssWidth);
     const { margin, gap, height: barHeight } = this.barMetrics(cssWidth);
-    const height = Math.max(20, Math.round(26 * scale));
-    const width = (cssWidth - margin * 2 - gap * (count - 1)) / count;
-    const y = margin + barHeight + gap;
+    const size = Math.max(24, Math.round(36 * scale));
+    const x = cssWidth - margin - size;
+    const top = margin + barHeight + gap;
 
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
     this.shapes.forEach((shape, i) => {
-      const x = margin + i * (width + gap);
-      this.shapeRects.push({ x, y, width, height });
-      // Shrink the label to fit the button.
-      let fontSize = Math.max(9, Math.round(12 * scale));
-      ctx.font = `bold ${fontSize}px ui-monospace, monospace`;
-      while (fontSize > 7 && ctx.measureText(shape.label).width > width - 6) {
-        fontSize -= 1;
-        ctx.font = `bold ${fontSize}px ui-monospace, monospace`;
-      }
-
-      if (this.activeShapeId === shape.id) {
+      const y = top + i * (size + gap);
+      this.shapeRects.push({ x, y, width: size, height: size });
+      const active = this.activeShapeId === shape.id;
+      let ink: string;
+      if (active) {
         ctx.fillStyle = '#f8fafc'; // solid inverted background
-        ctx.fillRect(x, y, width, height);
+        ctx.fillRect(x, y, size, size);
         ctx.lineWidth = 2;
         ctx.strokeStyle = '#0f172a';
-        ctx.strokeRect(x + 1, y + 1, width - 2, height - 2);
+        ctx.strokeRect(x + 1, y + 1, size - 2, size - 2);
         ctx.fillStyle = '#0284c7'; // high-contrast indicator bar
-        ctx.fillRect(x + 3, y + height - 6, width - 6, 3);
-        ctx.fillStyle = '#0f172a';
+        ctx.fillRect(x + 3, y + size - 5, size - 6, 3);
+        ink = '#0f172a';
       } else {
         const dwelling = this.shapeDwellTarget === i;
         ctx.fillStyle = dwelling ? 'rgba(15, 23, 42, 0.85)' : 'rgba(15, 23, 42, 0.6)';
-        ctx.fillRect(x, y, width, height);
+        ctx.fillRect(x, y, size, size);
         ctx.lineWidth = dwelling ? 2 : 1.5;
         ctx.strokeStyle = dwelling ? '#e2e8f0' : 'rgba(148, 163, 184, 0.55)';
-        ctx.strokeRect(x + 1, y + 1, width - 2, height - 2);
+        ctx.strokeRect(x + 1, y + 1, size - 2, size - 2);
         if (dwelling && this.dwellMs > 0) {
           const progress = Math.min(1, this.shapeDwellElapsed / this.dwellMs);
           ctx.fillStyle = '#38bdf8';
-          ctx.fillRect(x + 2, y + height - 5, (width - 4) * progress, 3);
+          ctx.fillRect(x + 2, y + size - 5, (size - 4) * progress, 3);
         }
-        ctx.fillStyle = dwelling ? '#f8fafc' : '#cbd5e1';
+        ink = dwelling ? '#f8fafc' : '#cbd5e1';
       }
-      ctx.fillText(shape.label, x + width / 2, y + height / 2);
+      if (shape.icon) {
+        this.drawShapeIcon(shape.icon, x + size / 2, y + size / 2 - 1, size * 0.3, ink);
+      } else {
+        ctx.fillStyle = ink;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.font = `bold ${Math.max(7, Math.round(9 * scale))}px ui-monospace, monospace`;
+        ctx.fillText(shape.label.slice(0, 4), x + size / 2, y + size / 2);
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'alphabetic';
+      }
     });
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'alphabetic';
+  }
+
+  /** Line icon for a shape button, centered at (cx, cy) with half-size r. */
+  private drawShapeIcon(icon: OverlayShapeIcon, cx: number, cy: number, r: number, ink: string): void {
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.strokeStyle = ink;
+    ctx.lineWidth = Math.max(1.5, r * 0.14);
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    if (icon === 'cube' || icon === 'cuboid') {
+      // Isometric box: outer hexagon + the three edges meeting at the near
+      // top corner. The cuboid is stretched wide and squat.
+      const sx = icon === 'cuboid' ? 1.3 : 1;
+      const sy = icon === 'cuboid' ? 0.75 : 1;
+      const hx = r * 0.87 * sx;
+      const hy = r * 0.5 * sy;
+      const v = r * sy; // vertical edge length
+      const top = { x: cx, y: cy - hy - v / 2 };
+      const near = { x: cx, y: cy + hy - v / 2 };
+      const pts = [
+        top,
+        { x: cx + hx, y: cy - v / 2 },
+        { x: cx + hx, y: cy + v / 2 },
+        { x: cx, y: cy + hy + v / 2 },
+        { x: cx - hx, y: cy + v / 2 },
+        { x: cx - hx, y: cy - v / 2 },
+      ];
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (const p of pts.slice(1)) ctx.lineTo(p.x, p.y);
+      ctx.closePath();
+      ctx.moveTo(pts[5].x, pts[5].y);
+      ctx.lineTo(near.x, near.y);
+      ctx.lineTo(pts[1].x, pts[1].y);
+      ctx.moveTo(near.x, near.y);
+      ctx.lineTo(pts[3].x, pts[3].y);
+    } else if (icon === 'cylinder') {
+      const rx = r * 0.8;
+      const ry = r * 0.3;
+      const h = r * 1.3;
+      ctx.ellipse(cx, cy - h / 2, rx, ry, 0, 0, Math.PI * 2);
+      ctx.moveTo(cx - rx, cy - h / 2);
+      ctx.lineTo(cx - rx, cy + h / 2);
+      ctx.ellipse(cx, cy + h / 2, rx, ry, 0, Math.PI, 0, true);
+      ctx.lineTo(cx + rx, cy - h / 2);
+    } else {
+      // Sphere: outline + equator and meridian ellipses.
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.moveTo(cx + r, cy);
+      ctx.ellipse(cx, cy, r, r * 0.35, 0, 0, Math.PI * 2);
+      ctx.moveTo(cx, cy - r);
+      ctx.ellipse(cx, cy, r * 0.35, r, 0, -Math.PI / 2, Math.PI * 1.5);
+    }
+    ctx.stroke();
+    ctx.restore();
   }
 
   /** Rounded HUD panel (bottom-left, always inside the visible panel) with mode, state, FPS, hands and live metrics. */

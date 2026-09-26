@@ -108,11 +108,18 @@ export interface GestureClassifierOptions {
    */
   zoomAnchorSwitchRatio?: number;
   /**
-   * Two fists: cumulative angle (radians) the moving fist must circle around
-   * the anchor before turn deltas are reported — keeps a straight pull
-   * (zoom) from also rotating the view.
+   * Two fists: cumulative angle (radians) the two fists must turn around
+   * each other (steering-wheel) before turn deltas are reported — keeps a
+   * straight pull (zoom) from also rotating the view.
    */
   zoomTurnEngageAngle?: number;
+  /**
+   * Two fists: a fist counts as moving when its smoothed palm speed exceeds
+   * this (units of video width per frame). Both moving → zoom / turn; only
+   * one moving → that fist moves the camera like a single fist; neither →
+   * nothing.
+   */
+  zoomMoveSpeed?: number;
   /** Frames an orbiting / zooming hand may open (palm drag) before the gesture ends. */
   orbitOpenPalmGraceFrames?: number;
   /** Frames a hand may vanish before its gesture state is finalized. */
@@ -220,6 +227,7 @@ export class GestureClassifier {
       | 'rollDeadzone'
       | 'zoomAnchorSwitchRatio'
       | 'zoomTurnEngageAngle'
+      | 'zoomMoveSpeed'
       | 'fistEnterFrames'
       | 'fistExitFrames'
       | 'orbitOpenPalmGraceFrames'
@@ -252,6 +260,8 @@ export class GestureClassifier {
   private zoomAnchor: Handedness | null = null;
   private zoomAngleTotal = 0;
   private zoomTurnEngaged = false;
+  /** Two-fist sub-gesture last frame: both fists zooming, or one moving the camera. */
+  private zoomSubMode: 'zoom' | 'move' | null = null;
   private lastZoomDistance: number | null = null;
   private lastZoomScale: number | null = null;
 
@@ -302,6 +312,7 @@ export class GestureClassifier {
       rollDeadzone: options.rollDeadzone ?? 0.003,
       zoomAnchorSwitchRatio: options.zoomAnchorSwitchRatio ?? 0.5,
       zoomTurnEngageAngle: options.zoomTurnEngageAngle ?? 0.12,
+      zoomMoveSpeed: options.zoomMoveSpeed ?? 0.004,
       fistEnterFrames: options.fistEnterFrames ?? 2,
       fistExitFrames: options.fistExitFrames ?? 2,
       orbitOpenPalmGraceFrames: options.orbitOpenPalmGraceFrames ?? 10,
@@ -861,16 +872,21 @@ export class GestureClassifier {
   }
 
   /**
-   * Two-fist navigation around an anchor. The steadier fist (lower smoothed
-   * speed, with `zoomAnchorSwitchRatio` hysteresis) is the pivot; only the
-   * other fist's motion relative to it counts, so the anchor's own jitter is
-   * ignored:
-   *   - distance change (mover toward / away from the anchor) → `deltaScale`;
-   *   - angle change (mover circling the anchor, + = counter-clockwise on
-   *     screen) → `deltaAngle`, after `zoomTurnEngageAngle` has accumulated.
-   * Ends when a pinch starts, a hand is lost, or one hand stays open longer
-   * than `orbitOpenPalmGraceFrames`. The first frame (and the first frame
-   * after a hand reappears) only records the reference, so there is no jump.
+   * Two-fist navigation. Each fist counts as moving when its smoothed palm
+   * speed exceeds `zoomMoveSpeed`:
+   *   - **both moving** → zoom / turn from the two fists relative to each
+   *     other: the change in the gap between them → `deltaScale`, and their
+   *     rotation around each other (steering-wheel, + = counter-clockwise on
+   *     screen) → `deltaAngle`, after `zoomTurnEngageAngle` has accumulated;
+   *   - **only one moving** → that fist moves the camera exactly like a single
+   *     fist (straightened `orbit` deltas); the still fist does nothing, so
+   *     moving one hand never zooms;
+   *   - **neither moving** → nothing.
+   * The steadier fist is still reported as the `anchor` (with
+   * `zoomAnchorSwitchRatio` hysteresis) for the HUD. Ends when a pinch
+   * starts, a hand is lost, or one hand stays open longer than
+   * `orbitOpenPalmGraceFrames`. The first frame (and the first frame after
+   * a hand reappears) only records the reference, so there is no jump.
    */
   private handleZoom(
     presentHands: Map<Handedness, HandFrame>,
@@ -904,12 +920,11 @@ export class GestureClassifier {
 
     const [a, b] = present;
     const anchor = this.pickAnchor(a, b);
-    const mover = anchor === a ? b : a;
-    const pivot = anchor.palm2D;
-    const prevX = mover.prevPalm2D.x - pivot.x;
-    const prevY = mover.prevPalm2D.y - pivot.y;
-    const nowX = mover.palm2D.x - pivot.x;
-    const nowY = mover.palm2D.y - pivot.y;
+    // Gap vector a → b now and last frame (aspect-corrected, mirrored, Y up).
+    const nowX = b.palm2D.x - a.palm2D.x;
+    const nowY = b.palm2D.y - a.palm2D.y;
+    const prevX = b.prevPalm2D.x - a.prevPalm2D.x;
+    const prevY = b.prevPalm2D.y - a.prevPalm2D.y;
     const distance = Math.hypot(nowX, nowY);
     const prevDistance = Math.hypot(prevX, prevY);
     if (distance <= 1e-6 || prevDistance <= 1e-6) return;
@@ -922,6 +937,37 @@ export class GestureClassifier {
       return;
     }
 
+    const aMoving = a.speedEma > this.options.zoomMoveSpeed;
+    const bMoving = b.speedEma > this.options.zoomMoveSpeed;
+
+    if (aMoving !== bMoving) {
+      // Only one fist moving: it moves the camera like a single fist.
+      if (this.zoomSubMode !== 'move') this.resetCameraPath();
+      this.zoomSubMode = 'move';
+      const moving = aMoving ? a : b;
+      const raw = subtract3(moving.palmCenter, moving.prevPalmCenter);
+      const delta = this.straightenCameraDelta({ x: raw.x, y: raw.y });
+      this.lastOrbitDelta = { x: delta.x, y: delta.y };
+      events.push({
+        type: 'orbit',
+        timestamp,
+        hand: moving.handedness,
+        deltaX: delta.x,
+        deltaY: delta.y,
+        deltaRoll: 0,
+      });
+      // Keep the zoom reference current so a later two-fist zoom has no jump.
+      this.lastZoomDistance = distance;
+      return;
+    }
+    if (!aMoving) {
+      this.zoomSubMode = null; // both still: nothing to do
+      this.lastZoomDistance = distance;
+      return;
+    }
+
+    // Both fists moving: zoom by their gap, turn by their rotation.
+    this.zoomSubMode = 'zoom';
     const deltaScale = distance / prevDistance;
     const scaleFactor = distance / (this.zoomReferenceDistance ?? distance);
     const rawAngle = wrapAngle(Math.atan2(nowY, nowX) - Math.atan2(prevY, prevX));
@@ -974,6 +1020,7 @@ export class GestureClassifier {
     this.zoomAnchor = null;
     this.zoomAngleTotal = 0;
     this.zoomTurnEngaged = false;
+    this.zoomSubMode = null;
     this.lastZoomDistance = null;
     this.lastZoomScale = null;
   }

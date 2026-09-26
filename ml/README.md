@@ -130,7 +130,7 @@ reflected on the overlay's button bar and in the per-frame event's `mode`.
 | **Extrude (dual-hand)** | both hands pinch; pull distance `D` between pinch centers `center = (P_thumb + P_index) / 2` | `extrude_start`, `extrude` (`distance`, `scaleFactor = D / D₀`, `deltaDistance`, `spanX` / `spanY` = horizontal / vertical pinch gap in aspect-corrected units of video width), `extrude_end` (`heightSet`: `false` when both pinches release together or the lower pinch releases first — that upper pinch is then consumed until released) |
 | **Extrude (single-hand)** | while EXTRUDING with one pinch: vertical drag of landmark 8 | `extrude` (`deltaHeight`, `cumulativeHeight`, +Y up) |
 | **Camera move (one fist)** | a *real* closed fist, not just curled fingers (`handShape.ts`): all 4 fingertips folded into the palm — `dist(tip, wrist) < 0.9 · dist(MCP, wrist)`, which rejects claw / hook curls and half-curls — and the thumb tucked over the fingers (thumb tip within 0.75 × palm size of an index / middle / ring knuckle, rejecting a thumbs-up); all ratios, so size / distance / rotation invariant. Needs 3 consecutive frames (app default); once held, thresholds relax by `fistHoldSlack` and one finger may loosen. Only engaged from IDLE with no active pinch, and a pinch never engages from a fist. Palm-center motion is reported as deltas, **straightened** by `PathStraightener` so the camera travels in straight segments instead of copying hand wiggle (see below); the app orbits the camera around the locked origin so the scene follows the fist (fist right → camera swings left, fist up → camera swings lower). **Wrist roll** — twisting the fist like a doorknob, measured as the rotation of the knuckle line (index MCP → pinky MCP) around the wrist → middle-MCP axis — turns the scene around the vertical axis with the twist; reported only after the twist exceeds `rollEngageAngle` (0.15 rad ≈ 9°) per fist, per-frame jitter under `rollDeadzone` dropped | `orbit_start`, `orbit` (`deltaX`, `deltaY` device units, `deltaRoll` radians), `orbit_end` |
-| **Zoom / turn (two fists)** | both hands closed fists (same test). The steadier fist (lower smoothed palm speed; switches only when the other is below `zoomAnchorSwitchRatio` 0.5× its speed) is the **anchor** — the pivot — and only the other fist's motion relative to it counts, so the anchor's own jitter is ignored. Distance `D` from the anchor (aspect-corrected palm centers): moving fist farther away → zoom in, closer → zoom out. Circling the anchor → `deltaAngle` (counter-clockwise on screen = +) turns the scene, after `zoomTurnEngageAngle` (0.12 rad ≈ 7°) of sweep so a straight pull doesn't rotate. Engaged from IDLE, or upgraded from a one-fist move when the second fist closes; ends on a pinch, a lost hand, or one hand open longer than `orbitOpenPalmGraceFrames` (then falls back to a one-fist move if the other fist is still closed) | `zoom_start`, `zoom` (`anchor`, `distance`, `scaleFactor = D / D₀`, `deltaScale = D / D_prev`, `deltaAngle`), `zoom_end` |
+| **Zoom / turn (two fists)** | both hands closed fists (same test). Each fist counts as **moving** when its smoothed palm speed exceeds `zoomMoveSpeed` (0.004 video widths / frame). **Both moving** → zoom by the gap between them (aspect-corrected palm centers): apart → zoom in, together → zoom out; rotating them around each other (steering wheel) → `deltaAngle` (counter-clockwise on screen = +) turns the scene, after `zoomTurnEngageAngle` (0.12 rad ≈ 7°) so a straight pull doesn't rotate. **Only one moving** → that fist moves the camera exactly like a single fist (`orbit` deltas, straightened) and never zooms. **Neither moving** → nothing. The steadier fist is reported as the `anchor` (switches only when the other is below `zoomAnchorSwitchRatio` 0.5× its speed). Engaged from IDLE, or upgraded from a one-fist move when the second fist closes; ends on a pinch, a lost hand, or one hand open longer than `orbitOpenPalmGraceFrames` (then falls back to a one-fist move if the other fist is still closed) | `zoom_start`, `zoom` (`anchor`, `distance`, `scaleFactor = D / D₀`, `deltaScale = D / D_prev`, `deltaAngle`), `orbit` (one fist moving), `zoom_end` |
 | **Open-palm rotation (SELECT)** | while exactly one hand holds a pinch, the *other* hand shows an open palm: all four fingertips extended past their own PIP joints (`dist(tip, wrist) > 1.0 · dist(PIP, wrist)` per finger) and the thumb held out (thumb-tip farther than `openPalmThumbTuckRatio` 0.6 × palm size from the nearest knuckle — the inverse of the fist thumb-tuck test). The palm's tilt (angle of the wrist → middle-MCP vector in the mirrored, aspect-corrected view) is tracked frame-to-frame, unwrapped across ±π and anchored at gesture start, so the app applies `selectedMesh.rotation.y = initialRotation + deltaRotation` and a re-opened palm never jumps the object. Ends — `select_rotate_end` — when the palm closes / starts pinching, the pinch releases, a hand is lost or the mode switches. Only in SELECT mode; elsewhere the same poses route to build / navigation gestures | `select_rotate` (`hand`, `palmHand`, cumulative `deltaRotation` radians), `select_rotate_end` (`palmHand`, `reason`) |
 
 **Straight camera paths.** Building gestures (pinch, extrude) are live and
@@ -184,9 +184,10 @@ pointing fingertip, a progress bar fills). Pinches, fists and open palms
 never press buttons, so moving, editing or building can't switch modes or
 shapes by accident. The app starts in **VIEW** and the active
 mode is shown inverted with an indicator bar (and in the bottom-left HUD).
-In **CREATE** mode a smaller shape row pops up beneath the mode bar —
-**CUBE** (default), **CUBOID**, **CYLINDER**, **SPHERE** — picked the same way
-(point-and-hold / click); it sets the shape for the next build:
+In **CREATE** mode a column of shape icon buttons appears down the right edge
+of the camera view — **cube** (default), **cuboid**, **cylinder**, **sphere** —
+picked the same way (point-and-hold / click); it sets the shape for the next
+build:
 
 1. **Two-hand build** — pinch with both hands: a translucent wireframe
    preview of the selected shape spawns centered on the origin `(0, 0, 0)`,
@@ -215,10 +216,12 @@ In **CREATE** mode a smaller shape row pops up beneath the mode bar —
    `dragHoldMs`, 300 ms, so a quick pinch never nudges it), drag, and
    release to drop it. Dragging moves it under the active
    **constraint toggle** (top-left of the vision overlay): `[ XZ PLANE ]`
-   (default) slides it along the ground plane with the grab offset kept and
-   its elevation locked, while `[ Y AXIS (ELEVATE) ]` ignores horizontal
-   drift and maps vertical hand travel to a lift / lower (clamped so it
-   never sinks below the floor). Switching between the toggles mid-drag
+   (default) slides it on a horizontal plane at the height of the point you
+   grabbed, with its elevation locked, while `[ Y AXIS (ELEVATE) ]` ignores
+   horizontal drift and lifts / lowers it along a camera-facing vertical
+   plane through the grab point (clamped so it never sinks below the floor).
+   Either way the exact point you grabbed stays under your fingertip — in
+   depth as well as sideways. Switching between the toggles mid-drag
    re-anchors, so the mesh never jerks or resets. Pinching empty ground
    deselects (so does leaving SELECT mode), restoring the mesh's normal look
    — the highlight tint / outline go, a picked color stays. While in SELECT mode the camera thumbnail doubles as a live
@@ -250,17 +253,19 @@ In **CREATE** mode a smaller shape row pops up beneath the mode bar —
    doorknob): the scene turns around the vertical axis with your twist
    (`CadScene.onRotate`, `rotateSpeed` 1.5×). Open and re-close the fist to
    ratchet further.
-6. **Zoom / turn** — make fists with both hands and hold one still: it
-   becomes the anchor (ringed in the camera thumbnail). Move the other fist
-   away from it to zoom in, toward it to zoom out (`CadScene.onZoom`, clamped
-   between `minDistance` and `maxDistance`), or circle it around the anchor
-   to turn the scene (`CadScene.onRotate`).
+6. **Zoom / turn** — make fists with both hands and move **both**: pull them
+   apart to zoom in, bring them together to zoom out (`CadScene.onZoom`,
+   clamped between `minDistance` and `maxDistance`), or turn them around
+   each other like a steering wheel to turn the scene (`CadScene.onRotate`).
+   If only one fist moves (the other held still), it just moves the camera
+   like a single fist — it never zooms.
 
 Toolbar (mouse or programmatic): a single **Start camera / Stop** toggle
 (webcam + tracking lifecycle), **Clear scene**, and **Export STL** (binary
 `model.stl` download via `three/examples/jsm/exporters/STLExporter`). New
-builds use the box primitive; cylinder / sphere remain selectable
-programmatically via `CadBuilder.setTool()`.
+builds use the cube by default; the shape is picked with the CREATE-mode
+icon buttons on the camera view (or programmatically via
+`CadBuilder.setTool()`).
 
 ## Event API
 
@@ -315,7 +320,8 @@ on-screen view), +Y up — ready to map into a CAD viewport.
   (`fistFoldRatio` 0.9, `fistMinFoldedFingers` 4, `fistThumbTuckRatio` 0.75,
   `fistHoldSlack` 0.15, `fistPinchGuardDistance`) & debounce frames, wrist 
   roll (`rollEngageAngle` 0.15 rad, `rollDeadzone` 0.003 rad), two-fist anchor
-  (`zoomAnchorSwitchRatio` 0.5, `zoomTurnEngageAngle` 0.12 rad), camera path
+  (`zoomAnchorSwitchRatio` 0.5, `zoomTurnEngageAngle` 0.12 rad,
+  `zoomMoveSpeed` 0.004), camera path
   straightening (`cameraPath`: `startDistance`, `cornerDeviation`,
   `settleDistance`, `deadband`, or `null`), orbit
   open-palm grace, hand-loss grace frames, and open-palm detection for the
@@ -344,10 +350,10 @@ The `<canvas id="overlay">` (pure Canvas 2D) mirrors the feed and draws:
   mode bar in the top-left corner: `[ XZ PLANE ]` (default) and
   `[ Y AXIS (ELEVATE) ]` — same boxy style and pointing activation
   (`onDragConstraintRequest`);
-- in **CREATE mode**, a **shape row** below the mode bar: `CUBE` (default),
-  `CUBOID`, `CYLINDER`, `SPHERE` (from the `shapes` option; picks reported
-  through `onShapeRequest` → `CadBuilder.setTool`) — same boxy style and
-  pointing activation;
+- in **CREATE mode**, a column of square **shape icon buttons** down the
+  right edge (cube (default), cuboid, cylinder, sphere — from the `shapes`
+  option, each with an `icon`; picks reported through `onShapeRequest` →
+  `CadBuilder.setTool`) — same boxy style and pointing activation;
 - in **SELECT mode**, a live **AR spatial mirror**: the 3D ground grid and
   every committed mesh are projected through the scene camera's
   webcam-aspect twin (`CadScene.interactionCamera` — same pose and vertical

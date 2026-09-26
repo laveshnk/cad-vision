@@ -90,13 +90,14 @@ const overlay = new DebugOverlay<CadTool>(canvas, {
   // dwell or pinch) requests engine mode changes; the engine feeds the
   // active mode back through the per-frame event, which renders the button.
   onModeRequest: (mode) => engine.setMode(mode),
-  // CREATE mode pops up a shape row under the mode bar; the picked shape is
-  // the builder's tool for the next build (default: cube).
+  // CREATE mode shows shape icon buttons down the right edge of the camera
+  // view; the picked shape is the builder's tool for the next build
+  // (default: cube).
   shapes: [
-    { id: 'box', label: 'CUBE' },
-    { id: 'cuboid', label: 'CUBOID' },
-    { id: 'cylinder', label: 'CYLINDER' },
-    { id: 'sphere', label: 'SPHERE' },
+    { id: 'box', label: 'CUBE', icon: 'cube' },
+    { id: 'cuboid', label: 'CUBOID', icon: 'cuboid' },
+    { id: 'cylinder', label: 'CYLINDER', icon: 'cylinder' },
+    { id: 'sphere', label: 'SPHERE', icon: 'sphere' },
   ],
   activeShape: builder.activeTool,
   onShapeRequest: (shape) => builder.setTool(shape),
