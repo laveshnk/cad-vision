@@ -148,15 +148,22 @@ The full-bleed viewport is a Three.js scene (floor grid, fog, damped orbit
 camera, starting straight on so the grid is square to the screen) driven entirely by the gesture events above, with the camera rendered
 as a floating thumbnail (top-left, click ⤢ to expand/collapse) over it:
 
-1. **Draw the footprint** — pinch and drag: the pinch start raycasts onto the
-   ground plane (`y = 0`), spawning a translucent wireframe preview of the
-   selected tool; dragging sets the footprint (box: corner-to-corner
-   rectangle, cylinder/sphere: center + radius). Releasing freezes the base.
-2. **Extrude** — pinch with both hands and pull apart to scale, or keep one
-   pinch and drag vertically. Spheres grow their radius instead of height.
-3. **Commit** — releasing the extrude gesture (or engaging a fist / open
-   palm) freezes the preview into a solid matte mesh with crisp
-   `EdgesGeometry` outlines.
+1. **Two-hand build** — pinch with both hands: a translucent wireframe
+   preview of the selected tool spawns centered on the origin `(0, 0, 0)`.
+   Pull the pinches apart / together to size the base — one dimension: the
+   box's square side, or the cylinder / sphere diameter (`baseSizeScale`
+   world units per normalized unit of pinch gap).
+2. **Set the height** — relax the upper pinch; the base freezes and the
+   still-pinched lower hand's vertical drag sets the height (spheres grow
+   their radius instead). Re-pinch the other hand to resize the base again.
+   Releasing the last pinch commits the preview as a solid matte mesh with
+   crisp `EdgesGeometry` outlines (a fist / zoom also commits).
+3. **Single-hand footprint (legacy)** — pinch and drag with one hand: the
+   pinch start raycasts onto the ground plane (`y = 0`) and dragging sets the
+   footprint (box: corner-to-corner rectangle, cylinder/sphere: center +
+   radius). It is committed with the default height on the next build or
+   camera gesture; pinching the second hand before releasing replaces it
+   with a two-hand build.
 4. **Move the camera** — make a fist and move it: the scene follows your
    hand ("grab and drag") — fist right moves the camera left, fist up moves
    it down — with damping (`CadScene.onPan`); open palm stops.

@@ -617,6 +617,60 @@ describe('GestureClassifier — extrusion', () => {
     }
   });
 
+  it('two-hand build: upper hand releases, lower hand drives height, last release ends', () => {
+    const classifier = new GestureClassifier(TEST_OPTIONS);
+    let t = 0;
+    // Right hand higher in the image (smaller raw y) than the left.
+    classifier.process(
+      [
+        makeHand('Left', { pinchDist: 0.04, dx: -0.2, dy: 0.1 }),
+        makeHand('Right', { pinchDist: 0.04, dx: 0.2, dy: -0.1 }),
+      ],
+      (t += 100)
+    );
+    // Upper (Right) hand relaxes its pinch: still EXTRUDING, no extrude_end.
+    let result = classifier.process(
+      [
+        makeHand('Left', { pinchDist: 0.04, dx: -0.2, dy: 0.1 }),
+        makeHand('Right', { pinchDist: 0.2, dx: 0.2, dy: -0.1 }),
+      ],
+      (t += 100)
+    );
+    expect(typesOf(result.events)).toContain('pinch_end');
+    expect(typesOf(result.events)).not.toContain('extrude_end');
+    expect(classifier.currentState).toBe('EXTRUDING');
+
+    // Lower (Left) hand drags up twice: cumulative height accumulates.
+    classifier.process(
+      [
+        makeHand('Left', { pinchDist: 0.04, dx: -0.2, dy: 0.05 }),
+        makeHand('Right', { pinchDist: 0.2, dx: 0.2, dy: -0.1 }),
+      ],
+      (t += 100)
+    );
+    result = classifier.process(
+      [
+        makeHand('Left', { pinchDist: 0.04, dx: -0.2, dy: 0 }),
+        makeHand('Right', { pinchDist: 0.2, dx: 0.2, dy: -0.1 }),
+      ],
+      (t += 100)
+    );
+    const extrude = result.events.find((e) => e.type === 'extrude');
+    expect(extrude).toMatchObject({ mode: 'single-hand', hand: 'Left' });
+    if (extrude?.type === 'extrude') expect(extrude.cumulativeHeight).toBeCloseTo(0.2);
+
+    // Lower hand releases: extrusion ends (the app commits the solid).
+    result = classifier.process(
+      [
+        makeHand('Left', { pinchDist: 0.2, dx: -0.2, dy: 0 }),
+        makeHand('Right', { pinchDist: 0.2, dx: 0.2, dy: -0.1 }),
+      ],
+      (t += 100)
+    );
+    expect(typesOf(result.events)).toContain('extrude_end');
+    expect(classifier.currentState).toBe('IDLE');
+  });
+
   it('returns to IDLE when the last pinch releases', () => {
     const classifier = new GestureClassifier(TEST_OPTIONS);
     let t = 0;
