@@ -1,11 +1,16 @@
-# CAD Vision — Gesture-Driven CAD Workbench (`ml/`)
+# CAD Vision — a hands-and-voice 3D playground (`ml/`)
 
-Self-contained TypeScript application that turns webcam hand tracking into an
-interactive CAD tool. The MediaPipe-based gesture engine emits **normalized CAD
-gesture events** (pinch/draw, extrude, camera move, zoom); a decoupled Three.js module
-(orbit rig, ground-plane building, STL export) and a light glass toolbar
-consume them. The camera renders as a floating video-call-style thumbnail
+Self-contained TypeScript application that turns a webcam into a place to
+build things. Your **hands** do the continuous work: a MediaPipe gesture engine
+emits normalized events (pinch, extrude, camera move, zoom) that a decoupled
+Three.js module turns into solids. Your **voice** does the discrete work: an
+agent hears what you ask for, builds it, and answers out loud — and it knows
+you started talking because the camera watched your mouth move, so there is no
+button to press. The camera renders as a floating video-call-style thumbnail
 (landmarks, skeleton, HUD overlay) over the full-bleed 3D viewport.
+
+Anything you build exports as `model.stl`, so it can go to a slicer or a
+printer — but that is a choice at the end, not the point.
 
 ## Quick start
 
@@ -24,17 +29,51 @@ re-run it any time with `npm run setup:assets`.
 Camera access requires a secure context: `localhost` works for development;
 serving over the network needs HTTPS.
 
+### Voice (optional)
+
+Hands work with `npm run dev` alone. Voice needs the small Node server that
+holds the API keys:
+
+```bash
+cp .env.example .env   # fill in Gemini + ElevenLabs (+ Presage) keys
+npm run dev:server     # http://localhost:8787 — Vite proxies /api and /ws to it
+```
+
+Then click **Voice** in the toolbar. Each service degrades on its own: without
+`PRESAGE_API_KEY` a manual **Talk** button appears instead of hands-free mouth
+detection, and without the ElevenLabs or Gemini keys the voice button reports
+the failure and the hand-building side keeps working.
+
+> ElevenLabs free accounts can only use *premade* voices. A Voice Library ID in
+> `ELEVENLABS_VOICE_ID` returns `402 paid_plan_required`; the default in
+> `.env.example` works on any plan.
+
 ## Architecture
 
 ```
+shared/
+└── agentTools.ts              # the voice contract: tool schemas, validators, SceneSummary
+server/                        # Node 24 (type-stripped .ts); holds every API key
+├── index.ts                   # http + ws: /api/voice/*, /api/agent/*, /ws/presage
+├── agent.ts                   # Gemini turn loop + per-session history
+├── elevenlabs.ts              # Scribe token minting + TTS streaming
+└── presage.ts                 # SmartSpectra frames → "is the mouth moving"
 src/
-├── main.ts                    # app orchestrator: vision events → CAD + UI wiring
+├── main.ts                    # app orchestrator: vision + voice events → CAD + UI
 ├── styles.css                 # light theme; full-bleed viewport, camera thumbnail, glass toolbar
 ├── cad/
-│   ├── CadScene.ts            # Three.js viewport: camera rig, lights, grid, orbit
-│   └── CadBuilder.ts          # gesture-driven primitives + STL export
+│   ├── CadScene.ts            # Three.js viewport: camera rig, lights, grid, orbit, snapshots
+│   └── CadBuilder.ts          # hand- and voice-built primitives + STL export
 ├── ui/
-│   └── Toolbar.ts             # CAD toolbar: camera toggle, Clear scene, Export STL
+│   ├── Toolbar.ts             # camera + voice toggles, Clear scene, Export for printing
+│   └── VoiceHud.ts            # voice state badge + caption strip
+├── voice/
+│   ├── PresageFrames.ts       # streams webcam stills to the server over a WebSocket
+│   ├── TalkGate.ts            # hysteresis: when to open/close the mic, and barge-in
+│   ├── Transcriber.ts         # ElevenLabs Scribe realtime connection
+│   ├── Speaker.ts             # interruptible playback of the spoken reply
+│   ├── VoiceAgent.ts          # facade: gate → transcript → agent → tools → speech
+│   └── index.ts               # public API barrel
 └── vision/
     ├── types.ts               # shared types + event payloads
     ├── coordinates.ts         # device-space mapping, vec3 math
@@ -60,15 +99,35 @@ HandTracker (raw MediaPipe hands)
   → listeners            typed events + per-frame debug event
 ```
 
-App wiring (strictly decoupled — `src/cad` and `src/ui` import nothing from
-`src/vision`; only device-space coordinates, deltas and state events cross
-the boundary):
+Voice pipeline:
 
 ```
-GestureEngine  --typed events-->  main.ts (orchestrator)
-  ├── CadScene / CadBuilder      primitives, extrusion, orbit, STL export
-  └── Toolbar                    camera toggle + scene utilities
+PresageFrames   webcam stills → the server → SmartSpectra → is the mouth moving
+  → TalkGate      hysteresis: open after 150 ms of talking, close after 700 ms
+                  of silence, barge-in after 300 ms of talking over playback
+  → Transcriber   ElevenLabs Scribe realtime; emits one sealed utterance
+  → /api/agent/turn  Gemini, with the scene summary and a viewport snapshot
+  → ToolExecutor  validated CadCommands run against CadBuilder
+  → Speaker       ElevenLabs TTS, interruptible
 ```
+
+The gate is driven by the **face**, not the microphone, so the agent's own
+speech can never re-trigger it — and talking over the reply cuts it off.
+
+App wiring (strictly decoupled — `src/cad` and `src/ui` import nothing from
+`src/vision` or `src/voice`; only device-space coordinates, deltas, state
+events and validated `CadCommand`s cross the boundaries):
+
+```
+GestureEngine  --typed events-------->  main.ts (orchestrator)
+VoiceAgent     --validated commands-->
+               <--SceneSummary + viewport snapshot--
+  ├── CadScene / CadBuilder      primitives, extrusion, orbit, STL export
+  └── Toolbar / VoiceHud         camera + voice toggles, state, captions
+```
+
+API keys live only in `server/`. The browser gets a short-lived, single-use
+Scribe token from `/api/voice/token`; nothing secret is ever bundled.
 
 ### Running mode note
 
@@ -163,13 +222,7 @@ as a floating thumbnail (top-left, click ⤢ to expand/collapse) over it:
    `EdgesGeometry` outlines (a fist / zoom also commits). Releasing the
    **lower** pinch first, or both at once, commits a **flat** plate
    (`flatHeight`, spheres unaffected).
-3. **Single-hand footprint (legacy)** — pinch and drag with one hand: the
-   pinch start raycasts onto the ground plane (`y = 0`) and dragging sets the
-   footprint (box: square, cuboid: corner-to-corner rectangle,
-   cylinder/sphere: center + radius). It is committed with the default height on the next build or
-   camera gesture; pinching the second hand before releasing replaces it
-   with a two-hand build.
-4. **Orbit the camera** — make a fist and move it: the camera orbits the
+3. **Orbit the camera** — make a fist and move it: the camera orbits the
    world origin and the scene follows your hand — fist right swings the
    camera left, fist up swings it lower — with damping (`CadScene.onOrbit`);
    open palm stops. The camera focus is **locked to `(0, 0, 0)`**: the view
@@ -179,17 +232,44 @@ as a floating thumbnail (top-left, click ⤢ to expand/collapse) over it:
    doorknob): the scene turns around the vertical axis with your twist
    (`CadScene.onRotate`, `rotateSpeed` 1.5×). Open and re-close the fist to
    ratchet further.
-5. **Zoom / turn** — make fists with both hands and hold one still: it
+4. **Zoom / turn** — make fists with both hands and hold one still: it
    becomes the anchor (ringed in the camera thumbnail). Move the other fist
    away from it to zoom in, toward it to zoom out (`CadScene.onZoom`, clamped
    between `minDistance` and `maxDistance`), or circle it around the anchor
    to turn the scene (`CadScene.onRotate`).
 
-Toolbar (mouse or programmatic): a single **Start camera / Stop** toggle
-(webcam + tracking lifecycle), **Clear scene**, and **Export STL** (binary
-`model.stl` download via `three/examples/jsm/exporters/STLExporter`). New
-builds use the box primitive; cylinder / sphere remain selectable
-programmatically via `CadBuilder.setTool()`.
+Toolbar (mouse or programmatic): a **Start camera / Stop** toggle (webcam +
+tracking lifecycle), a **Voice** toggle, **Clear scene**, and **Export for
+printing** (binary `model.stl` download via
+`three/examples/jsm/exporters/STLExporter`). New builds use the box
+primitive; cylinder / sphere remain selectable by voice or via
+`CadBuilder.setTool()`.
+
+## Talking to it
+
+Turn on **Voice** and start talking — the badge on the camera thumbnail turns
+green when the mic is actually open, and captions along the bottom of the
+viewport show what was heard and what the agent said back. Interrupt the reply
+by talking over it.
+
+The agent can call these, and nothing else (`shared/agentTools.ts`):
+
+| Tool | Say something like |
+| ---- | ------------------ |
+| `add_shape` | "give me a tall red tube", "put a small ball next to it" |
+| `set_shape` | "switch to cylinder" (so your *hands* build cylinders next) |
+| `set_color` | "make it blue", "paint everything white" |
+| `remove_last` | "undo that", "nope, take it back" |
+| `clear_scene` | "start over" |
+| `describe_scene` | "what have I got?" |
+| `export_for_printing` | "save this for printing" |
+| `start_camera` / `stop_camera` | "turn the camera on" |
+
+Every call is re-validated in the browser before it reaches `CadBuilder`:
+sizes and positions are clamped rather than rejected ("make it huge" should
+still build something), but unknown tools, shapes and colors are refused and
+reported back so the agent corrects itself out loud. Spoken synonyms map to
+the four primitives — cube/block → box, tube → cylinder, ball/orb → sphere.
 
 ## Event API
 
@@ -219,9 +299,12 @@ await engine.start(videoElement); // from a user gesture (camera permission)
 engine.stop();
 ```
 
-`main.ts` logs every gesture event to the console as JSON for downstream CAD
-consumers. Event payloads use device space: `[-1, 1]`, X mirrored (matches the
-on-screen view), +Y up — ready to map into a CAD viewport.
+Event payloads use device space: `[-1, 1]`, X mirrored (matches the on-screen
+view), +Y up — ready to map into a CAD viewport.
+
+Append `?debug` to the URL to log every gesture event to the console as JSON
+and expose the live module graph on `window.cadVision` (`engine`, `overlay`,
+`cadScene`, `builder`, `toolbar`, `voiceAgent`, `voiceHud`).
 
 ## Configuration
 
@@ -260,8 +343,10 @@ The `<canvas id="overlay">` (pure Canvas 2D) mirrors the feed and draws:
 ## Tests
 
 ```bash
-npm test        # vitest — coordinates, filters, handedness stabilizer, path straightener, classifier/FSM unit tests
-npm run build   # tsc --noEmit + vite production build
+npm test          # vitest — coordinates, filters, handedness stabilizer, path
+                  # straightener, classifier/FSM, talk gate, tool validation
+npm run typecheck # tsc --noEmit (browser) + tsc -p tsconfig.server.json (server)
+npm run build     # typecheck + vite production build
 ```
 
 ## Troubleshooting
@@ -273,4 +358,25 @@ npm run build   # tsc --noEmit + vite production build
   `strategy: 'one-euro'`.
 - **Pinch feels off** — tune `pinchStartThreshold` / `pinchReleaseThreshold`
   to hand size and camera distance.
+- **Voice button errors immediately** — start the API server
+  (`npm run dev:server`) and check `GET /healthz`, which reports which keys
+  it found.
+- **Spoken replies fail with 402** — `ELEVENLABS_VOICE_ID` is a Voice Library
+  voice; free accounts can only use premade ones. See `.env.example`.
+- **A "Talk" button appeared** — hands-free mouth detection is not running
+  (no `PRESAGE_API_KEY`, the key was rejected, or the camera is off). It is a
+  toggle, not a push-to-talk: press **Talk**, say your piece, then press
+  **Send**. Starting the camera hands control back to your face automatically.
+- **Server log says "not in a valid state" or `POST /device/pair` 401** — the
+  Physiology API key in `PRESAGE_API_KEY` was rejected. The pipeline dies on
+  that, and every later frame repeats the same error. Replace the key from
+  [physiology.presagetech.com](https://physiology.presagetech.com/auth/login)
+  and restart `npm run dev:server`. Voice still works through the **Talk**
+  button in the meantime.
+- **It hears you but nothing happens** — the turn is never being sealed. That
+  means the gate never closed: either you are in manual mode and did not press
+  **Send**, or mouth detection is stuck reporting speech (the gate gives up
+  after `maxOpenMs`, 20 s, and commits anyway).
+- **The mic opens when you are not talking** — raise `openDelayMs` in the
+  `TalkGate` options; lower it if the first word keeps getting clipped.
 

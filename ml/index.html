@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>CAD Vision — Gesture-Driven CAD</title>
+    <title>CAD Vision — build with your hands and your voice</title>
     <link rel="stylesheet" href="/src/styles.css" />
   </head>
   <body>
@@ -15,6 +15,9 @@
         <!-- 3D CAD viewport fills the entire workspace (Three.js) -->
         <section id="cad-panel" class="panel">
           <div id="viewport" class="viewport"></div>
+          <!-- Voice captions: what was heard and what the agent said back
+               (mounted by src/ui/VoiceHud.ts) -->
+          <div id="voice-captions"></div>
         </section>
 
         <!-- Floating camera thumbnail (video-call style PiP):
@@ -27,6 +30,8 @@
           </div>
           <div class="vision-thumb-header">
             <span id="status" class="status">Idle</span>
+            <!-- Voice state badge (mounted by src/ui/VoiceHud.ts) -->
+            <span id="voice-pill" hidden></span>
             <button
               id="thumb-expand"
               type="button"
@@ -41,12 +46,10 @@
 
       <footer class="footer">
         <p>
-          Pinch (thumb + index) and drag on the grid to draw a box, release, then pull apart with
-          two pinching hands (or drag up with one) to extrude. A closed fist grabs the scene —
-          move it to pan, roll your wrist to rotate. With two fists, hold one still as the
-          anchor: move the other away to zoom in, toward it to zoom out, or circle it to turn
-          the scene. Committed meshes export as <code>model.stl</code>; gesture events are
-          logged to the console as JSON.
+          Pinch with both hands and pull apart to size a shape, then drag one hand up to make it
+          tall. Make a fist to grab the scene; two fists zoom and turn it. Turn on
+          <strong>Voice</strong> and just say what you want — “give me a red tube”, “taller”,
+          “undo that”. Export any time as <code>model.stl</code>.
         </p>
       </footer>
     </div>

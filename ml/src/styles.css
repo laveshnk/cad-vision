@@ -13,6 +13,12 @@
   box-sizing: border-box;
 }
 
+/* Explicit `display` on buttons and badges outranks the UA `[hidden]` rule,
+   so restate it — the voice controls rely on the `hidden` property. */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body,
 #app {
@@ -132,6 +138,27 @@ button:disabled {
   border-color: rgba(2, 132, 199, 0.3);
 }
 
+/* Voice toggle: tinted while the mic is open, so the toolbar shows the same
+   state as the badge on the camera thumbnail. */
+.toolbar-button[data-voice='listening'],
+.listen-button.active {
+  color: #15803d;
+  background: rgba(22, 163, 74, 0.1);
+  border-color: rgba(22, 163, 74, 0.28);
+}
+
+.toolbar-button[data-voice='thinking'] {
+  color: #b45309;
+  background: rgba(217, 119, 6, 0.1);
+  border-color: rgba(217, 119, 6, 0.28);
+}
+
+.toolbar-button[data-voice='speaking'] {
+  color: #1d4ed8;
+  background: rgba(37, 99, 235, 0.1);
+  border-color: rgba(37, 99, 235, 0.28);
+}
+
 /* ---- Workspace: full-bleed 3D viewport + floating camera thumbnail ---- */
 .workspace {
   position: relative;
@@ -153,6 +180,7 @@ button:disabled {
 }
 
 #cad-panel {
+  position: relative; /* anchors the voice caption strip */
   width: 100%;
   height: 100%;
 }
@@ -274,6 +302,130 @@ button:disabled {
 .status[data-state='ZOOMING']::before {
   background: #9333ea;
   box-shadow: 0 0 6px rgba(147, 51, 234, 0.45);
+}
+
+/* ---- Voice: state badge in the thumbnail header ---- */
+.voice-pill {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  color: var(--text-dim);
+  background: rgba(100, 116, 139, 0.12);
+  transition: color 150ms ease, background 150ms ease;
+}
+
+.voice-pill::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.voice-pill[data-state='listening'] {
+  color: #15803d;
+  background: rgba(22, 163, 74, 0.15);
+}
+
+/* Pulse only while the mic is actually open — the one state worth noticing. */
+.voice-pill[data-state='listening']::before {
+  animation: voice-pulse 1.1s ease-in-out infinite;
+}
+
+.voice-pill[data-state='thinking'] {
+  color: #b45309;
+  background: rgba(217, 119, 6, 0.15);
+}
+
+.voice-pill[data-state='speaking'] {
+  color: #1d4ed8;
+  background: rgba(37, 99, 235, 0.15);
+}
+
+@keyframes voice-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.45;
+    transform: scale(0.72);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .voice-pill[data-state='listening']::before {
+    animation: none;
+  }
+}
+
+/* ---- Voice: caption strip along the bottom of the viewport ---- */
+.voice-captions {
+  position: absolute;
+  left: 50%;
+  bottom: 20px;
+  z-index: 20;
+  transform: translate(-50%, 8px);
+  max-width: min(680px, calc(100% - 48px));
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 18px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.88);
+  backdrop-filter: blur(12px) saturate(140%);
+  -webkit-backdrop-filter: blur(12px) saturate(140%);
+  border: 1px solid rgba(15, 23, 42, 0.1);
+  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.16);
+  opacity: 0;
+  pointer-events: none; /* never steals a drag meant for the viewport */
+  transition: opacity 200ms ease, transform 200ms ease;
+}
+
+.voice-captions.visible {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+.voice-caption {
+  margin: 0;
+  text-align: center;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.voice-caption:empty {
+  display: none;
+}
+
+.voice-caption.heard {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+/* Dimmer while the transcript is still changing. */
+.voice-caption.heard.partial {
+  opacity: 0.6;
+  font-style: italic;
+}
+
+.voice-caption.reply {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.voice-caption.reply.error {
+  color: #b91c1c;
 }
 
 /* ---- CAD viewport (Three.js canvas fills the panel) ---- */
