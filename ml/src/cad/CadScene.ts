@@ -4,11 +4,14 @@
  * Owns the WebGLRenderer, a PerspectiveCamera on a damped spherical orbit
  * rig, soft studio lighting (hemisphere + shadow-casting key light), a
  * shadow-catching floor and an "infinite" grid faded into the background by
- * fog. External control inputs are plain device-space data — `onPan({ deltaX, deltaY })`
- * (truck the camera sideways / vertically), `onRotate({ deltaAngle })` (turn the
- * scene around the vertical axis), `onZoom({ deltaScale })` (dolly in / out) and
- * `onOrbit({ deltaX, deltaY })` — keeping this module fully decoupled from the
- * vision layer.
+ * fog. External control inputs are plain device-space data —
+ * `onOrbit({ deltaX, deltaY })` (orbit around the origin), `onRotate({ deltaAngle })`
+ * (turn the scene around the vertical axis) and `onZoom({ deltaScale })` (dolly
+ * in / out) — keeping this module fully decoupled from the vision layer.
+ *
+ * The camera focus is locked to the world origin (0, 0, 0): the view can only
+ * rotate and zoom, never pan / translate. The camera always sits on a sphere
+ * centered on the origin (radius = zoom distance), recomputed every frame.
  */
 
 import * as THREE from 'three';
@@ -22,14 +25,10 @@ export interface CadSceneOptions {
   cameraAzimuth?: number;
   /** Camera polar angle from +Y (radians); clamped to stay above the floor. */
   cameraPolar?: number;
-  /** Orbit target height above the ground plane. */
-  targetHeight?: number;
   /** Radians of orbit per device-space unit (hand travel). */
   orbitSpeed?: number;
   /** Scene rotation (radians) per radian of input turn (wrist roll / fist sweep). */
   rotateSpeed?: number;
-  /** World units of sideways pan per device-space unit, per unit of camera distance. */
-  panSpeed?: number;
   /** Exponent applied to zoom ratios (higher = more zoom per hand movement). */
   zoomSpeed?: number;
   /** Closest allowed camera distance (world units). */
@@ -47,6 +46,9 @@ export interface CadSceneOptions {
   /** Ground grid divisions. */
   gridDivisions?: number;
 }
+
+/** Fixed orbit pivot: the world origin. Frozen so nothing can move it. */
+const ORBIT_TARGET: Readonly<THREE.Vector3> = Object.freeze(new THREE.Vector3(0, 0, 0));
 
 /** Keep the camera above the floor and out of polar gimbal lock. */
 const POLAR_MIN = 0.12;
@@ -72,13 +74,14 @@ export class CadScene {
   readonly ground: THREE.Mesh;
   /** Origin axis lines (X / Z) drawn just above the ground. */
   readonly axes: THREE.Group;
+  /** Panning / translation is permanently disabled: the focus is locked to the origin. */
+  readonly enablePan = false;
+  /** Allow orbit / rotate input (`onOrbit`, `onRotate`). */
+  enableRotate = true;
+  /** Allow zoom / dolly input (`onZoom`). */
+  enableZoom = true;
 
   private readonly options: Required<CadSceneOptions>;
-  /** Current (smoothed) orbit target. */
-  private readonly target = new THREE.Vector3();
-  /** Desired orbit target (driven by `onPan`). */
-  private readonly targetGoal = new THREE.Vector3();
-  private readonly panRight = new THREE.Vector3();
   /** Current (smoothed) camera spherical coordinates. */
   private readonly spherical = new THREE.Spherical();
   /** Desired camera spherical coordinates (driven by `onOrbit`). */
@@ -95,10 +98,8 @@ export class CadScene {
       cameraDistance: options.cameraDistance ?? 10,
       cameraAzimuth: options.cameraAzimuth ?? 0,
       cameraPolar: options.cameraPolar ?? 1.05,
-      targetHeight: options.targetHeight ?? 0.5,
       orbitSpeed: options.orbitSpeed ?? 1.75,
       rotateSpeed: options.rotateSpeed ?? 1.5,
-      panSpeed: options.panSpeed ?? 0.6,
       zoomSpeed: options.zoomSpeed ?? 1.5,
       minDistance: options.minDistance ?? 2,
       maxDistance: options.maxDistance ?? 40,
@@ -127,8 +128,6 @@ export class CadScene {
     );
 
     this.camera = new THREE.PerspectiveCamera(50, 1, 0.1, 500);
-    this.target.set(0, this.options.targetHeight, 0);
-    this.targetGoal.copy(this.target);
     this.spherical.set(
       this.options.cameraDistance,
       this.options.cameraPolar,
@@ -191,16 +190,24 @@ export class CadScene {
     this.frameId = requestAnimationFrame(this.tick);
   }
 
+  /** The locked orbit target (always (0, 0, 0)); a copy, so callers cannot move it. */
+  get target(): THREE.Vector3 {
+    return ORBIT_TARGET.clone();
+  }
+
   /** The renderer's canvas (mounted into the container). */
   get domElement(): HTMLCanvasElement {
     return this.renderer.domElement;
   }
 
   /**
-   * Apply an orbit delta in device-space units (+X right, +Y up) to the
-   * camera rig. Motion is damped toward the target every frame.
+   * Orbit the camera around the origin by a device-space delta (+X right,
+   * +Y up). The scene follows the hand: hand right swings the camera left,
+   * hand up swings it lower. Only the azimuth / polar angles change, so the
+   * camera never leaves its origin-centered sphere. Damped every frame.
    */
   onOrbit(delta: { deltaX: number; deltaY: number }): void {
+    if (!this.enableRotate) return;
     this.sphericalTarget.theta -= delta.deltaX * this.options.orbitSpeed;
     this.sphericalTarget.phi = THREE.MathUtils.clamp(
       this.sphericalTarget.phi + delta.deltaY * this.options.orbitSpeed,
@@ -210,26 +217,12 @@ export class CadScene {
   }
 
   /**
-   * "Grab the scene" pan by a device-space delta (+X right, +Y up): the scene
-   * follows the hand, so the camera trucks the opposite way (hand right =
-   * camera left, hand up = camera down). Scales with camera distance so the
-   * pan feels the same when zoomed in or out. Motion is damped every frame.
-   */
-  onPan(delta: { deltaX: number; deltaY: number }): void {
-    const theta = this.sphericalTarget.theta;
-    const scale = this.options.panSpeed * this.sphericalTarget.radius;
-    // Camera right vector on the ground plane for azimuth `theta`.
-    this.panRight.set(Math.cos(theta), 0, -Math.sin(theta));
-    this.targetGoal.addScaledVector(this.panRight, -delta.deltaX * scale);
-    this.targetGoal.y -= delta.deltaY * scale;
-  }
-
-  /**
    * Turn the scene around the vertical axis by an input angle (radians,
    * + = counter-clockwise as seen on screen). The scene follows the turn, so
    * the camera orbits the opposite way. Damped every frame.
    */
   onRotate(delta: { deltaAngle: number }): void {
+    if (!this.enableRotate) return;
     this.sphericalTarget.theta -= delta.deltaAngle * this.options.rotateSpeed;
   }
 
@@ -239,6 +232,7 @@ export class CadScene {
    * Clamped to [minDistance, maxDistance].
    */
   onZoom(delta: { deltaScale: number }): void {
+    if (!this.enableZoom) return;
     if (!(delta.deltaScale > 0) || !Number.isFinite(delta.deltaScale)) return;
     this.sphericalTarget.radius = THREE.MathUtils.clamp(
       this.sphericalTarget.radius / Math.pow(delta.deltaScale, this.options.zoomSpeed),
@@ -283,13 +277,16 @@ export class CadScene {
     this.spherical.theta += (this.sphericalTarget.theta - this.spherical.theta) * blend;
     this.spherical.phi += (this.sphericalTarget.phi - this.spherical.phi) * blend;
     this.spherical.radius += (this.sphericalTarget.radius - this.spherical.radius) * blend;
-    this.target.lerp(this.targetGoal, blend);
     this.updateCameraPosition();
     this.renderer.render(this.scene, this.camera);
   };
 
+  /**
+   * Place the camera on its origin-centered sphere and aim at the origin.
+   * Runs every frame, so any outside write to `camera.position` is undone.
+   */
   private updateCameraPosition(): void {
-    this.camera.position.setFromSpherical(this.spherical).add(this.target);
-    this.camera.lookAt(this.target);
+    this.camera.position.setFromSpherical(this.spherical);
+    this.camera.lookAt(ORBIT_TARGET);
   }
 }
