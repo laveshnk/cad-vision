@@ -3,8 +3,10 @@
  * overlay canvas (SELECT-mode spatial mirror).
  *
  * `buildArSceneFrame` projects the ground grid (Y = 0) and every committed
- * solid through the live Three.js camera (`CadScene.projectToCanvas`) into
- * 2D canvas space:
+ * solid through the live Three.js camera's webcam-aspect twin
+ * (`CadScene.interactionCamera` + `projectToCanvas`) into 2D canvas space —
+ * the canvas passed in is the webcam image's on-screen rect, so proportions
+ * are true (a sphere stays round) and ghosts align with the hands:
  *
  * - the grid becomes semi-transparent cyan polylines matching the 3D
  *   perspective — a 30 × 30 world-unit floor window centered on the origin
@@ -110,6 +112,10 @@ export function buildArSceneFrame(
   canvasHeight: number,
   options: ArMirrorOptions = {}
 ): ArSceneFrame {
+  // Project through the webcam-aspect interaction camera (synced once per
+  // frame): ghosts keep their true proportions on the camera view and line
+  // up with the hands, whatever the wide viewport's aspect is.
+  const camera = scene.interactionCamera;
   const halfExtent = options.gridHalfExtent ?? 15;
   const step = options.gridStep ?? 1;
   const majorStep = options.gridMajorStep ?? 5;
@@ -126,6 +132,7 @@ export function buildArSceneFrame(
     // whole segment lies outside the canvas bounds.
     const alongX = projectSegment(
       scene,
+      camera,
       segmentFrom.set(-halfExtent, 0, at),
       segmentTo.set(halfExtent, 0, at),
       canvasWidth,
@@ -134,6 +141,7 @@ export function buildArSceneFrame(
     if (alongX) grid.push({ points: alongX, major });
     const alongZ = projectSegment(
       scene,
+      camera,
       segmentFrom.set(at, 0, -halfExtent),
       segmentTo.set(at, 0, halfExtent),
       canvasWidth,
@@ -144,9 +152,9 @@ export function buildArSceneFrame(
 
   const selected = builder.selectedMesh;
   const meshes: ArMeshGhost[] = builder.committedMeshes.map((mesh) =>
-    meshGhost(scene, mesh, mesh === selected, canvasWidth, canvasHeight)
+    meshGhost(scene, camera, mesh, mesh === selected, canvasWidth, canvasHeight)
   );
-  const rotationRing = projectRotationRing(scene, builder, canvasWidth, canvasHeight);
+  const rotationRing = projectRotationRing(scene, camera, builder, canvasWidth, canvasHeight);
   return { grid, meshes, rotationRing };
 }
 
@@ -157,13 +165,14 @@ export function buildArSceneFrame(
  */
 function projectSegment(
   scene: CadScene,
+  camera: THREE.PerspectiveCamera,
   a: THREE.Vector3,
   b: THREE.Vector3,
   canvasWidth: number,
   canvasHeight: number
 ): ArSegment | null {
-  const pa = scene.projectToCanvas(a, canvasWidth, canvasHeight);
-  const pb = scene.projectToCanvas(b, canvasWidth, canvasHeight);
+  const pa = scene.projectToCanvas(a, canvasWidth, canvasHeight, camera);
+  const pb = scene.projectToCanvas(b, canvasWidth, canvasHeight, camera);
   if (isBehindCamera(pa.z) || isBehindCamera(pb.z)) return null;
   const from = { x: pa.x, y: pa.y };
   const to = { x: pb.x, y: pb.y };
@@ -179,6 +188,7 @@ function projectSegment(
  */
 function projectRotationRing(
   scene: CadScene,
+  camera: THREE.PerspectiveCamera,
   builder: CadBuilder,
   canvasWidth: number,
   canvasHeight: number
@@ -192,6 +202,7 @@ function projectRotationRing(
     const a1 = ((i + 1) / segments) * Math.PI * 2;
     const segment = projectSegment(
       scene,
+      camera,
       segmentFrom.set(
         ring.center.x + Math.cos(a0) * ring.radius,
         ring.center.y,
@@ -209,6 +220,7 @@ function projectRotationRing(
   }
   const needle = projectSegment(
     scene,
+    camera,
     segmentFrom.set(ring.center.x, ring.center.y, ring.center.z),
     segmentTo.set(
       ring.center.x + Math.cos(ring.angle) * ring.radius,
@@ -229,6 +241,7 @@ function projectRotationRing(
  */
 function meshGhost(
   scene: CadScene,
+  camera: THREE.PerspectiveCamera,
   mesh: THREE.Mesh,
   selected: boolean,
   canvasWidth: number,
@@ -243,7 +256,7 @@ function meshGhost(
   if (position) {
     for (let i = 0; i < position.count; i++) {
       vertexA.fromBufferAttribute(position, i).applyMatrix4(mesh.matrixWorld);
-      const projected = scene.projectToCanvas(vertexA, canvasWidth, canvasHeight);
+      const projected = scene.projectToCanvas(vertexA, canvasWidth, canvasHeight, camera);
       if (isBehindCamera(projected.z)) continue;
       silhouette.push({ x: projected.x, y: projected.y });
     }
@@ -259,7 +272,7 @@ function meshGhost(
     for (let i = 0; i + 1 < edgePosition.count; i += 2) {
       vertexA.fromBufferAttribute(edgePosition, i).applyMatrix4(child.matrixWorld);
       vertexB.fromBufferAttribute(edgePosition, i + 1).applyMatrix4(child.matrixWorld);
-      const segment = projectSegment(scene, vertexA, vertexB, canvasWidth, canvasHeight);
+      const segment = projectSegment(scene, camera, vertexA, vertexB, canvasWidth, canvasHeight);
       if (segment) edges.push(segment);
     }
   }

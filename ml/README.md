@@ -220,7 +220,8 @@ In **CREATE** mode a smaller shape row pops up beneath the mode bar —
    drift and maps vertical hand travel to a lift / lower (clamped so it
    never sinks below the floor). Switching between the toggles mid-drag
    re-anchors, so the mesh never jerks or resets. Pinching empty ground
-   deselects. While in SELECT mode the camera thumbnail doubles as a live
+   deselects (so does leaving SELECT mode), restoring the mesh's normal look
+   — the highlight tint / outline go, a picked color stays. While in SELECT mode the camera thumbnail doubles as a live
    **AR spatial mirror**: the ground grid (30 × 30 world units, 1-unit minor
    + stronger 5-unit major lines, off-canvas geometry culled) and every
    committed mesh are projected through the shared 3D camera and drawn as
@@ -348,8 +349,12 @@ The `<canvas id="overlay">` (pure Canvas 2D) mirrors the feed and draws:
   through `onShapeRequest` → `CadBuilder.setTool`) — same boxy style and
   pointing activation;
 - in **SELECT mode**, a live **AR spatial mirror**: the 3D ground grid and
-  every committed mesh are projected through the shared scene camera
-  (`CadScene.projectToCanvas` + `ArMirror`) and drawn as translucent cyan
+  every committed mesh are projected through the scene camera's
+  webcam-aspect twin (`CadScene.interactionCamera` — same pose and vertical
+  FOV, the webcam frame's aspect — + `ArMirror`) into the webcam image's
+  on-screen rect, so ghosts keep their true proportions (a sphere stays
+  round) and line up with the hands; hand raycasts use the same camera, so
+  pinching a ghost picks that object. They are drawn as translucent cyan
   ghosts beneath the hands — the active selection gets an energetic
   amber/cyan glowing outline, and while an open-palm rotation runs a dashed
   compass ring + amber yaw needle circles the selection;

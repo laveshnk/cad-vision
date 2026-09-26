@@ -24,7 +24,6 @@ import type { FrameEvent, GestureSignalEvent, Handedness } from './vision/types'
 import { CadScene } from './cad/CadScene';
 import { CadBuilder, type CadTool } from './cad/CadBuilder';
 import { buildArSceneFrame } from './cad/ArMirror';
-import { ndcToCanvas } from './cad/arProjection';
 import { Toolbar } from './ui/Toolbar';
 import { ColorWheel } from './ui/ColorWheel';
 
@@ -150,9 +149,12 @@ const INDEX_TIP = 8;
  */
 let selectHand: Handedness | null = null;
 
-/** Device space ([-1, 1], +Y up — identical to the 3D camera's NDC frustum) → viewport-local CSS px. */
+/**
+ * Device space (the webcam frame; [-1, 1], +Y up) → viewport-local CSS px,
+ * through the webcam-aspect interaction camera (see `CadScene.deviceToCanvas`).
+ */
 function deviceToViewport(x: number, y: number): { x: number; y: number } {
-  return ndcToCanvas(x, y, 0, viewportElement.clientWidth, viewportElement.clientHeight);
+  return cadScene.deviceToCanvas(x, y, viewportElement.clientWidth, viewportElement.clientHeight);
 }
 
 // Mode-routed pinches (the classifier never emits pinches in VIEW mode):
@@ -255,11 +257,14 @@ engine.on('state_change', (event) => {
 });
 
 // A mode switch aborts any in-flight build / selection drag so the new mode
-// starts from a clean slate (committed meshes are untouched).
+// starts from a clean slate (committed meshes are untouched). Leaving SELECT
+// also clears the selection, restoring the mesh's normal look (its highlight
+// tint / outline go; a color picked on the wheel is kept).
 engine.on('mode_change', (event) => {
   if (event.type !== 'mode_change') return;
   builder.cancel();
   builder.endDrag();
+  if (event.to !== 'select') builder.deselect();
   selectHand = null; // the next frame hides the wheel outside SELECT mode
   statusOutput.dataset.mode = event.to;
   setStatus(`Mode: ${event.to.toUpperCase()} — State: ${engine.state}`);
@@ -270,6 +275,9 @@ engine.on('mode_change', (event) => {
 // projection and repainting the mesh under the other hand's index fingertip.
 engine.on('frame', (event) => {
   if (event.type !== 'frame') return;
+  // Hand coords live in the webcam frame: keep the scene's interaction
+  // camera at the webcam aspect (true AR proportions, aligned picking).
+  if (event.video.height > 0) cadScene.setInteractionAspect(event.video.width / event.video.height);
   overlay.render(event);
   updateColorWheel(event);
 });
@@ -326,6 +334,7 @@ function startCamera(): void {
 function stopCamera(): void {
   engine.stop();
   builder.cancel(); // drop any pending preview so the scene stays clean
+  builder.deselect(); // no lingering selection highlight once tracking stops
   selectHand = null;
   colorWheel.hide(); // tracking stopped: the floating wheel must not linger
   toolbar.setCameraRunning(false);

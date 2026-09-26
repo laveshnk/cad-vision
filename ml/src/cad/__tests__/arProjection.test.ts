@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { convexHull2D, isBehindCamera, isSegmentOnCanvas, ndcToCanvas } from '../arProjection';
+import { convexHull2D, isBehindCamera, isSegmentOnCanvas, ndcToCanvas, remapNdcX } from '../arProjection';
 
 describe('ndcToCanvas', () => {
   it('maps NDC corners to the canvas corners (Y axis flipped)', () => {
@@ -104,5 +104,23 @@ describe('convexHull2D', () => {
       { x: 0, y: 0 },
       { x: 3, y: 3 },
     ]);
+  });
+});
+
+describe('remapNdcX (webcam-frame frustum → wider viewport frustum)', () => {
+  it('keeps the center and scales horizontal NDC by the aspect ratio', () => {
+    // 4:3 webcam frame shown on a 2:1 viewport: its edges land at ±(4/3)/2.
+    expect(remapNdcX(0, 4 / 3, 2)).toBe(0);
+    expect(remapNdcX(1, 4 / 3, 2)).toBeCloseTo(2 / 3);
+    expect(remapNdcX(-0.5, 4 / 3, 2)).toBeCloseTo(-1 / 3);
+  });
+
+  it('is the identity for equal aspects and round-trips', () => {
+    expect(remapNdcX(0.37, 1.5, 1.5)).toBeCloseTo(0.37);
+    expect(remapNdcX(remapNdcX(0.37, 4 / 3, 2.1), 2.1, 4 / 3)).toBeCloseTo(0.37);
+  });
+
+  it('leaves the value untouched for a degenerate target aspect', () => {
+    expect(remapNdcX(0.5, 4 / 3, 0)).toBe(0.5);
   });
 });

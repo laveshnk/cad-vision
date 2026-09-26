@@ -168,11 +168,14 @@ export interface ArSceneFrame {
 }
 
 /**
- * Projects the CAD scene onto the overlay canvas — called once per rendered
- * frame (only in SELECT mode) with the current canvas size in CSS px.
- * Returns `null` to skip the AR layer entirely.
+ * Projects the CAD scene onto the overlay — called once per rendered frame
+ * (only in SELECT mode) with the size (CSS px) of the webcam image's
+ * on-screen rect (the cover-scaled video, which may overhang the canvas);
+ * the overlay offsets the result into place. The projection must use the
+ * webcam frame's aspect so proportions stay true. Returns `null` to skip
+ * the AR layer entirely.
  */
-export type ArSceneProvider = (cssWidth: number, cssHeight: number) => ArSceneFrame | null;
+export type ArSceneProvider = (width: number, height: number) => ArSceneFrame | null;
 
 /** AR mirror paint: minor ground-grid strokes (1-unit lines). */
 const AR_GRID_STROKE = 'rgba(0, 150, 255, 0.18)';
@@ -361,7 +364,7 @@ export class DebugOverlay<S extends string = string> {
     const view = this.coverTransform(cssWidth, cssHeight, frame.video.width, frame.video.height);
     this.lastView = view; // device-space UI hit tests between frames
     // SELECT mode: live AR mirror of the 3D scene, drawn beneath the hands.
-    if (frame.mode === 'select') this.drawArMirror(cssWidth, cssHeight);
+    if (frame.mode === 'select') this.drawArMirror(view, cssWidth);
     for (const hand of frame.hands) {
       this.drawHand(hand, frame.state, view, cssWidth);
     }
@@ -635,11 +638,15 @@ export class DebugOverlay<S extends string = string> {
    * AR spatial view of the 3D environment (in lockstep with pinch-driven
    * drags — the provider runs inside this same rAF-driven frame).
    */
-  private drawArMirror(cssWidth: number, cssHeight: number): void {
+  private drawArMirror(view: ViewTransform, cssWidth: number): void {
     if (!this.arScene) return;
-    const frame = this.arScene(cssWidth, cssHeight);
+    // Project into the webcam image's on-screen rect (the same cover
+    // transform the landmarks use): true proportions, aligned with the hands.
+    const frame = this.arScene(view.dispW, view.dispH);
     if (!frame) return;
     const ctx = this.ctx;
+    ctx.save();
+    ctx.translate(view.ox, view.oy);
 
     // Ground grid in two batched passes: faint 1-unit minor lines first,
     // then the stronger major divisions (every 5 units) — a 30 × 30 unit
@@ -665,6 +672,7 @@ export class DebugOverlay<S extends string = string> {
 
     for (const mesh of frame.meshes) this.drawArMesh(mesh, cssWidth);
     if (frame.rotationRing) this.drawArRotationRing(frame.rotationRing, cssWidth);
+    ctx.restore();
   }
 
   /** Rotational compass ring: dashed cyan circle + amber yaw needle. */

@@ -490,7 +490,8 @@ export class CadBuilder {
    * @returns true if a mesh is now selected.
    */
   pickAt(x: number, y: number, timestamp = -Infinity): boolean {
-    this.raycaster.setFromCamera(this.ndc.set(x, y), this.scene.camera);
+    // Hand coords are the webcam frame's device space = interaction-camera NDC.
+    this.raycaster.setFromCamera(this.ndc.set(x, y), this.scene.interactionCamera);
     const hits = this.raycaster.intersectObjects(this.committed, false);
     const mesh = hits.length > 0 ? (hits[0].object as THREE.Mesh) : null;
     if (!mesh) {
@@ -782,7 +783,8 @@ export class CadBuilder {
    * to the workspace radius.
    */
   private groundPoint(x: number, y: number): THREE.Vector3 {
-    this.raycaster.setFromCamera(this.ndc.set(x, y), this.scene.camera);
+    // Hand coords are the webcam frame's device space = interaction-camera NDC.
+    this.raycaster.setFromCamera(this.ndc.set(x, y), this.scene.interactionCamera);
     const ray = this.raycaster.ray;
     if (ray.direction.y > -0.05) {
       ray.direction.y = -0.05;
