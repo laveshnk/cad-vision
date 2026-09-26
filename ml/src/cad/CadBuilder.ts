@@ -40,11 +40,13 @@
  * outlines and adds it to the scene.
  *
  * Selection (SELECT mode):
- *   pickAt(x, y)         → raycast a device-space pinch position against the
+ *   pickAt(x, y, t)      → raycast a device-space pinch position against the
  *                          committed meshes: a hit selects that mesh
- *                          (highlighted) and anchors a ground-plane drag; a
- *                          miss clears the selection.
- *   dragTo(x, y)         → move the selected mesh so the grabbed point
+ *                          (highlighted) and arms a drag; a miss clears the
+ *                          selection. A quick pinch (tap) therefore just
+ *                          selects — the selection persists after release.
+ *   dragTo(x, y, t)      → once the pinch has been held for `dragHoldMs`,
+ *                          move the selected mesh so the grabbed point
  *                          follows the pinch, constrained by the active
  *                          drag constraint (`setDragConstraint`): 'xz' slides
  *                          across the ground plane with the elevation
@@ -118,6 +120,11 @@ export interface CadBuilderOptions {
   dragElevationScale?: number;
   /** Highest allowed mesh center height while drag-lifting (world units). */
   dragMaxHeight?: number;
+  /**
+   * SELECT mode: a pinch must be held this long (ms) before it starts moving
+   * the picked mesh, so a quick pinch only selects it. Default 300.
+   */
+  dragHoldMs?: number;
   /** Preview wireframe / fill color. */
   previewColor?: number;
   /** Committed mesh body color (dark gray matte). */
@@ -205,6 +212,10 @@ export class CadBuilder {
     maxY: number;
     lastX: number;
     lastY: number;
+    /** Pinch timestamp (ms) at grab time; moving starts `dragHoldMs` later. */
+    grabbedAt: number;
+    /** False while the pinch is still a possible tap (mesh stays put). */
+    moving: boolean;
   } | null = null;
   /** Active SELECT-mode drag constraint: ground plane ('xz') or Y axis ('y'). */
   private constraint: DragConstraint = 'xz';
@@ -232,6 +243,7 @@ export class CadBuilder {
       groundRadius: options.groundRadius ?? 16,
       dragElevationScale: options.dragElevationScale ?? 3,
       dragMaxHeight: options.dragMaxHeight ?? 5,
+      dragHoldMs: options.dragHoldMs ?? 300,
       previewColor: options.previewColor ?? 0x0284c7,
       bodyColor: options.bodyColor ?? 0x3f3f46,
       edgeColor: options.edgeColor ?? 0xc9d2de,
@@ -471,11 +483,13 @@ export class CadBuilder {
 
   /**
    * Raycast a device-space point against the committed meshes (SELECT mode).
-   * A hit selects that mesh and anchors a ground-plane drag at the pinch
-   * position; a miss clears the selection.
+   * A hit selects that mesh and arms a drag anchored at the pinch position
+   * (it starts moving only after `dragHoldMs`, see `dragTo`); a miss clears
+   * the selection.
+   * @param timestamp pinch start time (ms); omit to allow moving immediately.
    * @returns true if a mesh is now selected.
    */
-  pickAt(x: number, y: number): boolean {
+  pickAt(x: number, y: number, timestamp = -Infinity): boolean {
     this.raycaster.setFromCamera(this.ndc.set(x, y), this.scene.camera);
     const hits = this.raycaster.intersectObjects(this.committed, false);
     const mesh = hits.length > 0 ? (hits[0].object as THREE.Mesh) : null;
@@ -498,6 +512,8 @@ export class CadBuilder {
       maxY: Math.max(minY, this.options.dragMaxHeight),
       lastX: x,
       lastY: y,
+      grabbedAt: timestamp,
+      moving: false,
     };
     return true;
   }
@@ -512,13 +528,23 @@ export class CadBuilder {
    * - `'y'`: vertical hand travel lifts / lowers the mesh (scaled, clamped
    *   so it never sinks below the ground plane); horizontal drift is
    *   ignored (X / Z untouched).
+   *
+   * Hold-to-move: until the pinch has been held for `dragHoldMs` the mesh
+   * stays put (a quick pinch only selects) and the grab re-anchors to the
+   * hand, so moving starts from wherever the hand is — no jump.
+   * @param timestamp current pinch time (ms); omit to skip the hold gate.
    */
-  dragTo(x: number, y: number): void {
+  dragTo(x: number, y: number, timestamp = Infinity): void {
     const mesh = this.selected;
     const drag = this.selectionDrag;
     if (!mesh || !drag) return;
     drag.lastX = x;
     drag.lastY = y;
+    if (!drag.moving) {
+      this.reanchorDrag(mesh, drag);
+      if (timestamp - drag.grabbedAt < this.options.dragHoldMs) return;
+      drag.moving = true;
+    }
     if (this.constraint === 'xz') {
       const target = this.groundPoint(x, y);
       mesh.position.x = target.x + drag.offsetX;
@@ -550,6 +576,17 @@ export class CadBuilder {
     const mesh = this.selected;
     const drag = this.selectionDrag;
     if (!mesh || !drag) return;
+    this.reanchorDrag(mesh, drag);
+  }
+
+  /**
+   * Re-anchor the drag offsets at the mesh's live position and the newest
+   * pinch position, so the next `dragTo` continues without a jump.
+   */
+  private reanchorDrag(
+    mesh: THREE.Mesh,
+    drag: NonNullable<CadBuilder['selectionDrag']>
+  ): void {
     const grab = this.groundPoint(drag.lastX, drag.lastY);
     drag.offsetX = mesh.position.x - grab.x;
     drag.offsetZ = mesh.position.z - grab.z;

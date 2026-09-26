@@ -478,6 +478,61 @@ describe('GestureClassifier — two-fist zoom', () => {
   });
 });
 
+/** Pointing pose: index finger up, middle / ring / pinky folded, thumb tucked. */
+const POINT: HandSpec = { fist: true, extend: [5] };
+
+function pointingOf(classifier: GestureClassifier, hand: HandFrame, t: number): boolean {
+  const result = classifier.process([hand], t);
+  return result.snapshots.find((s) => s.handedness === hand.handedness)?.pointing ?? false;
+}
+
+describe('GestureClassifier — pointing pose (presses overlay buttons)', () => {
+  it('detects index-up / others-curled after the debounce frames', () => {
+    const classifier = new GestureClassifier({ ...TEST_OPTIONS, pointingDebounceFrames: 2 });
+    expect(pointingOf(classifier, makeHand('Right', POINT), 100)).toBe(false);
+    expect(pointingOf(classifier, makeHand('Right', POINT), 200)).toBe(true);
+    expect(classifier.currentState).toBe('IDLE'); // pointing is not a fist / pinch
+  });
+
+  it('is not an open palm, a fist or a pinch', () => {
+    const cases: HandSpec[] = [{}, { fist: true }, { pinchDist: 0.03 }, { hook: true }];
+    for (const spec of cases) {
+      const classifier = new GestureClassifier({ ...TEST_OPTIONS, pointingDebounceFrames: 1 });
+      let t = 0;
+      let pointing = false;
+      for (let i = 0; i < 3; i++) pointing ||= pointingOf(classifier, makeHand('Right', spec), (t += 100));
+      expect(pointing, JSON.stringify(spec)).toBe(false);
+    }
+  });
+
+  it('rejects two raised fingers (index + middle)', () => {
+    const classifier = new GestureClassifier({ ...TEST_OPTIONS, pointingDebounceFrames: 1 });
+    expect(pointingOf(classifier, makeHand('Right', { fist: true, extend: [5, 9] }), 100)).toBe(false);
+  });
+
+  it('debounces a single-frame dropout while held', () => {
+    const classifier = new GestureClassifier({ ...TEST_OPTIONS, pointingDebounceFrames: 2 });
+    let t = 0;
+    pointingOf(classifier, makeHand('Right', POINT), (t += 100));
+    pointingOf(classifier, makeHand('Right', POINT), (t += 100));
+    // One open-palm frame does not drop the pose; two do.
+    expect(pointingOf(classifier, makeHand('Right'), (t += 100))).toBe(true);
+    expect(pointingOf(classifier, makeHand('Right', POINT), (t += 100))).toBe(true);
+    pointingOf(classifier, makeHand('Right'), (t += 100));
+    expect(pointingOf(classifier, makeHand('Right'), (t += 100))).toBe(false);
+  });
+
+  it('never emits pinch events while pointing', () => {
+    const classifier = new GestureClassifier({ ...TEST_OPTIONS, pointingDebounceFrames: 1 });
+    let t = 0;
+    const events: string[] = [];
+    for (let i = 0; i < 4; i++) {
+      events.push(...typesOf(classifier.process([makeHand('Right', POINT)], (t += 100)).events));
+    }
+    expect(events.filter((e) => e.startsWith('pinch'))).toEqual([]);
+  });
+});
+
 describe('GestureClassifier — robust fist detection', () => {
   it('detects a real fist: all fingertips folded into the palm, thumb wrapped', () => {
     const classifier = new GestureClassifier(TEST_OPTIONS);

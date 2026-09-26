@@ -133,6 +133,21 @@ export interface GestureClassifierOptions {
    */
   openPalmThumbTuckRatio?: number;
   /**
+   * Pointing hand (index finger up, others curled) — the only pose that
+   * presses overlay UI buttons. The index counts as up when
+   * `dist(tip, wrist) > pointingIndexRatio * dist(mcp, wrist)`.
+   */
+  pointingIndexRatio?: number;
+  /**
+   * Middle / ring / pinky count as curled when
+   * `dist(tip, wrist) < pointingCurlRatio * dist(mcp, wrist)`.
+   */
+  pointingCurlRatio?: number;
+  /** Threshold relaxation while a pointing pose is held (hysteresis). */
+  pointingHoldSlack?: number;
+  /** Consecutive frames (pointing / not pointing) required to enter / leave the pose. */
+  pointingDebounceFrames?: number;
+  /**
    * Initial interaction mode (VIEW / SELECT / CREATE). Defaults to
    * `'create'` — the full legacy gesture set; switch at runtime with
    * `setMode()`.
@@ -159,6 +174,10 @@ interface HandTrack {
   fistActive: boolean;
   fistFrames: number;
   openFrames: number;
+  /** Pointing pose (index up, others curled; debounced) — presses overlay UI. */
+  pointingActive: boolean;
+  /** Consecutive frames disagreeing with `pointingActive` (debounce counter). */
+  pointingFlipFrames: number;
   /** Palm center (device space) used for orbit deltas. */
   palmCenter: Vec3;
   prevPalmCenter: Vec3;
@@ -208,6 +227,10 @@ export class GestureClassifier {
       | 'openPalmExtensionRatio'
       | 'openPalmMinExtendedFingers'
       | 'openPalmThumbTuckRatio'
+      | 'pointingIndexRatio'
+      | 'pointingCurlRatio'
+      | 'pointingHoldSlack'
+      | 'pointingDebounceFrames'
     >
   > & { pinchDistanceSmoothing: number | null };
 
@@ -286,6 +309,10 @@ export class GestureClassifier {
       openPalmExtensionRatio: options.openPalmExtensionRatio ?? 1.0,
       openPalmMinExtendedFingers: options.openPalmMinExtendedFingers ?? 4,
       openPalmThumbTuckRatio: options.openPalmThumbTuckRatio ?? 0.6,
+      pointingIndexRatio: options.pointingIndexRatio ?? 1.5,
+      pointingCurlRatio: options.pointingCurlRatio ?? 1.2,
+      pointingHoldSlack: options.pointingHoldSlack ?? 0.15,
+      pointingDebounceFrames: options.pointingDebounceFrames ?? 2,
     };
     this.cameraPath =
       options.cameraPath === null ? null : new PathStraightener(options.cameraPath);
@@ -413,6 +440,8 @@ export class GestureClassifier {
         fistActive: false,
         fistFrames: 0,
         openFrames: 0,
+        pointingActive: false,
+        pointingFlipFrames: 0,
         palmCenter,
         prevPalmCenter: palmCenter,
         palm2D: palmCenter2D(hand),
@@ -448,6 +477,7 @@ export class GestureClassifier {
       const shape = measureHandShape(hand);
       this.updatePinch(track, hand, shape, timestamp, events);
       this.updateFist(track, shape);
+      this.updatePointing(track, shape);
       // Reads `missedFrames` to avoid jump deltas on reappearance; reset after.
       this.updatePalmCenter(track, hand);
       track.missedFrames = 0;
@@ -484,7 +514,7 @@ export class GestureClassifier {
    * finger is folded into the palm — a thumb resting on a closed fist is not
    * a pinch.
    *
-   * Pinch tracking always runs (metrics / overlay mode buttons need it), but
+   * Pinch tracking always runs (metrics / the overlay need it), but
    * in VIEW mode no `pinch_start` / `pinch_end` events are emitted — pinches
    * are inert for pure navigation.
    */
@@ -588,6 +618,36 @@ export class GestureClassifier {
       track.fistActive = true;
     } else if (track.fistActive && track.openFrames >= this.options.fistExitFrames) {
       track.fistActive = false;
+    }
+  }
+
+  /**
+   * Pointing pose: the index finger up (tip well beyond its knuckle), the
+   * middle / ring / pinky curled toward the palm, and no pinch (thumb away
+   * from the index tip). Ratio-based like the fist test, so size / distance /
+   * rotation invariant; thresholds relax by `pointingHoldSlack` while held,
+   * and `pointingDebounceFrames` agreeing frames are needed to flip.
+   */
+  private updatePointing(track: HandTrack, shape: HandShape): void {
+    const slack = track.pointingActive ? this.options.pointingHoldSlack : 0;
+    const [index, middle, ring, pinky] = shape.foldRatios;
+    const indexUp = index > this.options.pointingIndexRatio - slack;
+    const curlLimit = this.options.pointingCurlRatio + slack;
+    const othersCurled = middle < curlLimit && ring < curlLimit && pinky < curlLimit;
+    const pointing =
+      indexUp &&
+      othersCurled &&
+      !track.pinchActive &&
+      shape.thumbIndexDistance > this.options.pinchReleaseThreshold;
+
+    if (pointing === track.pointingActive) {
+      track.pointingFlipFrames = 0;
+      return;
+    }
+    track.pointingFlipFrames++;
+    if (track.pointingFlipFrames >= this.options.pointingDebounceFrames) {
+      track.pointingActive = pointing;
+      track.pointingFlipFrames = 0;
     }
   }
 
@@ -1179,6 +1239,7 @@ export class GestureClassifier {
         pinchDistance: track?.pinchDistance ?? Number.POSITIVE_INFINITY,
         pinchActive: track?.pinchActive ?? false,
         fistActive: track?.fistActive ?? false,
+        pointing: track?.pointingActive ?? false,
         landmarks: hand.landmarks,
       });
     }

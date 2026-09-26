@@ -156,17 +156,17 @@ function deviceToViewport(x: number, y: number): { x: number; y: number } {
 }
 
 // Mode-routed pinches (the classifier never emits pinches in VIEW mode):
-// - SELECT: pick a committed mesh / drag it (ground plane or vertical lift,
-//   per the active constraint toggle); a pinch on empty ground deselects.
-//   A pinch landing on the floating color wheel repaints the selection with
-//   the hue beneath it instead of re-picking the 3D scene behind the disc,
-//   and only the hand that grabbed the mesh drags it — the other hand stays
-//   free to pick colors.
+// - SELECT: a quick pinch on a committed mesh selects it (the selection stays
+//   after release, so its color can be changed); pinch and *hold* to move it
+//   (ground plane or vertical lift, per the active constraint toggle) and
+//   release to drop it. A pinch on empty ground deselects. A pinch landing
+//   on the floating color wheel repaints the selection with the hue beneath
+//   it instead of re-picking the 3D scene behind the disc, and only the hand
+//   that grabbed the mesh drags it — the other hand stays free to pick colors.
+// Overlay buttons are pressed only by a pointing hand (index finger up), never
+// by a pinch, so pinches always act on the scene.
 // - CREATE: draw a footprint (pinch start/drag raycast onto the ground plane).
 engine.onPinchStart((e) => {
-  // A pinch that lands on an overlay UI button (mode bar / constraint
-  // stack / shape row) toggles that button — it must not also pick or draw in the scene.
-  if (overlay.isUiAtDevice(e.position.x, e.position.y)) return;
   if (engine.mode === 'select') {
     const point = deviceToViewport(e.position.x, e.position.y);
     const wheelColor = colorWheel.pickColorAt(point.x, point.y);
@@ -174,7 +174,7 @@ engine.onPinchStart((e) => {
       builder.setSelectedColor(wheelColor);
       return;
     }
-    selectHand = builder.pickAt(e.position.x, e.position.y) ? e.hand : null;
+    selectHand = builder.pickAt(e.position.x, e.position.y, e.timestamp) ? e.hand : null;
   } else {
     builder.onPinchStart(e.position.x, e.position.y);
   }
@@ -184,7 +184,7 @@ engine.onPinchDrag((e) => {
     // Only the grabbing hand drags the mesh; hand 2 hovering (or confirming
     // a color on the wheel) never fights the drag.
     if (selectHand === null || e.hand === selectHand) {
-      builder.dragTo(e.currentPos.x, e.currentPos.y);
+      builder.dragTo(e.currentPos.x, e.currentPos.y, e.timestamp);
     }
   } else {
     builder.onPinchDrag(e.currentPos.x, e.currentPos.y, e.startPos.x, e.startPos.y);
@@ -280,10 +280,11 @@ engine.setMode('view');
 
 /**
  * SELECT-mode color wheel: anchored adjacent to the selected mesh's live
- * screen projection (it tracks drags and camera orbits), and while one hand
- * holds the selection pinch, the *other* hand's index fingertip acts as a
- * live color cursor — every hue it sweeps over repaints the mesh instantly.
- * Hidden outside SELECT mode or when nothing is selected.
+ * screen projection (it tracks drags and camera orbits). A *pointing* index
+ * fingertip is the live color cursor — every hue it sweeps over repaints the
+ * mesh instantly — whether the selection was made with a quick pinch and
+ * released, or is still held by the other hand. Hidden outside SELECT mode
+ * or when nothing is selected.
  */
 function updateColorWheel(frame: FrameEvent): void {
   const anchor =
@@ -295,9 +296,8 @@ function updateColorWheel(frame: FrameEvent): void {
     return;
   }
   colorWheel.show(anchor.x, anchor.y);
-  if (selectHand === null) return;
-  // Hand 2: whichever hand is not holding the selection pinch.
-  const cursor = frame.hands.find((hand) => hand.handedness !== selectHand);
+  // Cursor: a pointing hand that is not holding the selection pinch.
+  const cursor = frame.hands.find((hand) => hand.pointing && hand.handedness !== selectHand);
   const fingertip = cursor?.landmarks[INDEX_TIP];
   if (!fingertip) return;
   const point = deviceToViewport(fingertip.device.x, fingertip.device.y);

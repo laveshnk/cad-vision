@@ -5,18 +5,20 @@
  * pinch indicators, and a HUD with live metrics. Pure Canvas 2D — no WebGL.
  *
  * Along the top edge it renders the interaction-mode switcher ([ VIEW ],
- * [ SELECT ], [ CREATE ]): boxy, mutually exclusive toggle buttons that
- * respond to mouse clicks, an index-tip dwell (>= `dwellMs`) or a pinch
- * that *begins* over a button — reported through the `onModeRequest`
- * callback. In SELECT mode a second stack of mutually exclusive toggles,
- * [ XZ PLANE ] (default) and [ Y AXIS (ELEVATE) ], sits vertically below
- * the mode bar in the top-left corner (`onDragConstraintRequest`); only a
- * fresh pinch activates a button, so object drags sweeping across the bars
- * never toggle anything. In CREATE mode a row of shape buttons (e.g.
- * [ CUBE ] [ CUBOID ] [ CYLINDER ] [ SPHERE ], from the `shapes` option)
- * sits below the mode bar instead (`onShapeRequest`), with the same dwell /
- * fresh-pinch model. The stats HUD is anchored bottom-left so the buttons
- * own the top edge.
+ * [ SELECT ], [ CREATE ]): boxy, mutually exclusive toggle buttons reported
+ * through the `onModeRequest` callback. In SELECT mode a second stack of
+ * mutually exclusive toggles, [ XZ PLANE ] (default) and
+ * [ Y AXIS (ELEVATE) ], sits vertically below the mode bar in the top-left
+ * corner (`onDragConstraintRequest`); in CREATE mode a row of shape buttons
+ * (e.g. [ CUBE ] [ CUBOID ] [ CYLINDER ] [ SPHERE ], from the `shapes`
+ * option) sits below it instead (`onShapeRequest`).
+ *
+ * Every button responds to a mouse click or to a **pointing** hand (index
+ * finger up, other fingers curled — `HandSnapshot.pointing`) holding its
+ * index tip over the button for `dwellMs`; a ring marks a pointing
+ * fingertip. Pinches, fists and open palms never press a button, so moving,
+ * editing or building objects can't switch modes / shapes by accident. The
+ * stats HUD is anchored bottom-left so the buttons own the top edge.
  *
  * Alignment: the <video> is CSS-mirrored (`scaleX(-1)`) and displayed with
  * `object-fit: cover`, which center-crops it into its container (the floating
@@ -38,7 +40,6 @@ import type {
   FrameEvent,
   GestureState,
   HandSnapshot,
-  Handedness,
   InteractionMode,
 } from './types';
 
@@ -209,14 +210,14 @@ export interface DebugOverlayOptions<S extends string = string> {
   /** Hand skeleton connections (defaults to MediaPipe HAND_CONNECTIONS). */
   connections?: ReadonlyArray<SkeletonConnection>;
   /**
-   * Called when a mode button is activated — via mouse click, index-tip
-   * dwell (>= `dwellMs` over the button) or a pinch on the button. The host
+   * Called when a mode button is activated — via mouse click or an index-tip
+   * dwell of a pointing hand (>= `dwellMs` over the button). The host
    * decides what to do with the request (typically `engine.setMode`).
    */
   onModeRequest?: (mode: InteractionMode) => void;
   /**
    * Called when a SELECT-mode drag-constraint toggle is activated — via
-   * mouse click, index-tip dwell or a pinch on the button. The host routes
+   * mouse click or a pointing index-tip dwell. The host routes
    * it to the CAD builder's `setDragConstraint`; the overlay keeps the
    * visual state (both default to 'xz').
    */
@@ -228,8 +229,8 @@ export interface DebugOverlayOptions<S extends string = string> {
   /** Initially highlighted shape (defaults to the first of `shapes`). */
   activeShape?: S;
   /**
-   * Called when a CREATE-mode shape button is activated — via mouse click,
-   * index-tip dwell or a fresh pinch on the button. The host routes it to
+   * Called when a CREATE-mode shape button is activated — via mouse click or
+   * a pointing index-tip dwell. The host routes it to
    * the CAD builder's tool (typically `builder.setTool`).
    */
   onShapeRequest?: (shape: S) => void;
@@ -276,15 +277,11 @@ export class DebugOverlay<S extends string = string> {
   private dwellTarget = -1;
   private dwellElapsed = 0;
   private lastFrameTimestamp: number | null = null;
-  /** Latch: one pinch activates at most one button until it leaves the bar. */
-  private pinchLatched = false;
   /** Last rendered constraint-button rects (CSS px); empty outside SELECT mode. */
   private constraintRects: ButtonRect[] = [];
   /** Constraint toggle the index tip is dwelling over (-1 = none). */
   private constraintDwellTarget = -1;
   private constraintDwellElapsed = 0;
-  /** Latch: one pinch activates at most one constraint toggle. */
-  private constraintPinchLatched = false;
   /** Visual + authoritative overlay state of the drag constraint (host mirrors it). */
   private dragConstraint: DragConstraint = 'xz';
   private readonly shapes: ReadonlyArray<OverlayShape<S>>;
@@ -296,14 +293,6 @@ export class DebugOverlay<S extends string = string> {
   /** Shape button the index tip is dwelling over (-1 = none). */
   private shapeDwellTarget = -1;
   private shapeDwellElapsed = 0;
-  /** Latch: one pinch activates at most one shape button. */
-  private shapePinchLatched = false;
-  /**
-   * Previous frame's pinch state per hand — only a *fresh* pinch (one that
-   * just closed over a button) can activate a button, so a pinch-drag
-   * sweeping across the button bars never toggles anything mid-gesture.
-   */
-  private readonly prevPinchStates = new Map<Handedness, boolean>();
   /** Last rendered mirrored cover transform (device-space UI hit tests). */
   private lastView: ViewTransform | null = null;
 
@@ -387,7 +376,7 @@ export class DebugOverlay<S extends string = string> {
     this.updateModeInteraction(frame, view, dt);
     this.updateConstraintInteraction(frame, view, dt);
     this.updateShapeInteraction(frame, view, dt);
-    this.snapshotPinchStates(frame);
+    this.drawPointerCursors(frame, view);
     this.drawHud(frame, cssWidth, cssHeight);
   }
 
@@ -405,22 +394,28 @@ export class DebugOverlay<S extends string = string> {
   }
 
   /**
-   * Remember each hand's pinch state for the next frame: only a *fresh*
-   * pinch (one that just closed over a button) may activate a button, so
-   * a pinch-drag sweeping across the button bars never toggles anything
-   * mid-gesture.
+   * Ring on each pointing hand's index fingertip: the visible cursor for the
+   * overlay buttons (only a pointing hand can press them).
    */
-  private snapshotPinchStates(frame: FrameEvent): void {
-    this.prevPinchStates.clear();
+  private drawPointerCursors(frame: FrameEvent, view: ViewTransform): void {
+    const ctx = this.ctx;
     for (const hand of frame.hands) {
-      this.prevPinchStates.set(hand.handedness, hand.pinchActive);
+      if (!hand.pointing) continue;
+      const tip = this.toCanvas(hand, INDEX_TIP, view);
+      ctx.lineWidth = 2.5;
+      ctx.strokeStyle = '#38bdf8';
+      ctx.beginPath();
+      ctx.arc(tip.x, tip.y, 11, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(56, 189, 248, 0.25)';
+      ctx.fill();
     }
   }
 
   /**
    * Device-space hit test against the last rendered UI buttons (mode bar +
-   * SELECT-mode constraint stack + CREATE-mode shape row). The host uses it to keep a UI pinch
-   * (toggling a button) from also picking / drawing in the 3D scene. Runs
+   * SELECT-mode constraint stack + CREATE-mode shape row), e.g. to tell
+   * whether a device-space point sits under the overlay's buttons. Runs
    * through the same mirrored cover transform as the landmarks, using the
    * previous frame's metrics (the buttons do not move between frames).
    */
@@ -764,30 +759,20 @@ export class DebugOverlay<S extends string = string> {
   }
 
   /**
-   * Finger interaction with the mode buttons: the index tip (landmark 8)
-   * dwelling over a button for `dwellMs` activates it; a *fresh* pinch that
-   * closes while the tip is over a button activates it immediately (latched
-   * once per pinch so the same pinch cannot scrub across buttons — and a
-   * pinch that began elsewhere, e.g. a mesh drag, never toggles a mode as
-   * it sweeps across the bar).
+   * Finger interaction with the mode buttons: a *pointing* hand's index tip
+   * (landmark 8) dwelling over a button for `dwellMs` activates it. Pinches
+   * never press buttons, so a pinch-drag (moving / building an object) that
+   * sweeps across the bar never switches modes.
    */
   private updateModeInteraction(frame: FrameEvent, view: ViewTransform, dt: number): void {
     let dwellTarget = -1;
-    let pinchTarget = -1;
     for (const hand of frame.hands) {
+      if (!hand.pointing) continue; // only a pointing hand presses buttons
       const tip = this.toCanvas(hand, INDEX_TIP, view);
       const index = this.hitButton(tip.x, tip.y);
       if (index < 0) continue;
       if (dwellTarget < 0) dwellTarget = index;
-      const freshPinch = hand.pinchActive && !this.prevPinchStates.get(hand.handedness);
-      if (pinchTarget < 0 && freshPinch) pinchTarget = index;
     }
-
-    if (pinchTarget >= 0 && !this.pinchLatched) {
-      this.requestMode(pinchTarget);
-      this.pinchLatched = true;
-    }
-    if (pinchTarget < 0) this.pinchLatched = false;
 
     // Dwell clock from frame timestamps; capped so a stalled camera feed
     // cannot complete a dwell in one jump.
@@ -882,33 +867,24 @@ export class DebugOverlay<S extends string = string> {
   }
 
   /**
-   * Finger interaction with the constraint stack: the same dwell /
-   * fresh-pinch model as the mode bar, active only while the buttons are
-   * visible (SELECT mode).
+   * Finger interaction with the constraint stack: the same pointing-dwell
+   * model as the mode bar, active only while the buttons are visible
+   * (SELECT mode).
    */
   private updateConstraintInteraction(frame: FrameEvent, view: ViewTransform, dt: number): void {
     if (frame.mode !== 'select') {
       this.constraintDwellTarget = -1;
       this.constraintDwellElapsed = 0;
-      this.constraintPinchLatched = false;
       return;
     }
     let dwellTarget = -1;
-    let pinchTarget = -1;
     for (const hand of frame.hands) {
+      if (!hand.pointing) continue; // only a pointing hand presses buttons
       const tip = this.toCanvas(hand, INDEX_TIP, view);
       const index = this.hitConstraintButton(tip.x, tip.y);
       if (index < 0) continue;
       if (dwellTarget < 0) dwellTarget = index;
-      const freshPinch = hand.pinchActive && !this.prevPinchStates.get(hand.handedness);
-      if (pinchTarget < 0 && freshPinch) pinchTarget = index;
     }
-
-    if (pinchTarget >= 0 && !this.constraintPinchLatched) {
-      this.requestConstraint(pinchTarget);
-      this.constraintPinchLatched = true;
-    }
-    if (pinchTarget < 0) this.constraintPinchLatched = false;
 
     if (dwellTarget !== this.constraintDwellTarget) {
       this.constraintDwellTarget = dwellTarget;
@@ -1005,32 +981,23 @@ export class DebugOverlay<S extends string = string> {
   }
 
   /**
-   * Finger interaction with the shape row: the same dwell / fresh-pinch
-   * model as the mode bar, active only while the row is visible (CREATE).
+   * Finger interaction with the shape row: the same pointing-dwell model as
+   * the mode bar, active only while the row is visible (CREATE).
    */
   private updateShapeInteraction(frame: FrameEvent, view: ViewTransform, dt: number): void {
     if (frame.mode !== 'create') {
       this.shapeDwellTarget = -1;
       this.shapeDwellElapsed = 0;
-      this.shapePinchLatched = false;
       return;
     }
     let dwellTarget = -1;
-    let pinchTarget = -1;
     for (const hand of frame.hands) {
+      if (!hand.pointing) continue; // only a pointing hand presses buttons
       const tip = this.toCanvas(hand, INDEX_TIP, view);
       const index = this.hitShapeButton(tip.x, tip.y);
       if (index < 0) continue;
       if (dwellTarget < 0) dwellTarget = index;
-      const freshPinch = hand.pinchActive && !this.prevPinchStates.get(hand.handedness);
-      if (pinchTarget < 0 && freshPinch) pinchTarget = index;
     }
-
-    if (pinchTarget >= 0 && !this.shapePinchLatched) {
-      this.requestShape(pinchTarget);
-      this.shapePinchLatched = true;
-    }
-    if (pinchTarget < 0) this.shapePinchLatched = false;
 
     if (dwellTarget !== this.shapeDwellTarget) {
       this.shapeDwellTarget = dwellTarget;

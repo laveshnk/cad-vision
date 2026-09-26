@@ -10,7 +10,8 @@ consume them. The camera renders as a floating video-call-style thumbnail
 Three interaction modes — **VIEW** (camera navigation only), **SELECT**
 (pick / drag / recolor meshes) and **CREATE** (build primitives) — are
 switched with a
-button bar on the camera overlay (mouse click, index-finger dwell, or pinch)
+button bar on the camera overlay (mouse click, or a **pointing** hand — index
+finger up, other fingers curled — holding its fingertip on a button)
 and strictly partition which gestures can act on the scene.
 
 ## Quick start
@@ -177,12 +178,15 @@ The full-bleed viewport is a Three.js scene (floor grid, fog, damped orbit
 camera, starting straight on so the grid is square to the screen) driven entirely by the gesture events above, with the camera rendered
 as a floating thumbnail (top-left, click ⤢ to expand/collapse) over it.
 Interaction modes are switched with the button bar along the top of the
-camera overlay — mouse click, index-finger dwell (500 ms, with a progress
-bar) or a pinch over a button; the app starts in **VIEW** and the active
+camera overlay — mouse click, or **point** (index finger up, other fingers
+curled) and hold the fingertip on a button for 500 ms (a ring marks the
+pointing fingertip, a progress bar fills). Pinches, fists and open palms
+never press buttons, so moving, editing or building can't switch modes or
+shapes by accident. The app starts in **VIEW** and the active
 mode is shown inverted with an indicator bar (and in the bottom-left HUD).
 In **CREATE** mode a smaller shape row pops up beneath the mode bar —
 **CUBE** (default), **CUBOID**, **CYLINDER**, **SPHERE** — picked the same way
-(dwell / pinch / click); it sets the shape for the next build:
+(point-and-hold / click); it sets the shape for the next build:
 
 1. **Two-hand build** — pinch with both hands: a translucent wireframe
    preview of the selected shape spawns centered on the origin `(0, 0, 0)`,
@@ -205,8 +209,11 @@ In **CREATE** mode a smaller shape row pops up beneath the mode bar —
    cylinder/sphere: center + radius). It is committed with the default height on the next build or
    camera gesture; pinching the second hand before releasing replaces it
    with a two-hand build.
-4. **Select, move & recolor (SELECT mode)** — pinch over a committed mesh to pick it
-   up (highlighted); dragging the pinch moves it under the active
+4. **Select, move & recolor (SELECT mode)** — a quick pinch on a committed
+   mesh **selects** it (highlighted; it stays selected after you let go).
+   To **move** it, pinch and *hold* (the mesh starts following after
+   `dragHoldMs`, 300 ms, so a quick pinch never nudges it), drag, and
+   release to drop it. Dragging moves it under the active
    **constraint toggle** (top-left of the vision overlay): `[ XZ PLANE ]`
    (default) slides it along the ground plane with the grab offset kept and
    its elevation locked, while `[ Y AXIS (ELEVATE) ]` ignores horizontal
@@ -223,10 +230,11 @@ In **CREATE** mode a smaller shape row pops up beneath the mode bar —
    axis, with a compass ring (dashed circle + yaw needle) rendered around
    the object in both the 3D viewport and the AR mirror. A floating
    **HSL color wheel** appears beside the selected mesh (tracking it
-   through drags and camera moves): keep the selection pinch held and
-   sweep the disc with your other hand's index fingertip — every hue
-   under the fingertip repaints the mesh live (angle = hue, radius =
-   saturation, wheel center = gray). Pinching directly on the wheel
+   through drags and camera moves): **point** at the disc (index finger
+   up) — every hue under the fingertip repaints the mesh live (angle =
+   hue, radius = saturation, wheel center = gray). This works after a
+   quick select-pinch, or with your other hand while one hand holds the
+   mesh. Pinching directly on the wheel
    confirms the color under the pinch instead of re-picking the scene
    behind it, and only the grabbing hand's release ends the drag. The
    wheel hides when the selection is cleared or the mode changes. Pinches
@@ -311,7 +319,10 @@ on-screen view), +Y up — ready to map into a CAD viewport.
   `settleDistance`, `deadband`, or `null`), orbit
   open-palm grace, hand-loss grace frames, and open-palm detection for the
   SELECT-mode rotation (`openPalmExtensionRatio` 1.0,
-  `openPalmMinExtendedFingers` 4, `openPalmThumbTuckRatio` 0.6).
+  `openPalmMinExtendedFingers` 4, `openPalmThumbTuckRatio` 0.6), and the
+  pointing pose that presses overlay buttons (`pointingIndexRatio` 1.5,
+  `pointingCurlRatio` 1.2, `pointingHoldSlack` 0.15,
+  `pointingDebounceFrames` 2).
 - `initialMode` — `InteractionMode`: starting interaction mode. Defaults to
   `'create'` (full legacy gesture set); the app itself starts in `'view'`
   and switches via `setMode()` at runtime.
@@ -323,20 +334,19 @@ The `<canvas id="overlay">` (pure Canvas 2D) mirrors the feed and draws:
 - the **mode switcher** along the top edge: three boxy, mutually exclusive
   toggle buttons (`[ VIEW ] [ SELECT ] [ CREATE ]`) — the active one is
   inverted (solid light fill + high-contrast indicator bar). Activated by
-  mouse click, index-tip (landmark 8) dwell (500 ms, with a progress bar) or
-  a pinch over the button (via `DebugOverlay`'s `onModeRequest` callback).
-  Only a *fresh* pinch (one that closes over a button) activates it, so an
-  object drag sweeping across the bar never switches modes;
+  mouse click or a **pointing** hand (`HandSnapshot.pointing`: index up,
+  middle / ring / pinky curled, no pinch; debounced) holding its index tip
+  (landmark 8) on the button for 500 ms (ring cursor + progress bar), via
+  `DebugOverlay`'s `onModeRequest` callback. Pinches never press buttons,
+  so an object drag sweeping across the bar never switches modes;
 - in **SELECT mode**, a stack of two **drag-constraint toggles** below the
   mode bar in the top-left corner: `[ XZ PLANE ]` (default) and
-  `[ Y AXIS (ELEVATE) ]` — same boxy style and activation model
-  (`onDragConstraintRequest`); a pinch over a button toggles it without
-  also picking / drawing in the scene (`isUiAtDevice`);
+  `[ Y AXIS (ELEVATE) ]` — same boxy style and pointing activation
+  (`onDragConstraintRequest`);
 - in **CREATE mode**, a **shape row** below the mode bar: `CUBE` (default),
   `CUBOID`, `CYLINDER`, `SPHERE` (from the `shapes` option; picks reported
   through `onShapeRequest` → `CadBuilder.setTool`) — same boxy style and
-  dwell / fresh-pinch model; a pinch on a shape button never starts a build
-  (`isUiAtDevice`);
+  pointing activation;
 - in **SELECT mode**, a live **AR spatial mirror**: the 3D ground grid and
   every committed mesh are projected through the shared scene camera
   (`CadScene.projectToCanvas` + `ArMirror`) and drawn as translucent cyan
