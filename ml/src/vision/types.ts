@@ -112,6 +112,35 @@ export interface PinchEndEvent {
   delta: Vec3;
 }
 
+/**
+ * SELECT-mode open-palm rotation: the dominant hand holds a pinch on the
+ * selected mesh while the *other* hand shows an open palm (all fingertips
+ * extended + thumb out); that palm's tilt (wrist → middle-MCP azimuth)
+ * drives the mesh's yaw — `selectedMesh.rotation.y = initialRotation + deltaRotation`.
+ */
+export interface SelectRotateEvent {
+  type: 'select_rotate';
+  timestamp: number;
+  /** The hand holding the pinch on the selected object. */
+  hand: Handedness;
+  /** The open-palm hand driving the rotation. */
+  palmHand: Handedness;
+  /**
+   * Cumulative palm rotation since the gesture began (radians, unwrapped;
+   * + = counter-clockwise tilt on the mirrored screen).
+   */
+  deltaRotation: number;
+}
+
+export interface SelectRotateEndEvent {
+  type: 'select_rotate_end';
+  timestamp: number;
+  /** The open-palm hand that was driving the rotation. */
+  palmHand: Handedness;
+  /** Why the rotation ended ('palm closed' | 'pinch released' | 'palm hand lost' | 'mode switch'). */
+  reason: string;
+}
+
 export type ExtrudeMode = 'dual-hand' | 'single-hand';
 
 export interface ExtrudeStartEvent {
@@ -272,6 +301,8 @@ export interface GestureMetrics {
   zoomAnchor: Handedness | null;
   /** Cumulative angle (radians) the moving fist swept around the anchor. */
   zoomAngle: number | null;
+  /** Cumulative open-palm rotation delta (radians) while rotating (SELECT mode). */
+  selectRotation: number | null;
 }
 
 /** Emitted once per processed camera frame (used by the 2D debug overlay). */
@@ -292,6 +323,8 @@ export type GestureSignalEvent =
   | PinchStartEvent
   | PinchDragEvent
   | PinchEndEvent
+  | SelectRotateEvent
+  | SelectRotateEndEvent
   | ExtrudeStartEvent
   | ExtrudeEvent
   | ExtrudeEndEvent

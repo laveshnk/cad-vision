@@ -8,6 +8,8 @@
  * `onOrbit({ deltaX, deltaY })` (orbit around the origin), `onRotate({ deltaAngle })`
  * (turn the scene around the vertical axis) and `onZoom({ deltaScale })` (dolly
  * in / out) — keeping this module fully decoupled from the vision layer.
+ * `projectToCanvas` shares the camera's live perspective with 2D consumers
+ * (the vision overlay's SELECT-mode AR mirror).
  *
  * The camera focus is locked to the world origin (0, 0, 0): the view can only
  * rotate and zoom, never pan / translate. The camera always sits on a sphere
@@ -15,6 +17,7 @@
  */
 
 import * as THREE from 'three';
+import { ndcToCanvas, type ProjectedPoint } from './arProjection';
 
 export interface CadSceneOptions {
   /** Background & fog color. */
@@ -198,6 +201,27 @@ export class CadScene {
   /** The renderer's canvas (mounted into the container). */
   get domElement(): HTMLCanvasElement {
     return this.renderer.domElement;
+  }
+
+  /**
+   * Project a world-space point through the scene camera onto a 2D canvas of
+   * the given size (CSS px). Shared projection used by the SELECT-mode AR
+   * mirror on the vision overlay: NDC [-1, 1] maps onto the canvas rect
+   * (`x` left → right, `y` top → down, +Y up flipped). The returned `z` is
+   * the NDC depth — `> 1` means the point is behind the camera (cull it).
+   *
+   * The camera matrices are refreshed first (`updateMatrixWorld` also
+   * recomputes `matrixWorldInverse`), so projections stay valid between
+   * render ticks — the damped orbit rig moves the camera every frame.
+   */
+  projectToCanvas(
+    vector3: THREE.Vector3,
+    canvasWidth: number,
+    canvasHeight: number
+  ): ProjectedPoint {
+    this.camera.updateMatrixWorld();
+    const projected = vector3.clone().project(this.camera);
+    return ndcToCanvas(projected.x, projected.y, projected.z, canvasWidth, canvasHeight);
   }
 
   /**

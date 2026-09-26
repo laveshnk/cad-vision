@@ -21,6 +21,7 @@ import { DebugOverlay } from './vision/DebugOverlay';
 import type { GestureSignalEvent } from './vision/types';
 import { CadScene } from './cad/CadScene';
 import { CadBuilder } from './cad/CadBuilder';
+import { buildArSceneFrame } from './cad/ArMirror';
 import { Toolbar } from './ui/Toolbar';
 
 const video = document.querySelector<HTMLVideoElement>('#video');
@@ -75,16 +76,27 @@ const engine = new GestureEngine({
   },
 });
 
+/* ---- CAD ---- */
+const cadScene = new CadScene(viewport);
+const builder = new CadBuilder(cadScene);
+
+/* ---- Vision overlay ---- */
 const overlay = new DebugOverlay(canvas, {
   // Mode switcher on the vision overlay: the button bar (mouse click, finger
   // dwell or pinch) requests engine mode changes; the engine feeds the
   // active mode back through the per-frame event, which renders the button.
   onModeRequest: (mode) => engine.setMode(mode),
+  // SELECT-mode drag constraint toggles ([ XZ PLANE ] / [ Y AXIS ]) on the
+  // vision overlay: the request routes straight into the builder, which
+  // enforces it inside dragTo (the overlay renders the active state).
+  onDragConstraintRequest: (constraint) => builder.setDragConstraint(constraint),
+  // SELECT-mode AR mirror: the ground grid + every committed mesh are
+  // projected through the shared 3D camera onto the vision canvas, turning
+  // it into a translucent live spatial mirror of the 3D viewport — in
+  // lockstep with pinch-driven drags (the engine emits pinch events before
+  // the per-frame event, so ghost and viewport never diverge).
+  arScene: (width, height) => buildArSceneFrame(cadScene, builder, width, height),
 });
-
-/* ---- CAD ---- */
-const cadScene = new CadScene(viewport);
-const builder = new CadBuilder(cadScene);
 
 /* ---- UI ---- */
 const toolbar = new Toolbar(toolbarRoot, {
@@ -106,10 +118,13 @@ function logGestureEvent(event: GestureSignalEvent): void {
 /* ---- Vision -> CAD bridge (device-space coordinates only) ---- */
 
 // Mode-routed pinches (the classifier never emits pinches in VIEW mode):
-// - SELECT: pick a committed mesh / drag it on the ground plane; a pinch on
-//   empty ground deselects.
+// - SELECT: pick a committed mesh / drag it (ground plane or vertical lift,
+//   per the active constraint toggle); a pinch on empty ground deselects.
 // - CREATE: draw a footprint (pinch start/drag raycast onto the ground plane).
 engine.onPinchStart((e) => {
+  // A pinch that lands on an overlay UI button (mode bar / constraint
+  // stack) toggles that button — it must not also pick or draw in the scene.
+  if (overlay.isUiAtDevice(e.position.x, e.position.y)) return;
   if (engine.mode === 'select') builder.pickAt(e.position.x, e.position.y);
   else builder.onPinchStart(e.position.x, e.position.y);
 });
@@ -121,6 +136,13 @@ engine.onPinchEnd(() => {
   if (engine.mode === 'select') builder.endDrag();
   else builder.onPinchEnd();
 });
+
+// SELECT-mode secondary-hand rotation: while one hand holds a pinch on a
+// mesh, the other hand's open palm tilts to spin the selection around the
+// world Y axis (anchored deltas; a compass ring renders around the object
+// in both the 3D viewport and the AR mirror while rotating).
+engine.onSelectRotate((e) => builder.rotateSelection(e.deltaRotation));
+engine.onSelectRotateEnd(() => builder.endRotateSelection());
 
 // Two-hand build: pinch both hands and pull apart to size the base (spawned
 // at the origin); release the upper pinch, then drag the lower one vertically

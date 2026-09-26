@@ -34,6 +34,8 @@ import type {
   PinchEndEvent,
   PinchStartEvent,
   RawHand,
+  SelectRotateEndEvent,
+  SelectRotateEvent,
   ZoomEvent,
   Unsubscribe,
 } from './types';
@@ -155,6 +157,20 @@ export class GestureEngine {
 
   onPinchEnd(listener: SignalListener<PinchEndEvent>): Unsubscribe {
     return this.on('pinch_end', listener as GestureListener);
+  }
+
+  /**
+   * SELECT-mode open-palm rotation: cumulative radians since the gesture
+   * began, emitted while one hand holds a pinch and the other shows an
+   * open palm (apply as `rotation.y = initialRotation + deltaRotation`).
+   */
+  onSelectRotate(listener: SignalListener<SelectRotateEvent>): Unsubscribe {
+    return this.on('select_rotate', listener as GestureListener);
+  }
+
+  /** The open-palm rotation ended (palm closed / pinch released / hand lost / mode switch). */
+  onSelectRotateEnd(listener: SignalListener<SelectRotateEndEvent>): Unsubscribe {
+    return this.on('select_rotate_end', listener as GestureListener);
   }
 
   /** Extrusion events (start / pull / end are all delivered as `extrude*`). */

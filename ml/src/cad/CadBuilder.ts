@@ -45,7 +45,18 @@
  *                          (highlighted) and anchors a ground-plane drag; a
  *                          miss clears the selection.
  *   dragTo(x, y)         → move the selected mesh so the grabbed point
- *                          follows the pinch (ground plane, height kept).
+ *                          follows the pinch, constrained by the active
+ *                          drag constraint (`setDragConstraint`): 'xz' slides
+ *                          across the ground plane with the elevation
+ *                          locked at its current height; 'y' maps vertical
+ *                          hand travel to a world-Y lift / lower (horizontal
+ *                          drift ignored, never below the floor). Switching
+ *                          the constraint mid-drag re-anchors, so the mesh
+ *                          never jerks or resets.
+ *   rotateSelection(d)   → secondary-hand open-palm rotation: yaw the selected
+ *                          mesh to an anchored angle + d, with a compass
+ *                          ring (circle + yaw needle) rendered around it in
+ *                          the 3D viewport and the AR mirror.
  *   endDrag() / deselect() → finish the drag / clear the selection.
  */
 
@@ -54,6 +65,15 @@ import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js';
 import type { CadScene } from './CadScene';
 
 export type CadTool = 'box' | 'cuboid' | 'cylinder' | 'sphere';
+
+/**
+ * SELECT-mode drag constraint: `'xz'` (default) slides the grabbed mesh
+ * across the ground plane with its elevation locked; `'y'` maps vertical
+ * hand travel to a world-Y lift / lower while horizontal drift is ignored.
+ * Structurally compatible with the vision overlay's toggle type — the
+ * orchestrator bridges the two without a shared import.
+ */
+export type DragConstraint = 'xz' | 'y';
 
 /**
  * Extrusion delta; structurally compatible with the vision layer's extrude
@@ -88,6 +108,10 @@ export interface CadBuilderOptions {
   redrawDistance?: number;
   /** Workspace radius on the ground plane for raycast clamping. */
   groundRadius?: number;
+  /** World units of lift per device-space unit of vertical drag (SELECT mode). */
+  dragElevationScale?: number;
+  /** Highest allowed mesh center height while drag-lifting (world units). */
+  dragMaxHeight?: number;
   /** Preview wireframe / fill color. */
   previewColor?: number;
   /** Committed mesh body color (dark gray matte). */
@@ -159,8 +183,35 @@ export class CadBuilder {
   private build: Build | null = null;
   /** Currently selected (highlighted) committed mesh, or null. */
   private selected: THREE.Mesh | null = null;
-  /** Active selection drag: offset from the grabbed ground point to the mesh. */
-  private selectionDrag: { offsetX: number; offsetZ: number } | null = null;
+  /**
+   * Active selection drag: offset from the grabbed ground point to the mesh,
+   * plus the vertical (lift) anchor — mesh height and device-space pinch
+   * height at grab time, with the clamp range that keeps the mesh resting
+   * on or above the ground plane. `lastX` / `lastY` remember the newest
+   * pinch position so a mid-drag constraint toggle can re-anchor cleanly.
+   */
+  private selectionDrag: {
+    offsetX: number;
+    offsetZ: number;
+    baseY: number;
+    startDeviceY: number;
+    minY: number;
+    maxY: number;
+    lastX: number;
+    lastY: number;
+  } | null = null;
+  /** Active SELECT-mode drag constraint: ground plane ('xz') or Y axis ('y'). */
+  private constraint: DragConstraint = 'xz';
+  /** Yaw (radians) the open-palm rotation anchored at, or null when idle. */
+  private selectionRotationAnchor: number | null = null;
+  /** Whether an open-palm rotation gesture is currently running. */
+  private rotating = false;
+  /** Compass ring around the selection (built lazily, reused across gestures). */
+  private rotationRing: THREE.Group | null = null;
+  /** Yaw needle child of the compass ring. */
+  private rotationNeedle: THREE.Line | null = null;
+  /** Compass-ring radius in world units (refreshed from the selection's extents). */
+  private rotationRingRadius = 1;
 
   constructor(scene: CadScene, options: CadBuilderOptions = {}) {
     this.scene = scene;
@@ -173,6 +224,8 @@ export class CadBuilder {
       extrudeScale: options.extrudeScale ?? 4.5,
       redrawDistance: options.redrawDistance ?? 0.35,
       groundRadius: options.groundRadius ?? 16,
+      dragElevationScale: options.dragElevationScale ?? 3,
+      dragMaxHeight: options.dragMaxHeight ?? 5,
       previewColor: options.previewColor ?? 0x0284c7,
       bodyColor: options.bodyColor ?? 0x3f3f46,
       edgeColor: options.edgeColor ?? 0xc9d2de,
@@ -197,6 +250,16 @@ export class CadBuilder {
   /** Number of currently selected meshes (0 or 1). */
   get selectedCount(): number {
     return this.selected ? 1 : 0;
+  }
+
+  /** Committed meshes (read-only view) — consumed by the AR mirror. */
+  get committedMeshes(): readonly THREE.Mesh[] {
+    return this.committed;
+  }
+
+  /** The currently selected committed mesh (AR highlight), or null. */
+  get selectedMesh(): THREE.Mesh | null {
+    return this.selected;
   }
 
   /** Select the primitive tool for the next (or in-progress) build. */
@@ -313,6 +376,9 @@ export class CadBuilder {
       Math.max(build.depth, this.options.minSize),
       radius
     );
+    // Selection drag-lift needs the local Y extents to clamp the mesh to the
+    // ground plane; the AR mirror reuses the bounding box implicitly.
+    geometry.computeBoundingBox();
     const mesh = new THREE.Mesh(geometry, this.bodyMaterial());
     mesh.position.copy(this.buildCenter(build));
     mesh.position.y = build.tool === 'sphere' ? radius : height / 2;
@@ -352,6 +418,7 @@ export class CadBuilder {
     this.committed.length = 0;
     this.selected = null;
     this.selectionDrag = null;
+    this.endRotateSelection();
   }
 
   /** Download all committed meshes as a binary `model.stl`. */
@@ -379,6 +446,17 @@ export class CadBuilder {
   dispose(): void {
     this.clear();
     this.scene.scene.remove(this.root);
+    if (this.rotationRing) {
+      this.scene.scene.remove(this.rotationRing);
+      this.rotationRing.traverse((obj) => {
+        if (obj instanceof THREE.Line) {
+          obj.geometry.dispose();
+          (obj.material as THREE.Material).dispose();
+        }
+      });
+      this.rotationRing = null;
+      this.rotationNeedle = null;
+    }
   }
 
   /* ------------------------------------------------------------------ */
@@ -401,25 +479,138 @@ export class CadBuilder {
     }
     this.select(mesh);
     const grab = this.groundPoint(x, y);
-    this.selectionDrag = { offsetX: mesh.position.x - grab.x, offsetZ: mesh.position.z - grab.z };
+    // Lock the pinch offset relative to the mesh origin, plus the vertical
+    // (lift) anchor: the mesh may never sink below the ground plane.
+    const bottom = mesh.geometry.boundingBox?.min.y ?? 0;
+    const minY = -bottom;
+    this.selectionDrag = {
+      offsetX: mesh.position.x - grab.x,
+      offsetZ: mesh.position.z - grab.z,
+      baseY: mesh.position.y,
+      startDeviceY: y,
+      minY,
+      maxY: Math.max(minY, this.options.dragMaxHeight),
+      lastX: x,
+      lastY: y,
+    };
     return true;
   }
 
   /**
    * Drag the selected mesh so its grabbed ground point follows the given
-   * device-space position (SELECT mode). Height is preserved.
+   * device-space position (SELECT mode), constrained by the active drag
+   * constraint:
+   * - `'xz'`: X / Z track the ground-plane raycast in real time; the
+   *   elevation stays locked at whatever height the mesh currently has
+   *   (Y untouched).
+   * - `'y'`: vertical hand travel lifts / lowers the mesh (scaled, clamped
+   *   so it never sinks below the ground plane); horizontal drift is
+   *   ignored (X / Z untouched).
    */
   dragTo(x: number, y: number): void {
     const mesh = this.selected;
-    if (!mesh || !this.selectionDrag) return;
-    const target = this.groundPoint(x, y);
-    mesh.position.x = target.x + this.selectionDrag.offsetX;
-    mesh.position.z = target.z + this.selectionDrag.offsetZ;
+    const drag = this.selectionDrag;
+    if (!mesh || !drag) return;
+    drag.lastX = x;
+    drag.lastY = y;
+    if (this.constraint === 'xz') {
+      const target = this.groundPoint(x, y);
+      mesh.position.x = target.x + drag.offsetX;
+      mesh.position.z = target.z + drag.offsetZ;
+    } else {
+      mesh.position.y = THREE.MathUtils.clamp(
+        drag.baseY + (y - drag.startDeviceY) * this.options.dragElevationScale,
+        drag.minY,
+        drag.maxY
+      );
+    }
+    if (this.rotating) this.updateRotationRing();
+  }
+
+  /** The active SELECT-mode drag constraint ('xz' | 'y'). */
+  get dragConstraint(): DragConstraint {
+    return this.constraint;
+  }
+
+  /**
+   * Switch the SELECT-mode drag constraint. A switch in the middle of a drag
+   * re-anchors the offsets at the mesh's live position and the newest pinch
+   * position, so toggling between the ground plane and the Y axis never
+   * resets the object's position or causes a jerk.
+   */
+  setDragConstraint(constraint: DragConstraint): void {
+    if (this.constraint === constraint) return;
+    this.constraint = constraint;
+    const mesh = this.selected;
+    const drag = this.selectionDrag;
+    if (!mesh || !drag) return;
+    const grab = this.groundPoint(drag.lastX, drag.lastY);
+    drag.offsetX = mesh.position.x - grab.x;
+    drag.offsetZ = mesh.position.z - grab.z;
+    drag.baseY = mesh.position.y;
+    drag.startDeviceY = drag.lastY;
+  }
+
+  /**
+   * Begin rotating the selected mesh around the world Y axis (SELECT mode,
+   * open-palm secondary hand): anchors at the mesh's current yaw and shows
+   * the compass ring (circle + yaw needle) around it.
+   */
+  beginRotateSelection(): void {
+    const mesh = this.selected;
+    if (!mesh) return;
+    this.selectionRotationAnchor = mesh.rotation.y;
+    this.rotating = true;
+    this.ensureRotationRing().visible = true;
+    this.updateRotationRing();
+  }
+
+  /**
+   * Rotate the selected mesh to `anchor + deltaRotation` (SELECT mode): the
+   * vision layer reports the cumulative open-palm tilt since its gesture
+   * began, and the first call after a gesture starts (or after
+   * `endRotateSelection`) anchors at the mesh's current yaw — so
+   * `selectedMesh.rotation.y = initialRotation + deltaRotation`.
+   */
+  rotateSelection(deltaRotation: number): void {
+    const mesh = this.selected;
+    if (!mesh || !Number.isFinite(deltaRotation)) return;
+    if (this.selectionRotationAnchor === null) this.beginRotateSelection();
+    const anchor = this.selectionRotationAnchor;
+    if (anchor === null) return; // no selection to anchor at
+    mesh.rotation.y = anchor + deltaRotation;
+    if (this.rotating) this.updateRotationRing();
+  }
+
+  /** End the open-palm rotation (hides the compass ring; the yaw persists). */
+  endRotateSelection(): void {
+    this.selectionRotationAnchor = null;
+    this.rotating = false;
+    if (this.rotationRing) this.rotationRing.visible = false;
+  }
+
+  /** Whether an open-palm rotation gesture is currently running. */
+  get isRotating(): boolean {
+    return this.rotating;
+  }
+
+  /**
+   * World-space compass ring around the selection while rotating (consumed
+   * by the AR mirror): center + radius + current yaw; `null` when idle.
+   */
+  get selectionRingWorld(): { center: THREE.Vector3; radius: number; angle: number } | null {
+    if (!this.rotating || !this.selected) return null;
+    return {
+      center: this.selected.position,
+      radius: this.rotationRingRadius,
+      angle: this.selected.rotation.y,
+    };
   }
 
   /** End the active selection drag (the selection itself persists). */
   endDrag(): void {
     this.selectionDrag = null;
+    this.endRotateSelection();
   }
 
   /** Clear the selection and its highlight. */
@@ -427,6 +618,7 @@ export class CadBuilder {
     if (this.selected) this.setSelectionStyle(this.selected, false);
     this.selected = null;
     this.selectionDrag = null;
+    this.endRotateSelection();
   }
 
   private select(mesh: THREE.Mesh): void {
@@ -448,6 +640,57 @@ export class CadBuilder {
         );
       }
     }
+  }
+
+  /**
+   * Compass ring for the open-palm rotation: a world-fixed horizontal circle
+   * around the selected mesh plus a yaw needle (the object's local +X
+   * direction) that sweeps as it rotates. Built once and reused across
+   * gestures — only position / scale / needle yaw are refreshed per frame.
+   * Lives in the scene (not the committed root) so it never shows up in the
+   * STL export, the raycast pick or the AR ghost list.
+   */
+  private ensureRotationRing(): THREE.Group {
+    if (this.rotationRing) return this.rotationRing;
+    const segments = 72;
+    const circle: THREE.Vector3[] = [];
+    for (let i = 0; i < segments; i++) {
+      const a = (i / segments) * Math.PI * 2;
+      circle.push(new THREE.Vector3(Math.cos(a), 0, Math.sin(a)));
+    }
+    const ring = new THREE.LineLoop(
+      new THREE.BufferGeometry().setFromPoints(circle),
+      new THREE.LineBasicMaterial({ color: 0x22d3ee, transparent: true, opacity: 0.85 })
+    );
+    const needle = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints([
+        new THREE.Vector3(0, 0, 0),
+        new THREE.Vector3(1, 0, 0),
+      ]),
+      new THREE.LineBasicMaterial({ color: 0xfbbf24, transparent: true, opacity: 0.95 })
+    );
+    const group = new THREE.Group();
+    group.name = 'cad-rotation-ring';
+    group.add(ring, needle);
+    group.visible = false;
+    this.rotationRing = group;
+    this.rotationNeedle = needle;
+    this.scene.scene.add(group);
+    return group;
+  }
+
+  /** Refresh the ring's position / scale and the needle's yaw from the selection. */
+  private updateRotationRing(): void {
+    const mesh = this.selected;
+    const ring = this.rotationRing;
+    if (!mesh || !ring) return;
+    const box = mesh.geometry.boundingBox;
+    const halfWidth = box ? (box.max.x - box.min.x) / 2 : 0.5;
+    const halfDepth = box ? (box.max.z - box.min.z) / 2 : 0.5;
+    this.rotationRingRadius = Math.max(halfWidth, halfDepth) * 1.35 + 0.2;
+    ring.position.copy(mesh.position);
+    ring.scale.set(this.rotationRingRadius, 1, this.rotationRingRadius);
+    if (this.rotationNeedle) this.rotationNeedle.rotation.y = mesh.rotation.y;
   }
 
   /* ------------------------------------------------------------------ */

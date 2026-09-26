@@ -37,7 +37,9 @@ src/
 ├── styles.css                 # light theme; full-bleed viewport, camera thumbnail, glass toolbar
 ├── cad/
 │   ├── CadScene.ts            # Three.js viewport: camera rig, lights, grid, orbit
-│   └── CadBuilder.ts          # gesture-driven primitives + STL export
+│   ├── CadBuilder.ts          # gesture-driven primitives + STL export
+│   ├── arProjection.ts        # pure NDC→canvas math + 2D convex hull (AR mirror)
+│   └── ArMirror.ts            # plain-data AR projection of grid + meshes for the overlay
 ├── ui/
 │   └── Toolbar.ts             # CAD toolbar: camera toggle, Clear scene, Export STL
 └── vision/
@@ -112,7 +114,7 @@ starts in `'view'`):
 | Mode | Pinches | Camera gestures (fist orbit / two-fist zoom) |
 | ---- | ------- | -------------------------------------------- |
 | **VIEW** | inert — no `pinch_*` / `extrude_*` events, never a build state, cannot veto orbit / zoom | live |
-| **SELECT** | `pinch_start` raycasts against committed meshes (pick + highlight, empty ground deselects); `pinch_drag` drags the selected mesh on the ground plane; FSM state `SELECTING` | live |
+| **SELECT** | `pinch_start` raycasts against committed meshes (pick + highlight, empty ground deselects); `pinch_drag` drags the selected mesh under the active constraint toggle — `[ XZ PLANE ]` slides it across the ground (elevation locked) and `[ Y AXIS ]` maps vertical hand travel to a lift / lower; with the pinch held, an **open palm** on the other hand emits `select_rotate` yaw deltas (compass ring around the object); the vision overlay mirrors the 3D scene as a translucent AR layer; FSM state `SELECTING` | live |
 | **CREATE** | full build gesture set (below) | live |
 
 A mode switch force-releases in-flight pinches (synthetic `pinch_end`) and
@@ -126,6 +128,7 @@ reflected on the overlay's button bar and in the per-frame event's `mode`.
 | **Extrude (single-hand)** | while EXTRUDING with one pinch: vertical drag of landmark 8 | `extrude` (`deltaHeight`, `cumulativeHeight`, +Y up) |
 | **Camera move (one fist)** | a *real* closed fist, not just curled fingers (`handShape.ts`): all 4 fingertips folded into the palm — `dist(tip, wrist) < 0.9 · dist(MCP, wrist)`, which rejects claw / hook curls and half-curls — and the thumb tucked over the fingers (thumb tip within 0.75 × palm size of an index / middle / ring knuckle, rejecting a thumbs-up); all ratios, so size / distance / rotation invariant. Needs 3 consecutive frames (app default); once held, thresholds relax by `fistHoldSlack` and one finger may loosen. Only engaged from IDLE with no active pinch, and a pinch never engages from a fist. Palm-center motion is reported as deltas, **straightened** by `PathStraightener` so the camera travels in straight segments instead of copying hand wiggle (see below); the app orbits the camera around the locked origin so the scene follows the fist (fist right → camera swings left, fist up → camera swings lower). **Wrist roll** — twisting the fist like a doorknob, measured as the rotation of the knuckle line (index MCP → pinky MCP) around the wrist → middle-MCP axis — turns the scene around the vertical axis with the twist; reported only after the twist exceeds `rollEngageAngle` (0.15 rad ≈ 9°) per fist, per-frame jitter under `rollDeadzone` dropped | `orbit_start`, `orbit` (`deltaX`, `deltaY` device units, `deltaRoll` radians), `orbit_end` |
 | **Zoom / turn (two fists)** | both hands closed fists (same test). The steadier fist (lower smoothed palm speed; switches only when the other is below `zoomAnchorSwitchRatio` 0.5× its speed) is the **anchor** — the pivot — and only the other fist's motion relative to it counts, so the anchor's own jitter is ignored. Distance `D` from the anchor (aspect-corrected palm centers): moving fist farther away → zoom in, closer → zoom out. Circling the anchor → `deltaAngle` (counter-clockwise on screen = +) turns the scene, after `zoomTurnEngageAngle` (0.12 rad ≈ 7°) of sweep so a straight pull doesn't rotate. Engaged from IDLE, or upgraded from a one-fist move when the second fist closes; ends on a pinch, a lost hand, or one hand open longer than `orbitOpenPalmGraceFrames` (then falls back to a one-fist move if the other fist is still closed) | `zoom_start`, `zoom` (`anchor`, `distance`, `scaleFactor = D / D₀`, `deltaScale = D / D_prev`, `deltaAngle`), `zoom_end` |
+| **Open-palm rotation (SELECT)** | while exactly one hand holds a pinch, the *other* hand shows an open palm: all four fingertips extended past their own PIP joints (`dist(tip, wrist) > 1.0 · dist(PIP, wrist)` per finger) and the thumb held out (thumb-tip farther than `openPalmThumbTuckRatio` 0.6 × palm size from the nearest knuckle — the inverse of the fist thumb-tuck test). The palm's tilt (angle of the wrist → middle-MCP vector in the mirrored, aspect-corrected view) is tracked frame-to-frame, unwrapped across ±π and anchored at gesture start, so the app applies `selectedMesh.rotation.y = initialRotation + deltaRotation` and a re-opened palm never jumps the object. Ends — `select_rotate_end` — when the palm closes / starts pinching, the pinch releases, a hand is lost or the mode switches. Only in SELECT mode; elsewhere the same poses route to build / navigation gestures | `select_rotate` (`hand`, `palmHand`, cumulative `deltaRotation` radians), `select_rotate_end` (`palmHand`, `reason`) |
 
 **Straight camera paths.** Building gestures (pinch, extrude) are live and
 unfiltered, but a camera that copies every hand tremor feels unsteady and can
@@ -198,9 +201,23 @@ mode is shown inverted with an indicator bar (and in the bottom-left HUD):
    camera gesture; pinching the second hand before releasing replaces it
    with a two-hand build.
 4. **Select & move (SELECT mode)** — pinch over a committed mesh to pick it
-   up (highlighted); dragging the pinch moves it along the ground plane
-   (height preserved, grab offset kept); pinching empty ground deselects.
-   Pinches never draw or extrude in this mode.
+   up (highlighted); dragging the pinch moves it under the active
+   **constraint toggle** (top-left of the vision overlay): `[ XZ PLANE ]`
+   (default) slides it along the ground plane with the grab offset kept and
+   its elevation locked, while `[ Y AXIS (ELEVATE) ]` ignores horizontal
+   drift and maps vertical hand travel to a lift / lower (clamped so it
+   never sinks below the floor). Switching between the toggles mid-drag
+   re-anchors, so the mesh never jerks or resets. Pinching empty ground
+   deselects. While in SELECT mode the camera thumbnail doubles as a live
+   **AR spatial mirror**: the ground grid (30 × 30 world units, 1-unit minor
+   + stronger 5-unit major lines, off-canvas geometry culled) and every
+   committed mesh are projected through the shared 3D camera and drawn as
+   translucent ghosts (the active selection glows amber/cyan) in lockstep
+   with the viewport. Keep the pinch held and show an **open palm** with
+   your other hand: tilting it spins the selection around the vertical
+   axis, with a compass ring (dashed circle + yaw needle) rendered around
+   the object in both the 3D viewport and the AR mirror. Pinches never draw
+   or extrude in this mode.
 5. **Orbit the camera** — make a fist and move it: the camera orbits the
    world origin and the scene follows your hand — fist right swings the
    camera left, fist up swings it lower — with damping (`CadScene.onOrbit`);
@@ -243,6 +260,8 @@ engine.onPinchEnd((e) => { /* e.endPos, e.delta */ });
 engine.onExtrude((e) => { /* e.mode, e.scaleFactor | e.deltaHeight */ });
 engine.onOrbit((e) => { /* e.deltaX, e.deltaY, e.deltaRoll (one fist) */ });
 engine.onZoom((e) => { /* e.anchor, e.deltaScale, e.deltaAngle, e.scaleFactor (two fists) */ });
+engine.onSelectRotate((e) => { /* e.hand, e.palmHand, e.deltaRotation (SELECT, open palm) */ });
+engine.onSelectRotateEnd((e) => { /* e.palmHand, e.reason */ });
 
 // Debug overlay / HUD data (fires once per processed frame):
 engine.on('frame', (frame) => { /* state, mode, hands, metrics, fps */ });
@@ -272,12 +291,14 @@ on-screen view), +Y up — ready to map into a CAD viewport.
   `alpha` (default 0.35), teleport/stale-history thresholds.
 - `classifier` — `GestureClassifierOptions`: pinch thresholds, fist shape
   (`fistFoldRatio` 0.9, `fistMinFoldedFingers` 4, `fistThumbTuckRatio` 0.75,
-  `fistHoldSlack` 0.15, `fistPinchGuardDistance`) & debounce frames, wrist
+  `fistHoldSlack` 0.15, `fistPinchGuardDistance`) & debounce frames, wrist 
   roll (`rollEngageAngle` 0.15 rad, `rollDeadzone` 0.003 rad), two-fist anchor
   (`zoomAnchorSwitchRatio` 0.5, `zoomTurnEngageAngle` 0.12 rad), camera path
   straightening (`cameraPath`: `startDistance`, `cornerDeviation`,
   `settleDistance`, `deadband`, or `null`), orbit
-  open-palm grace, hand-loss grace frames.
+  open-palm grace, hand-loss grace frames, and open-palm detection for the
+  SELECT-mode rotation (`openPalmExtensionRatio` 1.0,
+  `openPalmMinExtendedFingers` 4, `openPalmThumbTuckRatio` 0.6).
 - `initialMode` — `InteractionMode`: starting interaction mode. Defaults to
   `'create'` (full legacy gesture set); the app itself starts in `'view'`
   and switches via `setMode()` at runtime.
@@ -290,7 +311,20 @@ The `<canvas id="overlay">` (pure Canvas 2D) mirrors the feed and draws:
   toggle buttons (`[ VIEW ] [ SELECT ] [ CREATE ]`) — the active one is
   inverted (solid light fill + high-contrast indicator bar). Activated by
   mouse click, index-tip (landmark 8) dwell (500 ms, with a progress bar) or
-  a pinch over the button (via `DebugOverlay`'s `onModeRequest` callback);
+  a pinch over the button (via `DebugOverlay`'s `onModeRequest` callback).
+  Only a *fresh* pinch (one that closes over a button) activates it, so an
+  object drag sweeping across the bar never switches modes;
+- in **SELECT mode**, a stack of two **drag-constraint toggles** below the
+  mode bar in the top-left corner: `[ XZ PLANE ]` (default) and
+  `[ Y AXIS (ELEVATE) ]` — same boxy style and activation model
+  (`onDragConstraintRequest`); a pinch over a button toggles it without
+  also picking / drawing in the scene (`isUiAtDevice`);
+- in **SELECT mode**, a live **AR spatial mirror**: the 3D ground grid and
+  every committed mesh are projected through the shared scene camera
+  (`CadScene.projectToCanvas` + `ArMirror`) and drawn as translucent cyan
+  ghosts beneath the hands — the active selection gets an energetic
+  amber/cyan glowing outline, and while an open-palm rotation runs a dashed
+  compass ring + amber yaw needle circles the selection;
 - all 21 landmarks per hand + MediaPipe skeleton connections,
 - state color-coding: **green** = pinch/draw, **cyan** = selecting, **blue**
   = one-fist move, **purple** = two-fist zoom / turn (ring = anchor fist,
