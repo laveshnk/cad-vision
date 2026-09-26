@@ -38,6 +38,15 @@
  *
  * commit() replaces the wireframe with a solid matte mesh + EdgesGeometry
  * outlines and adds it to the scene.
+ *
+ * Selection (SELECT mode):
+ *   pickAt(x, y)         → raycast a device-space pinch position against the
+ *                          committed meshes: a hit selects that mesh
+ *                          (highlighted) and anchors a ground-plane drag; a
+ *                          miss clears the selection.
+ *   dragTo(x, y)         → move the selected mesh so the grabbed point
+ *                          follows the pinch (ground plane, height kept).
+ *   endDrag() / deselect() → finish the drag / clear the selection.
  */
 
 import * as THREE from 'three';
@@ -148,6 +157,10 @@ export class CadBuilder {
 
   private tool: CadTool = 'box';
   private build: Build | null = null;
+  /** Currently selected (highlighted) committed mesh, or null. */
+  private selected: THREE.Mesh | null = null;
+  /** Active selection drag: offset from the grabbed ground point to the mesh. */
+  private selectionDrag: { offsetX: number; offsetZ: number } | null = null;
 
   constructor(scene: CadScene, options: CadBuilderOptions = {}) {
     this.scene = scene;
@@ -179,6 +192,11 @@ export class CadBuilder {
 
   get hasActiveBuild(): boolean {
     return this.build !== null;
+  }
+
+  /** Number of currently selected meshes (0 or 1). */
+  get selectedCount(): number {
+    return this.selected ? 1 : 0;
   }
 
   /** Select the primitive tool for the next (or in-progress) build. */
@@ -324,7 +342,7 @@ export class CadBuilder {
     this.build = null;
   }
 
-  /** Remove every committed mesh from the scene. */
+  /** Remove every committed mesh from the scene (and any selection). */
   clear(): void {
     this.cancel();
     for (const mesh of this.committed) {
@@ -332,6 +350,8 @@ export class CadBuilder {
       disposeMesh(mesh);
     }
     this.committed.length = 0;
+    this.selected = null;
+    this.selectionDrag = null;
   }
 
   /** Download all committed meshes as a binary `model.stl`. */
@@ -359,6 +379,75 @@ export class CadBuilder {
   dispose(): void {
     this.clear();
     this.scene.scene.remove(this.root);
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Selection (SELECT mode)                                            */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * Raycast a device-space point against the committed meshes (SELECT mode).
+   * A hit selects that mesh and anchors a ground-plane drag at the pinch
+   * position; a miss clears the selection.
+   * @returns true if a mesh is now selected.
+   */
+  pickAt(x: number, y: number): boolean {
+    this.raycaster.setFromCamera(this.ndc.set(x, y), this.scene.camera);
+    const hits = this.raycaster.intersectObjects(this.committed, false);
+    const mesh = hits.length > 0 ? (hits[0].object as THREE.Mesh) : null;
+    if (!mesh) {
+      this.deselect();
+      return false;
+    }
+    this.select(mesh);
+    const grab = this.groundPoint(x, y);
+    this.selectionDrag = { offsetX: mesh.position.x - grab.x, offsetZ: mesh.position.z - grab.z };
+    return true;
+  }
+
+  /**
+   * Drag the selected mesh so its grabbed ground point follows the given
+   * device-space position (SELECT mode). Height is preserved.
+   */
+  dragTo(x: number, y: number): void {
+    const mesh = this.selected;
+    if (!mesh || !this.selectionDrag) return;
+    const target = this.groundPoint(x, y);
+    mesh.position.x = target.x + this.selectionDrag.offsetX;
+    mesh.position.z = target.z + this.selectionDrag.offsetZ;
+  }
+
+  /** End the active selection drag (the selection itself persists). */
+  endDrag(): void {
+    this.selectionDrag = null;
+  }
+
+  /** Clear the selection and its highlight. */
+  deselect(): void {
+    if (this.selected) this.setSelectionStyle(this.selected, false);
+    this.selected = null;
+    this.selectionDrag = null;
+  }
+
+  private select(mesh: THREE.Mesh): void {
+    if (this.selected === mesh) return;
+    this.deselect();
+    this.selected = mesh;
+    this.setSelectionStyle(mesh, true);
+  }
+
+  /** Highlight / restore a committed mesh: emissive tint + accent edges. */
+  private setSelectionStyle(mesh: THREE.Mesh, selected: boolean): void {
+    const body = mesh.material as THREE.MeshStandardMaterial;
+    body.emissive.setHex(selected ? 0x0284c7 : 0x000000);
+    body.emissiveIntensity = selected ? 0.35 : 1;
+    for (const child of mesh.children) {
+      if (child instanceof THREE.LineSegments) {
+        (child.material as THREE.LineBasicMaterial).color.setHex(
+          selected ? 0x0284c7 : this.options.edgeColor
+        );
+      }
+    }
   }
 
   /* ------------------------------------------------------------------ */
