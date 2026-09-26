@@ -10,7 +10,7 @@
  */
 
 import { distance3 } from './coordinates';
-import type { HandFrame, Vec3 } from './types';
+import type { HandFrame, Vec2, Vec3 } from './types';
 
 const WRIST = 0;
 const THUMB_TIP = 4;
@@ -114,6 +114,32 @@ export function measureWristRoll(hand: HandFrame): number | null {
   if (!r1) return null;
   const r2 = cross(axis, r1);
   return Math.atan2(dot(k, r2), dot(k, r1));
+}
+
+/** Palm-center landmarks: wrist + the four MCP joints. */
+const PALM_INDICES = [0, 5, 9, 13, 17];
+
+/**
+ * Palm center in the mirrored, Y-up screen view (X right, Y up), in
+ * aspect-corrected units of the video width — so distances and angles
+ * between two hands' palm centers are not skewed by the video aspect ratio.
+ */
+export function palmCenter2D(hand: HandFrame): Vec2 {
+  const lms = hand.landmarks;
+  let aspect = 1; // pixel height per pixel width of one normalized unit
+  for (const lm of lms) {
+    if (lm.normalized.x > 0.05 && lm.normalized.y > 0.05 && lm.pixel.x > 0) {
+      aspect = (lm.pixel.y / lm.normalized.y) / (lm.pixel.x / lm.normalized.x);
+      break;
+    }
+  }
+  let x = 0;
+  let y = 0;
+  for (const i of PALM_INDICES) {
+    x += lms[i].normalized.x;
+    y += lms[i].normalized.y;
+  }
+  return { x: -x / PALM_INDICES.length, y: (-y / PALM_INDICES.length) * aspect };
 }
 
 /** Wrap an angle difference into (-π, π]. */

@@ -42,6 +42,7 @@ src/
     ├── HandTracker.ts         # webcam + MediaPipe HandLandmarker
     ├── HandednessStabilizer.ts # temporal + geometric Left/Right label stabilization
     ├── handShape.ts           # fold / thumb-tuck ratios (real fist) + wrist roll
+    ├── PathStraightener.ts    # straight-segment filter for camera moves
     ├── GestureClassifier.ts   # pinch/fist/orbit/zoom detection + finite state machine
     ├── GestureEngine.ts       # facade: pipeline + event emitter
     ├── DebugOverlay.ts        # 2D canvas renderer (landmarks, skeleton, HUD)
@@ -101,8 +102,22 @@ hands on the mirrored preview.
 | **Pinch / draw** | 3D Euclidean distance between landmarks 4 (thumb tip) and 8 (index tip); trigger `< 0.045`, hysteresis release `> 0.065` (both configurable) | `pinch_start`, `pinch_drag` (position, delta in device space), `pinch_end` |
 | **Extrude (dual-hand)** | both hands pinch; pull distance `D` between pinch centers `center = (P_thumb + P_index) / 2` | `extrude_start`, `extrude` (`distance`, `scaleFactor = D / D₀`, `deltaDistance`), `extrude_end` |
 | **Extrude (single-hand)** | while EXTRUDING with one pinch: vertical drag of landmark 8 | `extrude` (`deltaHeight`, `cumulativeHeight`, +Y up) |
-| **Camera move (one fist)** | a *real* closed fist, not just curled fingers (`handShape.ts`): all 4 fingertips folded into the palm — `dist(tip, wrist) < 0.9 · dist(MCP, wrist)`, which rejects claw / hook curls and half-curls — and the thumb tucked over the fingers (thumb tip within 0.75 × palm size of an index / middle / ring knuckle, rejecting a thumbs-up); all ratios, so size / distance / rotation invariant. Needs 3 consecutive frames (app default); once held, thresholds relax by `fistHoldSlack` and one finger may loosen. Only engaged from IDLE with no active pinch, and a pinch never engages from a fist. Palm-center motion is reported as deltas; the app pans the view so the scene follows the fist (fist right → camera left, fist up → camera down). **Wrist roll** — twisting the fist like a doorknob, measured as the rotation of the knuckle line (index MCP → pinky MCP) around the wrist → middle-MCP axis — turns the scene around the vertical axis with the twist; reported only after the twist exceeds `rollEngageAngle` (0.15 rad ≈ 9°) per fist, per-frame jitter under `rollDeadzone` dropped | `orbit_start`, `orbit` (`deltaX`, `deltaY` device units, `deltaRoll` radians), `orbit_end` |
-| **Zoom (two fists)** | both hands closed fists (same test); distance `D` between the two palm centers. Fists farther apart → zoom in, closer together → zoom out. Engaged from IDLE, or upgraded from a one-fist move when the second fist closes; ends on a pinch, a lost hand, or one hand open longer than `orbitOpenPalmGraceFrames` (then falls back to a one-fist move if the other fist is still closed) | `zoom_start`, `zoom` (`distance`, `scaleFactor = D / D₀`, `deltaScale = D / D_prev`), `zoom_end` |
+| **Camera move (one fist)** | a *real* closed fist, not just curled fingers (`handShape.ts`): all 4 fingertips folded into the palm — `dist(tip, wrist) < 0.9 · dist(MCP, wrist)`, which rejects claw / hook curls and half-curls — and the thumb tucked over the fingers (thumb tip within 0.75 × palm size of an index / middle / ring knuckle, rejecting a thumbs-up); all ratios, so size / distance / rotation invariant. Needs 3 consecutive frames (app default); once held, thresholds relax by `fistHoldSlack` and one finger may loosen. Only engaged from IDLE with no active pinch, and a pinch never engages from a fist. Palm-center motion is reported as deltas, **straightened** by `PathStraightener` so the camera travels in straight segments instead of copying hand wiggle (see below); the app pans the view so the scene follows the fist (fist right → camera left, fist up → camera down). **Wrist roll** — twisting the fist like a doorknob, measured as the rotation of the knuckle line (index MCP → pinky MCP) around the wrist → middle-MCP axis — turns the scene around the vertical axis with the twist; reported only after the twist exceeds `rollEngageAngle` (0.15 rad ≈ 9°) per fist, per-frame jitter under `rollDeadzone` dropped | `orbit_start`, `orbit` (`deltaX`, `deltaY` device units, `deltaRoll` radians), `orbit_end` |
+| **Zoom / turn (two fists)** | both hands closed fists (same test). The steadier fist (lower smoothed palm speed; switches only when the other is below `zoomAnchorSwitchRatio` 0.5× its speed) is the **anchor** — the pivot — and only the other fist's motion relative to it counts, so the anchor's own jitter is ignored. Distance `D` from the anchor (aspect-corrected palm centers): moving fist farther away → zoom in, closer → zoom out. Circling the anchor → `deltaAngle` (counter-clockwise on screen = +) turns the scene, after `zoomTurnEngageAngle` (0.12 rad ≈ 7°) of sweep so a straight pull doesn't rotate. Engaged from IDLE, or upgraded from a one-fist move when the second fist closes; ends on a pinch, a lost hand, or one hand open longer than `orbitOpenPalmGraceFrames` (then falls back to a one-fist move if the other fist is still closed) | `zoom_start`, `zoom` (`anchor`, `distance`, `scaleFactor = D / D₀`, `deltaScale = D / D_prev`, `deltaAngle`), `zoom_end` |
+
+**Straight camera paths.** Building gestures (pinch, extrude) are live and
+unfiltered, but a camera that copies every hand tremor feels unsteady and can
+cause motion sickness. One-fist camera moves therefore go through
+`PathStraightener` (`classifier.cameraPath`): nothing moves until the fist
+travels `startDistance` (0.02); the segment's heading is the *average*
+displacement over its first `settleDistance` (0.08), so wiggle cancels out;
+after that only progress along the line is passed on (moving back along the
+same line stays on it), and sideways drift beyond `cornerDeviation` (0.05)
+starts a new straight segment at the corner. Along-line tremor under
+`deadband` (0.004) is held. A shaky A → B → C therefore plays back as the
+straight segments A → B and B → C. `CadScene` then eases the camera toward
+its target with gentle damping (`damping` 5). Set `cameraPath: null` for raw
+deltas.
 
 Finite state machine: `IDLE ↔ DRAWING_BASE ↔ EXTRUDING ↔ ORBITING ↔ ZOOMING`.
 Pinch always wins over fist gestures; a lost hand finalizes its gesture after a
@@ -130,7 +145,7 @@ and hands absent > 10 frames re-seed from fresh evidence. Configurable via
 ## CAD application workflow
 
 The full-bleed viewport is a Three.js scene (floor grid, fog, damped orbit
-camera) driven entirely by the gesture events above, with the camera rendered
+camera, starting straight on so the grid is square to the screen) driven entirely by the gesture events above, with the camera rendered
 as a floating thumbnail (top-left, click ⤢ to expand/collapse) over it:
 
 1. **Draw the footprint** — pinch and drag: the pinch start raycasts onto the
@@ -149,9 +164,11 @@ as a floating thumbnail (top-left, click ⤢ to expand/collapse) over it:
    doorknob): the scene turns around the vertical axis with your twist
    (`CadScene.onRotate`, `rotateSpeed` 1.5×). Open and re-close the fist to
    ratchet further.
-5. **Zoom** — make fists with both hands: pull them apart to zoom in, bring
-   them closer together to zoom out (`CadScene.onZoom`, clamped between
-   `minDistance` and `maxDistance`).
+5. **Zoom / turn** — make fists with both hands and hold one still: it
+   becomes the anchor (ringed in the camera thumbnail). Move the other fist
+   away from it to zoom in, toward it to zoom out (`CadScene.onZoom`, clamped
+   between `minDistance` and `maxDistance`), or circle it around the anchor
+   to turn the scene (`CadScene.onRotate`).
 
 Toolbar (mouse or programmatic): **Start camera / Stop** (webcam + tracking
 lifecycle), **Box / Cylinder / Sphere** tool selection (swaps the in-progress
@@ -177,7 +194,7 @@ engine.onPinchDrag((e) => { /* e.currentPos, e.delta, e.startPos */ });
 engine.onPinchEnd((e) => { /* e.endPos, e.delta */ });
 engine.onExtrude((e) => { /* e.mode, e.scaleFactor | e.deltaHeight */ });
 engine.onOrbit((e) => { /* e.deltaX, e.deltaY, e.deltaRoll (one fist) */ });
-engine.onZoom((e) => { /* e.deltaScale, e.scaleFactor, e.distance (two fists) */ });
+engine.onZoom((e) => { /* e.anchor, e.deltaScale, e.deltaAngle, e.scaleFactor (two fists) */ });
 
 // Debug overlay / HUD data (fires once per processed frame):
 engine.on('frame', (frame) => { /* state, hands, metrics, fps */ });
@@ -204,7 +221,11 @@ on-screen view), +Y up — ready to map into a CAD viewport.
 - `classifier` — `GestureClassifierOptions`: pinch thresholds, fist shape
   (`fistFoldRatio` 0.9, `fistMinFoldedFingers` 4, `fistThumbTuckRatio` 0.75,
   `fistHoldSlack` 0.15, `fistPinchGuardDistance`) & debounce frames, wrist
-  roll (`rollEngageAngle` 0.15 rad, `rollDeadzone` 0.003 rad), orbit open-palm grace, hand-loss grace frames.
+  roll (`rollEngageAngle` 0.15 rad, `rollDeadzone` 0.003 rad), two-fist anchor
+  (`zoomAnchorSwitchRatio` 0.5, `zoomTurnEngageAngle` 0.12 rad), camera path
+  straightening (`cameraPath`: `startDistance`, `cornerDeviation`,
+  `settleDistance`, `deadband`, or `null`), orbit
+  open-palm grace, hand-loss grace frames.
 
 ## Debug overlay
 
@@ -212,7 +233,8 @@ The `<canvas id="overlay">` (pure Canvas 2D) mirrors the feed and draws:
 
 - all 21 landmarks per hand + MediaPipe skeleton connections,
 - state color-coding: **green** = pinch/draw, **blue** = one-fist move,
-  **purple** = two-fist zoom, **yellow** = idle
+  **purple** = two-fist zoom / turn (ring = anchor fist, dashed line to the
+  moving fist), **yellow** = idle
   (orange for EXTRUDING),
 - thumb↔index pinch line with live distance, dual-hand extrusion link with
   `D` and scale factor,
@@ -222,7 +244,7 @@ The `<canvas id="overlay">` (pure Canvas 2D) mirrors the feed and draws:
 ## Tests
 
 ```bash
-npm test        # vitest — coordinates, filters, handedness stabilizer, classifier/FSM unit tests
+npm test        # vitest — coordinates, filters, handedness stabilizer, path straightener, classifier/FSM unit tests
 npm run build   # tsc --noEmit + vite production build
 ```
 

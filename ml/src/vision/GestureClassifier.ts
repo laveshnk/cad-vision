@@ -8,7 +8,8 @@
  *   2. Lost-hand finalization (grace frames, then synthetic release events).
  *   3. State machine: IDLE <-> DRAWING_BASE <-> EXTRUDING <-> ORBITING <-> ZOOMING.
  *      One closed fist = ORBITING (camera navigation deltas); two closed
- *      fists = ZOOMING (palm-center distance drives the camera zoom).
+ *      fists = ZOOMING: the steadier fist is the anchor (pivot) and the other
+ *      fist's motion relative to it drives zoom (distance) and turn (angle).
  *
  * The classifier is a pure function of its inputs: `process()` returns the
  * events to emit and never touches the DOM, which keeps it unit-testable.
@@ -16,7 +17,14 @@
 
 import { centroid, distance3, midpoint3, subtract3 } from './coordinates';
 import { EmaScalar } from './filters';
-import { measureHandShape, measureWristRoll, wrapAngle, type HandShape } from './handShape';
+import { PathStraightener, type PathStraightenerOptions } from './PathStraightener';
+import {
+  measureHandShape,
+  measureWristRoll,
+  palmCenter2D,
+  wrapAngle,
+  type HandShape,
+} from './handShape';
 import type {
   ExtrudeMode,
   GestureMetrics,
@@ -76,6 +84,23 @@ export interface GestureClassifierOptions {
   rollEngageAngle?: number;
   /** Per-frame roll changes smaller than this (radians) are treated as jitter. */
   rollDeadzone?: number;
+  /**
+   * Straightening for one-fist camera moves (see `PathStraightener`): hand
+   * wiggle is removed so the camera travels in straight segments. `null`
+   * passes raw palm deltas through.
+   */
+  cameraPath?: PathStraightenerOptions | null;
+  /**
+   * Two fists: the anchor (pivot) switches to the other hand only when that
+   * hand's smoothed speed drops below this fraction of the anchor's speed.
+   */
+  zoomAnchorSwitchRatio?: number;
+  /**
+   * Two fists: cumulative angle (radians) the moving fist must circle around
+   * the anchor before turn deltas are reported — keeps a straight pull
+   * (zoom) from also rotating the view.
+   */
+  zoomTurnEngageAngle?: number;
   /** Frames an orbiting / zooming hand may open (palm drag) before the gesture ends. */
   orbitOpenPalmGraceFrames?: number;
   /** Frames a hand may vanish before its gesture state is finalized. */
@@ -99,6 +124,11 @@ interface HandTrack {
   /** Palm center (device space) used for orbit deltas. */
   palmCenter: Vec3;
   prevPalmCenter: Vec3;
+  /** Aspect-corrected, mirrored Y-up palm center (two-fist anchor math). */
+  palm2D: Vec2;
+  prevPalm2D: Vec2;
+  /** Smoothed palm speed (units of video width per frame) — picks the anchor. */
+  speedEma: number;
   /** Wrist roll angle (radians) this / previous frame; `null` if undefined. */
   roll: number | null;
   prevRoll: number | null;
@@ -131,6 +161,8 @@ export class GestureClassifier {
       | 'fistPinchGuardDistance'
       | 'rollEngageAngle'
       | 'rollDeadzone'
+      | 'zoomAnchorSwitchRatio'
+      | 'zoomTurnEngageAngle'
       | 'fistEnterFrames'
       | 'fistExitFrames'
       | 'orbitOpenPalmGraceFrames'
@@ -139,11 +171,21 @@ export class GestureClassifier {
   > & { pinchDistanceSmoothing: number | null };
 
   private state: GestureState = 'IDLE';
+  /** Straightens the one-fist camera path; `null` = raw deltas. */
+  private readonly cameraPath: PathStraightener | null;
+  /** Raw cumulative palm path since the one-fist gesture started. */
+  private rawCameraPath: Vec2 = { x: 0, y: 0 };
+  private lastCameraOut: Vec2 = { x: 0, y: 0 };
   private readonly tracks = new Map<Handedness, HandTrack>();
   private orbitHand: Handedness | null = null;
 
   private zoomReferenceDistance: number | null = null;
-  private zoomPrevDistance: number | null = null;
+  /** False until the first two-fist frame has recorded its reference. */
+  private zoomPrimed = false;
+  /** The steadier fist: pivot for the moving fist. */
+  private zoomAnchor: Handedness | null = null;
+  private zoomAngleTotal = 0;
+  private zoomTurnEngaged = false;
   private lastZoomDistance: number | null = null;
   private lastZoomScale: number | null = null;
 
@@ -176,11 +218,15 @@ export class GestureClassifier {
       fistPinchGuardDistance: options.fistPinchGuardDistance ?? 0.07,
       rollEngageAngle: options.rollEngageAngle ?? 0.15,
       rollDeadzone: options.rollDeadzone ?? 0.003,
+      zoomAnchorSwitchRatio: options.zoomAnchorSwitchRatio ?? 0.5,
+      zoomTurnEngageAngle: options.zoomTurnEngageAngle ?? 0.12,
       fistEnterFrames: options.fistEnterFrames ?? 2,
       fistExitFrames: options.fistExitFrames ?? 2,
       orbitOpenPalmGraceFrames: options.orbitOpenPalmGraceFrames ?? 10,
       handLossGraceFrames: options.handLossGraceFrames ?? 3,
     };
+    this.cameraPath =
+      options.cameraPath === null ? null : new PathStraightener(options.cameraPath);
   }
 
   get currentState(): GestureState {
@@ -204,6 +250,26 @@ export class GestureClassifier {
     this.lastOrbitDelta = null;
     this.orbitRollTotal = 0;
     this.rollEngaged = false;
+    this.resetCameraPath();
+  }
+
+  private resetCameraPath(): void {
+    this.rawCameraPath = { x: 0, y: 0 };
+    this.lastCameraOut = { x: 0, y: 0 };
+    this.cameraPath?.reset();
+  }
+
+  /**
+   * Straighten one frame of raw palm motion: accumulate the raw path, run it
+   * through the straightener and return the change in straightened position.
+   */
+  private straightenCameraDelta(raw: Vec2): Vec2 {
+    if (!this.cameraPath) return raw;
+    this.rawCameraPath = { x: this.rawCameraPath.x + raw.x, y: this.rawCameraPath.y + raw.y };
+    const out = this.cameraPath.update(this.rawCameraPath);
+    const delta = { x: out.x - this.lastCameraOut.x, y: out.y - this.lastCameraOut.y };
+    this.lastCameraOut = out;
+    return delta;
   }
 
   private getOrCreateTrack(hand: HandFrame): HandTrack {
@@ -226,6 +292,9 @@ export class GestureClassifier {
         openFrames: 0,
         palmCenter,
         prevPalmCenter: palmCenter,
+        palm2D: palmCenter2D(hand),
+        prevPalm2D: palmCenter2D(hand),
+        speedEma: 0,
         roll: null,
         prevRoll: null,
         orbitOpenFrames: 0,
@@ -394,10 +463,15 @@ export class GestureClassifier {
   private updatePalmCenter(track: HandTrack, hand: HandFrame): void {
     const center = centroid(PALM_INDICES.map((i) => hand.landmarks[i].device));
     const roll = measureWristRoll(hand);
+    const palm2D = palmCenter2D(hand);
     // No jump delta on (re)appearance after an absence.
     const reappeared = track.missedFrames > 0;
     track.prevPalmCenter = reappeared ? center : track.palmCenter;
     track.palmCenter = center;
+    track.prevPalm2D = reappeared ? palm2D : track.palm2D;
+    track.palm2D = palm2D;
+    const speed = Math.hypot(palm2D.x - track.prevPalm2D.x, palm2D.y - track.prevPalm2D.y);
+    track.speedEma = track.speedEma * 0.6 + speed * 0.4;
     track.prevRoll = reappeared ? roll : track.roll;
     track.roll = roll;
   }
@@ -469,7 +543,8 @@ export class GestureClassifier {
           track.orbitOpenFrames = 0;
         }
         if (this.orbitHand) {
-          const delta = subtract3(track.palmCenter, track.prevPalmCenter);
+          const raw = subtract3(track.palmCenter, track.prevPalmCenter);
+          const delta = this.straightenCameraDelta({ x: raw.x, y: raw.y });
           const deltaRoll = this.rollDelta(track);
           this.lastOrbitDelta = { x: delta.x, y: delta.y };
           events.push({
@@ -527,6 +602,7 @@ export class GestureClassifier {
         this.orbitHand = fistHands[0].handedness;
         this.orbitRollTotal = 0;
         this.rollEngaged = false;
+        this.resetCameraPath();
         this.setState('ORBITING', 'closed fist detected', timestamp, events);
         events.push({ type: 'orbit_start', timestamp, hand: this.orbitHand });
       }
@@ -553,7 +629,13 @@ export class GestureClassifier {
   }
 
   /**
-   * Two-fist zoom: distance between the two palm centers (normalized space).
+   * Two-fist navigation around an anchor. The steadier fist (lower smoothed
+   * speed, with `zoomAnchorSwitchRatio` hysteresis) is the pivot; only the
+   * other fist's motion relative to it counts, so the anchor's own jitter is
+   * ignored:
+   *   - distance change (mover toward / away from the anchor) → `deltaScale`;
+   *   - angle change (mover circling the anchor, + = counter-clockwise on
+   *     screen) → `deltaAngle`, after `zoomTurnEngageAngle` has accumulated.
    * Ends when a pinch starts, a hand is lost, or one hand stays open longer
    * than `orbitOpenPalmGraceFrames`. The first frame (and the first frame
    * after a hand reappears) only records the reference, so there is no jump.
@@ -581,33 +663,71 @@ export class GestureClassifier {
       }
     }
 
-    const present = [...presentHands.values()];
+    const present = tracks.filter((t) => presentHands.has(t.handedness));
     if (present.length < 2) {
       // One hand absent within grace: hold state, re-reference on return.
-      this.zoomPrevDistance = null;
+      this.zoomPrimed = false;
       return;
     }
 
     const [a, b] = present;
-    const distance = distance3(
-      centroid(PALM_INDICES.map((i) => a.landmarks[i].normalized)),
-      centroid(PALM_INDICES.map((i) => b.landmarks[i].normalized))
-    );
-    if (distance <= 1e-6) return;
-    if (this.zoomReferenceDistance === null) this.zoomReferenceDistance = distance;
-    if (this.zoomPrevDistance === null) {
-      this.zoomPrevDistance = distance;
+    const anchor = this.pickAnchor(a, b);
+    const mover = anchor === a ? b : a;
+    const pivot = anchor.palm2D;
+    const prevX = mover.prevPalm2D.x - pivot.x;
+    const prevY = mover.prevPalm2D.y - pivot.y;
+    const nowX = mover.palm2D.x - pivot.x;
+    const nowY = mover.palm2D.y - pivot.y;
+    const distance = Math.hypot(nowX, nowY);
+    const prevDistance = Math.hypot(prevX, prevY);
+    if (distance <= 1e-6 || prevDistance <= 1e-6) return;
+
+    if (!this.zoomPrimed) {
+      this.zoomPrimed = true;
+      if (this.zoomReferenceDistance === null) this.zoomReferenceDistance = distance;
       this.lastZoomDistance = distance;
       this.lastZoomScale = distance / this.zoomReferenceDistance;
       return;
     }
 
-    const deltaScale = distance / this.zoomPrevDistance;
-    const scaleFactor = distance / this.zoomReferenceDistance;
-    this.zoomPrevDistance = distance;
+    const deltaScale = distance / prevDistance;
+    const scaleFactor = distance / (this.zoomReferenceDistance ?? distance);
+    const rawAngle = wrapAngle(Math.atan2(nowY, nowX) - Math.atan2(prevY, prevX));
+    this.zoomAngleTotal += rawAngle;
+    let deltaAngle = 0;
+    if (this.zoomTurnEngaged) {
+      deltaAngle = rawAngle;
+    } else if (Math.abs(this.zoomAngleTotal) >= this.options.zoomTurnEngageAngle) {
+      this.zoomTurnEngaged = true;
+      deltaAngle = this.zoomAngleTotal;
+    }
     this.lastZoomDistance = distance;
     this.lastZoomScale = scaleFactor;
-    events.push({ type: 'zoom', timestamp, distance, scaleFactor, deltaScale });
+    events.push({
+      type: 'zoom',
+      timestamp,
+      anchor: anchor.handedness,
+      distance,
+      scaleFactor,
+      deltaScale,
+      deltaAngle,
+    });
+  }
+
+  /** Keep the current anchor unless the other fist is clearly steadier. */
+  private pickAnchor(a: HandTrack, b: HandTrack): HandTrack {
+    const current = this.zoomAnchor === a.handedness ? a : this.zoomAnchor === b.handedness ? b : null;
+    if (!current) {
+      const steadier = a.speedEma <= b.speedEma ? a : b;
+      this.zoomAnchor = steadier.handedness;
+      return steadier;
+    }
+    const other = current === a ? b : a;
+    if (other.speedEma < current.speedEma * this.options.zoomAnchorSwitchRatio) {
+      this.zoomAnchor = other.handedness;
+      return other;
+    }
+    return current;
   }
 
   private endZoom(reason: string, timestamp: number, events: GestureSignalEvent[]): void {
@@ -618,7 +738,10 @@ export class GestureClassifier {
 
   private clearZoomReference(): void {
     this.zoomReferenceDistance = null;
-    this.zoomPrevDistance = null;
+    this.zoomPrimed = false;
+    this.zoomAnchor = null;
+    this.zoomAngleTotal = 0;
+    this.zoomTurnEngaged = false;
     this.lastZoomDistance = null;
     this.lastZoomScale = null;
   }
@@ -801,6 +924,8 @@ export class GestureClassifier {
       orbitRoll: this.state === 'ORBITING' ? this.orbitRollTotal : null,
       zoomDistance: this.state === 'ZOOMING' ? this.lastZoomDistance : null,
       zoomScaleFactor: this.state === 'ZOOMING' ? this.lastZoomScale : null,
+      zoomAnchor: this.state === 'ZOOMING' ? this.zoomAnchor : null,
+      zoomAngle: this.state === 'ZOOMING' ? this.zoomAngleTotal : null,
     };
   }
 }

@@ -139,7 +139,10 @@ export class GestureEngine {
     return this.on('orbit', listener as GestureListener);
   }
 
-  /** Two-fist zoom deltas (`deltaScale > 1` = fists apart, `< 1` = fists closer). */
+  /**
+   * Two-fist navigation around the steadier (anchor) fist: `deltaScale`
+   * (> 1 = apart, < 1 = closer) and `deltaAngle` (moving fist circling the anchor).
+   */
   onZoom(listener: SignalListener<ZoomEvent>): Unsubscribe {
     return this.on('zoom', listener as GestureListener);
   }

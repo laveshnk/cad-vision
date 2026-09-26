@@ -59,6 +59,11 @@ const engine = new GestureEngine({
     fistEnterFrames: 3,
     rollEngageAngle: 0.15,
     rollDeadzone: 0.003,
+    zoomAnchorSwitchRatio: 0.5,
+    zoomTurnEngageAngle: 0.12,
+    // Camera moves travel in straight segments (hand wiggle removed); pinch /
+    // extrude events are not filtered, so building stays live.
+    cameraPath: { startDistance: 0.02, cornerDeviation: 0.05, settleDistance: 0.08, deadband: 0.004 },
     fistExitFrames: 2,
     orbitOpenPalmGraceFrames: 10,
     handLossGraceFrames: 3,
@@ -118,11 +123,15 @@ engine.on('zoom_start', (event) => {
 // (twisting the fist like a doorknob) turns the scene with the twist.
 engine.onOrbit((e) => {
   cadScene.onPan({ deltaX: e.deltaX, deltaY: e.deltaY });
-  if (e.deltaRoll !== 0) cadScene.onRotate({ deltaRoll: e.deltaRoll });
+  if (e.deltaRoll !== 0) cadScene.onRotate({ deltaAngle: e.deltaRoll });
 });
 
-// Camera zoom: two fists — farther apart zooms in, closer together zooms out.
-engine.onZoom((e) => cadScene.onZoom({ deltaScale: e.deltaScale }));
+// Two fists: the steadier fist is the anchor (pivot). Moving the other fist
+// away from it zooms in, toward it zooms out; circling it turns the scene.
+engine.onZoom((e) => {
+  cadScene.onZoom({ deltaScale: e.deltaScale });
+  if (e.deltaAngle !== 0) cadScene.onRotate({ deltaAngle: e.deltaAngle });
+});
 
 /* ---- Misc wiring ---- */
 

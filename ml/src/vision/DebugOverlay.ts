@@ -19,6 +19,7 @@ import type { FrameEvent, GestureState, HandSnapshot } from './types';
 
 const THUMB_TIP = 4;
 const INDEX_TIP = 8;
+const MIDDLE_MCP = 9;
 
 /** A skeleton connection between two landmark indices. */
 export interface SkeletonConnection {
@@ -89,6 +90,7 @@ export class DebugOverlay {
       this.drawHand(hand, frame.state, view, cssWidth);
     }
     this.drawDualHandsLink(frame, view, cssWidth);
+    this.drawZoomAnchor(frame, view);
     this.drawHud(frame, cssWidth);
   }
 
@@ -252,6 +254,37 @@ export class DebugOverlay {
     ctx.textAlign = 'left';
   }
 
+  /** Two-fist navigation: ring on the anchor (pivot) fist, line to the moving fist. */
+  private drawZoomAnchor(frame: FrameEvent, view: ViewTransform): void {
+    const anchorHand = frame.metrics.zoomAnchor;
+    if (frame.state !== 'ZOOMING' || !anchorHand) return;
+    const anchor = frame.hands.find((h) => h.handedness === anchorHand);
+    const mover = frame.hands.find((h) => h.handedness !== anchorHand);
+    if (!anchor) return;
+    const pivot = this.toCanvas(anchor, MIDDLE_MCP, view);
+    const ctx = this.ctx;
+    if (mover) {
+      const end = this.toCanvas(mover, MIDDLE_MCP, view);
+      ctx.setLineDash([6, 6]);
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = 'rgba(168, 85, 247, 0.85)';
+      ctx.beginPath();
+      ctx.moveTo(pivot.x, pivot.y);
+      ctx.lineTo(end.x, end.y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = '#e9d5ff';
+    ctx.beginPath();
+    ctx.arc(pivot.x, pivot.y, 16, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.fillStyle = '#a855f7';
+    ctx.beginPath();
+    ctx.arc(pivot.x, pivot.y, 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
   /** Rounded HUD panel (top-left, always inside the visible panel) with state, FPS, hands and live metrics. */
   private drawHud(frame: FrameEvent, cssWidth: number): void {
     const ctx = this.ctx;
@@ -287,6 +320,10 @@ export class DebugOverlay {
       lines.push(
         `zoom D: ${frame.metrics.zoomDistance.toFixed(3)} ×${(frame.metrics.zoomScaleFactor ?? 1).toFixed(2)}`
       );
+    }
+    if (frame.metrics.zoomAnchor !== null) {
+      const turn = ((frame.metrics.zoomAngle ?? 0) * 180) / Math.PI;
+      lines.push(`anchor: ${frame.metrics.zoomAnchor}  turn: ${turn.toFixed(0)}°`);
     }
 
     const scale = this.fontScale(cssWidth);

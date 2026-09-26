@@ -165,18 +165,29 @@ export interface ZoomStartEvent {
 }
 
 /**
- * Two-fist camera zoom. `distance` is the gap between the two palm centers
- * (normalized units); the app zooms in as the fists move apart, out as they close.
+ * Two-fist camera navigation around an anchor. The steadier fist is the
+ * `anchor` (pivot); only the other fist's motion relative to it counts.
+ * Distances are palm-center gaps in aspect-corrected units of video width;
+ * the app zooms in as the fists move apart, out as they close, and turns the
+ * scene as the moving fist circles the anchor.
  */
 export interface ZoomEvent {
   type: 'zoom';
   timestamp: number;
-  /** Current distance between the two palm centers (normalized units). */
+  /** The steadier fist acting as the pivot this frame. */
+  anchor: Handedness;
+  /** Current anchor ↔ moving-fist palm distance. */
   distance: number;
   /** `distance / distance_at_zoom_start` — cumulative ratio. */
   scaleFactor: number;
   /** `distance / distance_prev_frame` — per-frame ratio (< 1 = fists closer, > 1 = fists apart). */
   deltaScale: number;
+  /**
+   * Angle (radians) the moving fist swept around the anchor this frame,
+   * + = counter-clockwise on the mirrored screen. 0 until the sweep passes
+   * `zoomTurnEngageAngle`.
+   */
+  deltaAngle: number;
 }
 
 export interface ZoomEndEvent {
@@ -213,10 +224,14 @@ export interface GestureMetrics {
   orbitDelta: Vec2 | null;
   /** Cumulative wrist roll (radians) since the one-fist gesture started. */
   orbitRoll: number | null;
-  /** Palm-center distance while ZOOMING (normalized units). */
+  /** Anchor ↔ moving-fist palm distance while ZOOMING (units of video width). */
   zoomDistance: number | null;
   /** Cumulative zoom ratio (`distance / distance_at_zoom_start`) while ZOOMING. */
   zoomScaleFactor: number | null;
+  /** The anchor (steadier) fist while ZOOMING. */
+  zoomAnchor: Handedness | null;
+  /** Cumulative angle (radians) the moving fist swept around the anchor. */
+  zoomAngle: number | null;
 }
 
 /** Emitted once per processed camera frame (used by the 2D debug overlay). */

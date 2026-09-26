@@ -289,38 +289,101 @@ describe('measureWristRoll', () => {
 });
 
 describe('GestureClassifier — two-fist zoom', () => {
-  it('enters ZOOMING with two fists and reports closer hands as deltaScale < 1', () => {
+  it('enters ZOOMING with two fists; the moving fist zooms relative to the still anchor', () => {
     const classifier = new GestureClassifier(TEST_OPTIONS);
     let t = 0;
-    let result = classifier.process(
-      [makeHand('Left', { fist: true, dx: -0.2 }), makeHand('Right', { fist: true, dx: 0.2 })],
-      (t += 100)
-    );
+    const frame = (rightDx: number) =>
+      classifier.process(
+        [makeHand('Left', { fist: true, dx: -0.2 }), makeHand('Right', { fist: true, dx: rightDx })],
+        (t += 100)
+      );
+    let result = frame(0.2);
     expect(typesOf(result.events)).toEqual(['state_change', 'zoom_start']);
     expect(classifier.currentState).toBe('ZOOMING');
 
-    // Fists move closer: 0.4 -> 0.2 apart (zoom in).
-    result = classifier.process(
-      [makeHand('Left', { fist: true, dx: -0.1 }), makeHand('Right', { fist: true, dx: 0.1 })],
-      (t += 100)
-    );
-    const zoomIn = result.events.find((e) => e.type === 'zoom');
-    expect(zoomIn?.type).toBe('zoom');
-    if (zoomIn?.type === 'zoom') {
-      expect(zoomIn.distance).toBeCloseTo(0.2);
-      expect(zoomIn.deltaScale).toBeCloseTo(0.5);
-      expect(zoomIn.scaleFactor).toBeCloseTo(0.5);
+    // Right fist moves toward the still Left fist: 0.4 -> 0.2 apart.
+    result = frame(0);
+    const closer = result.events.find((e) => e.type === 'zoom');
+    expect(closer?.type).toBe('zoom');
+    if (closer?.type === 'zoom') {
+      expect(closer.anchor).toBe('Left');
+      expect(closer.distance).toBeCloseTo(0.2);
+      expect(closer.deltaScale).toBeCloseTo(0.5);
+      expect(closer.scaleFactor).toBeCloseTo(0.5);
+      expect(closer.deltaAngle).toBe(0);
     }
     expect(result.metrics.zoomScaleFactor).toBeCloseTo(0.5);
+    expect(result.metrics.zoomAnchor).toBe('Left');
 
-    // Fists move apart: 0.2 -> 0.3 (zoom out).
-    result = classifier.process(
-      [makeHand('Left', { fist: true, dx: -0.15 }), makeHand('Right', { fist: true, dx: 0.15 })],
-      (t += 100)
-    );
-    const zoomOut = result.events.find((e) => e.type === 'zoom');
-    if (zoomOut?.type === 'zoom') expect(zoomOut.deltaScale).toBeCloseTo(1.5);
+    // …and back out: 0.2 -> 0.3 apart.
+    result = frame(0.1);
+    const apart = result.events.find((e) => e.type === 'zoom');
+    if (apart?.type === 'zoom') expect(apart.deltaScale).toBeCloseTo(1.5);
     expect(typesOf(result.events)).not.toContain('orbit');
+  });
+
+  it('picks the steadier fist as the anchor, whichever hand it is', () => {
+    const classifier = new GestureClassifier(TEST_OPTIONS);
+    let t = 0;
+    const frame = (leftDx: number) =>
+      classifier.process(
+        [makeHand('Left', { fist: true, dx: leftDx }), makeHand('Right', { fist: true, dx: 0.2 })],
+        (t += 100)
+      );
+    frame(-0.2);
+    // Left moves away from the still Right fist: Right is the pivot.
+    const result = frame(-0.3);
+    const zoom = result.events.find((e) => e.type === 'zoom');
+    expect(zoom?.type === 'zoom' && zoom.anchor).toBe('Right');
+    if (zoom?.type === 'zoom') expect(zoom.deltaScale).toBeCloseTo(0.5 / 0.4);
+  });
+
+  it('switches the anchor when the other fist becomes clearly steadier', () => {
+    const classifier = new GestureClassifier(TEST_OPTIONS);
+    let t = 0;
+    const frame = (leftDx: number, rightDx: number) =>
+      classifier.process(
+        [
+          makeHand('Left', { fist: true, dx: leftDx }),
+          makeHand('Right', { fist: true, dx: rightDx }),
+        ],
+        (t += 100)
+      );
+    frame(-0.2, 0.2);
+    let left = -0.2;
+    for (let i = 0; i < 3; i++) frame((left -= 0.02), 0.2); // Left moves
+    expect(frame((left -= 0.02), 0.2).metrics.zoomAnchor).toBe('Right');
+    let right = 0.2;
+    let result = frame(left, (right += 0.02)); // now Right moves, Left still
+    for (let i = 0; i < 4; i++) result = frame(left, (right += 0.02));
+    expect(result.metrics.zoomAnchor).toBe('Left');
+  });
+
+  it('turns when the moving fist circles the anchor (after the engage angle)', () => {
+    const classifier = new GestureClassifier(TEST_OPTIONS);
+    let t = 0;
+    // Right fist on a circle of radius 0.4 around the still Left fist.
+    const at = (phi: number) =>
+      classifier.process(
+        [
+          makeHand('Left', { fist: true, dx: -0.2 }),
+          makeHand('Right', { fist: true, dx: -0.2 + 0.4 * Math.cos(phi), dy: 0.4 * Math.sin(phi) }),
+        ],
+        (t += 100)
+      );
+    const angleOf = (phi: number): number => {
+      const zoom = at(phi).events.find((e) => e.type === 'zoom');
+      return zoom?.type === 'zoom' ? zoom.deltaAngle : NaN;
+    };
+    at(0);
+    expect(angleOf(0.05)).toBe(0); // 0.05 rad < 0.12 engage angle
+    expect(angleOf(0.2)).toBeCloseTo(0.2); // engaged: whole sweep released
+    expect(angleOf(0.3)).toBeCloseTo(0.1); // then per-frame deltas
+    const back = at(0.25).events.find((e) => e.type === 'zoom');
+    if (back?.type === 'zoom') {
+      expect(back.deltaAngle).toBeCloseTo(-0.05); // and back the other way
+      expect(back.deltaScale).toBeCloseTo(1); // circling does not zoom
+    }
   });
 
   it('upgrades a single-fist move to a zoom when the second fist closes', () => {

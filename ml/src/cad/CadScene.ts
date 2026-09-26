@@ -5,7 +5,7 @@
  * rig, soft studio lighting (hemisphere + shadow-casting key light), a
  * shadow-catching floor and an "infinite" grid faded into the background by
  * fog. External control inputs are plain device-space data — `onPan({ deltaX, deltaY })`
- * (truck the camera sideways / vertically), `onRotate({ deltaRoll })` (turn the
+ * (truck the camera sideways / vertically), `onRotate({ deltaAngle })` (turn the
  * scene around the vertical axis), `onZoom({ deltaScale })` (dolly in / out) and
  * `onOrbit({ deltaX, deltaY })` — keeping this module fully decoupled from the
  * vision layer.
@@ -18,7 +18,7 @@ export interface CadSceneOptions {
   background?: number;
   /** Camera distance from the orbit target (world units). */
   cameraDistance?: number;
-  /** Camera azimuth around +Y (radians). */
+  /** Camera azimuth around +Y (radians); 0 = straight on, grid square to the screen. */
   cameraAzimuth?: number;
   /** Camera polar angle from +Y (radians); clamped to stay above the floor. */
   cameraPolar?: number;
@@ -26,7 +26,7 @@ export interface CadSceneOptions {
   targetHeight?: number;
   /** Radians of orbit per device-space unit (hand travel). */
   orbitSpeed?: number;
-  /** Scene rotation (radians) per radian of wrist roll. */
+  /** Scene rotation (radians) per radian of input turn (wrist roll / fist sweep). */
   rotateSpeed?: number;
   /** World units of sideways pan per device-space unit, per unit of camera distance. */
   panSpeed?: number;
@@ -36,7 +36,11 @@ export interface CadSceneOptions {
   minDistance?: number;
   /** Farthest allowed camera distance (world units). */
   maxDistance?: number;
-  /** Exponential damping rate for camera motion (higher = snappier). */
+  /**
+   * Exponential damping rate for camera motion (higher = snappier). Kept
+   * gentle on purpose: a camera that follows the hand too tightly feels
+   * jittery and can cause motion sickness; building stays live regardless.
+   */
   damping?: number;
   /** Ground grid extent (world units). */
   gridSize?: number;
@@ -89,7 +93,7 @@ export class CadScene {
     this.options = {
       background: options.background ?? 0x0b0e14,
       cameraDistance: options.cameraDistance ?? 10,
-      cameraAzimuth: options.cameraAzimuth ?? 0.7,
+      cameraAzimuth: options.cameraAzimuth ?? 0,
       cameraPolar: options.cameraPolar ?? 1.05,
       targetHeight: options.targetHeight ?? 0.5,
       orbitSpeed: options.orbitSpeed ?? 1.75,
@@ -98,7 +102,7 @@ export class CadScene {
       zoomSpeed: options.zoomSpeed ?? 1.5,
       minDistance: options.minDistance ?? 2,
       maxDistance: options.maxDistance ?? 40,
-      damping: options.damping ?? 9,
+      damping: options.damping ?? 5,
       gridSize: options.gridSize ?? 40,
       gridDivisions: options.gridDivisions ?? 40,
     };
@@ -221,12 +225,12 @@ export class CadScene {
   }
 
   /**
-   * Turn the scene around the vertical axis by a wrist-roll delta (radians,
-   * + = counter-clockwise twist as seen on screen). The scene follows the
-   * twist, so the camera orbits the opposite way. Damped every frame.
+   * Turn the scene around the vertical axis by an input angle (radians,
+   * + = counter-clockwise as seen on screen). The scene follows the turn, so
+   * the camera orbits the opposite way. Damped every frame.
    */
-  onRotate(delta: { deltaRoll: number }): void {
-    this.sphericalTarget.theta -= delta.deltaRoll * this.options.rotateSpeed;
+  onRotate(delta: { deltaAngle: number }): void {
+    this.sphericalTarget.theta -= delta.deltaAngle * this.options.rotateSpeed;
   }
 
   /**
