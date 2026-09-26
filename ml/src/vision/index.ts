@@ -12,9 +12,24 @@ export { HandednessStabilizer, chiralitySign } from './HandednessStabilizer';
 export type { HandednessStabilizerOptions } from './HandednessStabilizer';
 export { DebugOverlay, STATE_COLORS } from './DebugOverlay';
 export type { DebugOverlayOptions, OverlayShape } from './DebugOverlay';
-export { ButtonPointer } from './ButtonPointer';
-export type { ButtonPointerOptions, ButtonPointerSample } from './ButtonPointer';
-export { measureHandShape, measureWristRoll, wrapAngle, isotropicPoints, palmCenter2D } from './handShape';
+export type {
+  ArPoint,
+  ArSegment,
+  ArGridLine,
+  ArMeshGhost,
+  ArRotationRing,
+  ArSceneFrame,
+  ArSceneProvider,
+  DragConstraint,
+} from './DebugOverlay';
+export {
+  measureHandShape,
+  measureWristRoll,
+  wrapAngle,
+  isotropicPoints,
+  palmCenter2D,
+  palmAzimuth,
+} from './handShape';
 export type { HandShape } from './handShape';
 export { HandSmootherBank, LandmarkSmoother, Vec3Smoother, EmaScalar, OneEuroScalar } from './filters';
 export type {

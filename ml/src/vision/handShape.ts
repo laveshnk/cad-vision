@@ -25,6 +25,13 @@ const FINGER_TIP_MCP: ReadonlyArray<readonly [number, number]> = [
   [16, 13],
   [20, 17],
 ];
+/** [fingertip, PIP] pairs for index / middle / ring / pinky. */
+const FINGER_TIP_PIP: ReadonlyArray<readonly [number, number]> = [
+  [8, 6],
+  [12, 10],
+  [16, 14],
+  [20, 18],
+];
 /** Index / middle / ring knuckles (MCP + PIP) the thumb rests on in a fist. */
 const THUMB_TUCK_TARGETS = [5, 6, 9, 10, 13, 14];
 
@@ -35,6 +42,12 @@ export interface HandShape {
    * about 1.0–1.3 for a claw / hook curl, and ~2 for an open finger.
    */
   foldRatios: number[];
+  /**
+   * Per finger (index, middle, ring, pinky): `dist(tip, wrist) / dist(pip, wrist)`.
+   * Above 1 the fingertip is beyond its own PIP joint — the finger is
+   * extended (open palm); below 1 it has curled inward toward the palm.
+   */
+  extensionRatios: number[];
   /**
    * Thumb-tip distance to the nearest index / middle / ring knuckle, divided
    * by palm size (wrist → middle MCP). Small when the thumb is wrapped over
@@ -75,16 +88,37 @@ export function measureHandShape(hand: HandFrame): HandShape {
   const foldRatios = FINGER_TIP_MCP.map(
     ([tip, mcp]) => distance3(p[tip], wrist) / Math.max(distance3(p[mcp], wrist), 1e-6)
   );
+  const extensionRatios = FINGER_TIP_PIP.map(
+    ([tip, pip]) => distance3(p[tip], wrist) / Math.max(distance3(p[pip], wrist), 1e-6)
+  );
   const thumbTuck = Math.min(...THUMB_TUCK_TARGETS.map((i) => distance3(p[THUMB_TIP], p[i])));
 
   return {
     foldRatios,
+    extensionRatios,
     thumbTuckRatio: thumbTuck / palmSize,
     thumbIndexDistance: distance3(
       hand.landmarks[THUMB_TIP].normalized,
       hand.landmarks[INDEX_TIP].normalized
     ),
   };
+}
+
+/**
+ * Palm tilt (radians): the angle of the wrist → middle-MCP vector in the
+ * mirrored, Y-up, aspect-corrected screen view (X right, Y up; atan2
+ * convention — 0 = pointing right, + = counter-clockwise). Drives the
+ * SELECT-mode open-palm rotation gesture; only differences between frames
+ * are meaningful.
+ */
+export function palmAzimuth(hand: HandFrame): number {
+  const wrist = hand.landmarks[0];
+  const mcp = hand.landmarks[MIDDLE_MCP];
+  const aspect = frameAspect(hand);
+  return Math.atan2(
+    -(mcp.normalized.y - wrist.normalized.y) * aspect,
+    -(mcp.normalized.x - wrist.normalized.x)
+  );
 }
 
 /**

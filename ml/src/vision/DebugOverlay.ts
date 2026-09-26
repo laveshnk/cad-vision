@@ -6,12 +6,17 @@
  *
  * Along the top edge it renders the interaction-mode switcher ([ VIEW ],
  * [ SELECT ], [ CREATE ]): boxy, mutually exclusive toggle buttons that
- * respond to mouse clicks, an index-tip dwell (>= `dwellMs`) or a pinch —
- * reported through the `onModeRequest` callback. While CREATE is active a
- * second, smaller row of shape buttons pops up beneath it (e.g. CUBE /
- * CUBOID / CYLINDER / SPHERE), pressed the same way and reported through
- * `onShapeRequest`. Finger presses go through `ButtonPointer`. The stats HUD
- * is anchored bottom-left so the buttons own the top edge.
+ * respond to mouse clicks, an index-tip dwell (>= `dwellMs`) or a pinch
+ * that *begins* over a button — reported through the `onModeRequest`
+ * callback. In SELECT mode a second stack of mutually exclusive toggles,
+ * [ XZ PLANE ] (default) and [ Y AXIS (ELEVATE) ], sits vertically below
+ * the mode bar in the top-left corner (`onDragConstraintRequest`); only a
+ * fresh pinch activates a button, so object drags sweeping across the bars
+ * never toggle anything. In CREATE mode a row of shape buttons (e.g.
+ * [ CUBE ] [ CUBOID ] [ CYLINDER ] [ SPHERE ], from the `shapes` option)
+ * sits below the mode bar instead (`onShapeRequest`), with the same dwell /
+ * fresh-pinch model. The stats HUD is anchored bottom-left so the buttons
+ * own the top edge.
  *
  * Alignment: the <video> is CSS-mirrored (`scaleX(-1)`) and displayed with
  * `object-fit: cover`, which center-crops it into its container (the floating
@@ -21,11 +26,21 @@
  * transform so they land exactly on the webcam image — while the HUD stays
  * anchored to the visible container edges (never cropped). Typography scales
  * with the container width (see `fontScale`).
+ *
+ * In SELECT mode the overlay additionally renders a live AR spatial mirror
+ * of the 3D CAD scene (translucent ground grid + mesh ghosts) through the
+ * `arScene` provider — plain projected 2D data supplied by the host, so this
+ * module stays free of Three.js.
  */
 
 import { HandLandmarker } from '@mediapipe/tasks-vision';
-import { ButtonPointer } from './ButtonPointer';
-import type { FrameEvent, GestureState, HandSnapshot, InteractionMode } from './types';
+import type {
+  FrameEvent,
+  GestureState,
+  HandSnapshot,
+  Handedness,
+  InteractionMode,
+} from './types';
 
 const THUMB_TIP = 4;
 const INDEX_TIP = 8;
@@ -85,15 +100,110 @@ interface ViewTransform {
   dispH: number;
 }
 
-/** A shape button in the CREATE-mode shape row. */
-export interface OverlayShape<S extends string> {
+/* -------------------------------------------------------------------- */
+/* AR spatial mirror (SELECT mode)                                      */
+/* -------------------------------------------------------------------- */
+
+/**
+ * SELECT-mode drag constraint, mirrored structurally from the CAD builder's
+ * `DragConstraint` (no shared import — the orchestrator bridges the two):
+ * `'xz'` slides the grabbed mesh across the ground plane, `'y'` maps
+ * vertical hand travel to a world-Y lift / lower.
+ */
+export type DragConstraint = 'xz' | 'y';
+
+/**
+ * Plain-data AR mirror payloads, structurally compatible with
+ * `src/cad/ArMirror.ts`'s `ArSceneFrame` (the same pattern as the CAD side's
+ * `CadExtrudeInput`) — `main.ts` forwards the CAD-side projection directly
+ * into the `arScene` provider, keeping the vision layer free of Three.js.
+ */
+
+/** A projected 2D canvas point (CSS px, +Y down). */
+export interface ArPoint {
+  x: number;
+  y: number;
+}
+
+/** One projected mesh edge segment (endpoints in 2D canvas space). */
+export type ArSegment = [ArPoint, ArPoint];
+
+/** One projected ground-grid line (straight 3D lines stay straight). */
+export interface ArGridLine {
+  points: ArPoint[];
+  /** Major division — rendered stronger than the 1-unit minor lines. */
+  major: boolean;
+}
+
+/** Translucent ghost of one committed mesh, projected to canvas space. */
+export interface ArMeshGhost {
+  /** Projected silhouette polygon (convex hull of the projected vertices). */
+  hull: ArPoint[];
+  /** Projected `EdgesGeometry` segments (crisp accent lines). */
+  edges: ArSegment[];
+  /** The active selection gets an energetic highlight. */
+  selected: boolean;
+}
+
+/**
+ * Rotational compass ring around the selected object while an open-palm
+ * rotation gesture is running (SELECT mode).
+ */
+export interface ArRotationRing {
+  /** Projected circle segments (both endpoints visible). */
+  circle: ArSegment[];
+  /** Projected yaw indicator: object center → ring edge (null when culled). */
+  needle: ArSegment | null;
+}
+
+/** One AR mirror frame: projected ground grid + mesh ghosts. */
+export interface ArSceneFrame {
+  /** Projected ground-grid lines, minor and major divisions. */
+  grid: ArGridLine[];
+  /** Ghosts of the committed meshes, in scene order. */
+  meshes: ArMeshGhost[];
+  /** Compass ring around the selection while rotating, or null. */
+  rotationRing: ArRotationRing | null;
+}
+
+/**
+ * Projects the CAD scene onto the overlay canvas — called once per rendered
+ * frame (only in SELECT mode) with the current canvas size in CSS px.
+ * Returns `null` to skip the AR layer entirely.
+ */
+export type ArSceneProvider = (cssWidth: number, cssHeight: number) => ArSceneFrame | null;
+
+/** AR mirror paint: minor ground-grid strokes (1-unit lines). */
+const AR_GRID_STROKE = 'rgba(0, 150, 255, 0.18)';
+/** AR mirror paint: major ground-grid divisions (stronger, every 5 units). */
+const AR_GRID_MAJOR_STROKE = 'rgba(0, 150, 255, 0.4)';
+/** AR mirror paint: ghost fill for unselected meshes. */
+const AR_GHOST_FILL = 'rgba(40, 120, 200, 0.35)';
+/** AR mirror paint: ghost fill for the active selection (higher opacity). */
+const AR_SELECTED_FILL = 'rgba(40, 120, 200, 0.5)';
+/** AR mirror paint: crisp edge accents. */
+const AR_EDGE_STROKE = 'rgba(0, 200, 255, 0.8)';
+/** AR mirror paint: edge accents for the active selection. */
+const AR_SELECTED_EDGE_STROKE = 'rgba(0, 200, 255, 0.95)';
+/** AR mirror paint: amber outline of the active selection. */
+const AR_SELECTED_OUTLINE = 'rgba(251, 191, 36, 0.9)';
+/** AR mirror paint: cyan halo behind the selection outline. */
+const AR_SELECTED_GLOW = 'rgba(0, 200, 255, 0.8)';
+/** AR mirror paint: dashed rotation compass ring. */
+const AR_RING_STROKE = 'rgba(0, 200, 255, 0.9)';
+/** AR mirror paint: amber yaw needle inside the compass ring. */
+const AR_RING_NEEDLE_STROKE = 'rgba(251, 191, 36, 0.95)';
+
+/** Options for the debug overlay. */
+/** A CREATE-mode shape button: `id` is the host's opaque shape key. */
+export interface OverlayShape<S extends string = string> {
   id: S;
   label: string;
 }
 
 /**
- * Options for the debug overlay. `S` is the host's shape id type — the
- * overlay treats shape ids as opaque strings (no CAD dependency).
+ * Options for the debug overlay. `S` is the host's shape id type — shape ids
+ * are opaque strings here, so the overlay has no CAD dependency.
  */
 export interface DebugOverlayOptions<S extends string = string> {
   /** Hand skeleton connections (defaults to MediaPipe HAND_CONNECTIONS). */
@@ -104,44 +214,98 @@ export interface DebugOverlayOptions<S extends string = string> {
    * decides what to do with the request (typically `engine.setMode`).
    */
   onModeRequest?: (mode: InteractionMode) => void;
-  /** Index-tip dwell time (ms) before a hovered button activates. Default 500. */
+  /**
+   * Called when a SELECT-mode drag-constraint toggle is activated — via
+   * mouse click, index-tip dwell or a pinch on the button. The host routes
+   * it to the CAD builder's `setDragConstraint`; the overlay keeps the
+   * visual state (both default to 'xz').
+   */
+  onDragConstraintRequest?: (constraint: DragConstraint) => void;
+  /** Index-tip dwell time (ms) before a hovered mode button activates. Default 500. */
   dwellMs?: number;
-  /** Shape buttons shown beneath the mode bar while in CREATE mode (none by default). */
+  /** CREATE-mode shape buttons, left to right below the mode bar (none by default). */
   shapes?: ReadonlyArray<OverlayShape<S>>;
   /** Initially highlighted shape (defaults to the first of `shapes`). */
   activeShape?: S;
-  /** Called when a shape button is activated (click, dwell or pinch). */
+  /**
+   * Called when a CREATE-mode shape button is activated — via mouse click,
+   * index-tip dwell or a fresh pinch on the button. The host routes it to
+   * the CAD builder's tool (typically `builder.setTool`).
+   */
   onShapeRequest?: (shape: S) => void;
+  /**
+   * SELECT-mode AR mirror: projects the live CAD scene (ground grid +
+   * committed meshes) through the shared 3D camera onto this canvas, once
+   * per rendered frame. Implemented on the CAD side (`buildArSceneFrame`)
+   * and injected here by the orchestrator — the overlay stays Three.js-free.
+   */
+  arScene?: ArSceneProvider;
 }
 
-/** A rendered, hit-testable button (rect in CSS pixels). */
-interface OverlayButton {
-  /** Stable key (`mode:<mode>` / `shape:<id>`) used for dwell tracking. */
-  key: string;
-  label: string;
-  active: boolean;
+/** A hit-testable rectangle in CSS pixels. */
+interface ButtonRect {
   x: number;
   y: number;
   width: number;
   height: number;
-  activate: () => void;
 }
 
 /** Mode buttons, left to right, along the top edge of the overlay. */
 const MODE_BUTTONS: readonly InteractionMode[] = ['view', 'select', 'create'];
+
+/** SELECT-mode drag-constraint toggles, top to bottom (top-left corner). */
+const CONSTRAINT_BUTTONS: readonly DragConstraint[] = ['xz', 'y'];
+
+/** Constraint button labels, in CONSTRAINT_BUTTONS order. */
+const CONSTRAINT_LABELS: Record<DragConstraint, string> = {
+  xz: '[ XZ PLANE ]',
+  y: '[ Y AXIS (ELEVATE) ]',
+};
 
 export class DebugOverlay<S extends string = string> {
   private readonly canvas: HTMLCanvasElement;
   private readonly ctx: CanvasRenderingContext2D;
   private readonly connections: ReadonlyArray<SkeletonConnection>;
   private readonly onModeRequest: ((mode: InteractionMode) => void) | null;
-  private readonly onShapeRequest: ((shape: S) => void) | null;
+  private readonly onDragConstraintRequest: ((constraint: DragConstraint) => void) | null;
+  private readonly dwellMs: number;
+  private readonly arScene: ArSceneProvider | null;
+  /** Last rendered button rects (CSS px) — hit targets for mouse + finger. */
+  private buttonRects: ButtonRect[] = [];
+  /** Button the index tip is dwelling over (-1 = none). */
+  private dwellTarget = -1;
+  private dwellElapsed = 0;
+  private lastFrameTimestamp: number | null = null;
+  /** Latch: one pinch activates at most one button until it leaves the bar. */
+  private pinchLatched = false;
+  /** Last rendered constraint-button rects (CSS px); empty outside SELECT mode. */
+  private constraintRects: ButtonRect[] = [];
+  /** Constraint toggle the index tip is dwelling over (-1 = none). */
+  private constraintDwellTarget = -1;
+  private constraintDwellElapsed = 0;
+  /** Latch: one pinch activates at most one constraint toggle. */
+  private constraintPinchLatched = false;
+  /** Visual + authoritative overlay state of the drag constraint (host mirrors it). */
+  private dragConstraint: DragConstraint = 'xz';
   private readonly shapes: ReadonlyArray<OverlayShape<S>>;
+  private readonly onShapeRequest: ((shape: S) => void) | null;
+  /** Highlighted CREATE-mode shape (host mirrors it). */
   private activeShapeId: S | null;
-  /** Finger press logic (dwell + pinch) shared by every overlay button. */
-  private readonly pointer: ButtonPointer;
-  /** Last laid-out buttons (CSS px) — hit targets for mouse + finger. */
-  private buttons: OverlayButton[] = [];
+  /** Last rendered shape-button rects (CSS px); empty outside CREATE mode. */
+  private shapeRects: ButtonRect[] = [];
+  /** Shape button the index tip is dwelling over (-1 = none). */
+  private shapeDwellTarget = -1;
+  private shapeDwellElapsed = 0;
+  /** Latch: one pinch activates at most one shape button. */
+  private shapePinchLatched = false;
+  /**
+   * Previous frame's pinch state per hand — only a *fresh* pinch (one that
+   * just closed over a button) can activate a button, so a pinch-drag
+   * sweeping across the button bars never toggles anything mid-gesture.
+   */
+  private readonly prevPinchStates = new Map<Handedness, boolean>();
+  /** Last rendered mirrored cover transform (device-space UI hit tests). */
+  private lastView: ViewTransform | null = null;
 
   constructor(canvas: HTMLCanvasElement, options: DebugOverlayOptions<S> = {}) {
     this.canvas = canvas;
@@ -150,10 +314,12 @@ export class DebugOverlay<S extends string = string> {
     this.ctx = ctx;
     this.connections = options.connections ?? HandLandmarker.HAND_CONNECTIONS;
     this.onModeRequest = options.onModeRequest ?? null;
-    this.onShapeRequest = options.onShapeRequest ?? null;
+    this.onDragConstraintRequest = options.onDragConstraintRequest ?? null;
+    this.dwellMs = options.dwellMs ?? 500;
+    this.arScene = options.arScene ?? null;
     this.shapes = options.shapes ?? [];
+    this.onShapeRequest = options.onShapeRequest ?? null;
     this.activeShapeId = options.activeShape ?? this.shapes[0]?.id ?? null;
-    this.pointer = new ButtonPointer({ dwellMs: options.dwellMs });
     canvas.addEventListener('click', this.onCanvasClick);
     canvas.addEventListener('mousemove', this.onCanvasMouseMove);
   }
@@ -164,7 +330,7 @@ export class DebugOverlay<S extends string = string> {
     this.canvas.removeEventListener('mousemove', this.onCanvasMouseMove);
   }
 
-  /** Highlighted shape in the CREATE-mode shape row. */
+  /** Highlighted CREATE-mode shape. */
   get activeShape(): S | null {
     return this.activeShapeId;
   }
@@ -174,14 +340,28 @@ export class DebugOverlay<S extends string = string> {
     this.activeShapeId = shape;
   }
 
-  /** Click anywhere inside a rendered button activates it. */
+  /** Click anywhere inside a rendered mode / constraint / shape button activates it. */
   private readonly onCanvasClick = (event: MouseEvent): void => {
-    this.hitButton(event.offsetX, event.offsetY)?.activate();
+    const shape = this.hitShapeButton(event.offsetX, event.offsetY);
+    if (shape >= 0) {
+      this.requestShape(shape);
+      return;
+    }
+    const constraint = this.hitConstraintButton(event.offsetX, event.offsetY);
+    if (constraint >= 0) {
+      this.requestConstraint(constraint);
+      return;
+    }
+    const index = this.hitButton(event.offsetX, event.offsetY);
+    if (index >= 0) this.requestMode(index);
   };
 
-  /** Pointer feedback while hovering the buttons. */
+  /** Pointer feedback while hovering the mode / constraint buttons. */
   private readonly onCanvasMouseMove = (event: MouseEvent): void => {
-    const hovering = this.hitButton(event.offsetX, event.offsetY) !== null;
+    const hovering =
+      this.hitButton(event.offsetX, event.offsetY) >= 0 ||
+      this.hitConstraintButton(event.offsetX, event.offsetY) >= 0 ||
+      this.hitShapeButton(event.offsetX, event.offsetY) >= 0;
     this.canvas.style.cursor = hovering ? 'pointer' : 'default';
   };
 
@@ -190,15 +370,73 @@ export class DebugOverlay<S extends string = string> {
     const { cssWidth, cssHeight } = this.ensureSize(frame.video.width, frame.video.height);
     this.ctx.clearRect(0, 0, cssWidth, cssHeight);
     const view = this.coverTransform(cssWidth, cssHeight, frame.video.width, frame.video.height);
+    this.lastView = view; // device-space UI hit tests between frames
+    // SELECT mode: live AR mirror of the 3D scene, drawn beneath the hands.
+    if (frame.mode === 'select') this.drawArMirror(cssWidth, cssHeight);
     for (const hand of frame.hands) {
       this.drawHand(hand, frame.state, view, cssWidth);
     }
     this.drawDualHandsLink(frame, view, cssWidth);
     this.drawZoomAnchor(frame, view);
-    this.layoutButtons(frame, cssWidth);
-    this.updateFingerInteraction(frame, view);
-    this.drawButtons(cssWidth);
+    this.drawModeButtons(frame, cssWidth);
+    if (frame.mode === 'select') this.drawConstraintButtons(cssWidth);
+    else this.constraintRects = [];
+    if (frame.mode === 'create') this.drawShapeButtons(cssWidth);
+    else this.shapeRects = [];
+    const dt = this.frameDt(frame);
+    this.updateModeInteraction(frame, view, dt);
+    this.updateConstraintInteraction(frame, view, dt);
+    this.updateShapeInteraction(frame, view, dt);
+    this.snapshotPinchStates(frame);
     this.drawHud(frame, cssWidth, cssHeight);
+  }
+
+  /**
+   * Dwell clock tick from frame timestamps; capped so a stalled camera feed
+   * cannot complete a dwell in one jump.
+   */
+  private frameDt(frame: FrameEvent): number {
+    const dt =
+      this.lastFrameTimestamp === null
+        ? 0
+        : Math.max(0, Math.min(frame.timestamp - this.lastFrameTimestamp, 500));
+    this.lastFrameTimestamp = frame.timestamp;
+    return dt;
+  }
+
+  /**
+   * Remember each hand's pinch state for the next frame: only a *fresh*
+   * pinch (one that just closed over a button) may activate a button, so
+   * a pinch-drag sweeping across the button bars never toggles anything
+   * mid-gesture.
+   */
+  private snapshotPinchStates(frame: FrameEvent): void {
+    this.prevPinchStates.clear();
+    for (const hand of frame.hands) {
+      this.prevPinchStates.set(hand.handedness, hand.pinchActive);
+    }
+  }
+
+  /**
+   * Device-space hit test against the last rendered UI buttons (mode bar +
+   * SELECT-mode constraint stack + CREATE-mode shape row). The host uses it to keep a UI pinch
+   * (toggling a button) from also picking / drawing in the 3D scene. Runs
+   * through the same mirrored cover transform as the landmarks, using the
+   * previous frame's metrics (the buttons do not move between frames).
+   */
+  isUiAtDevice(x: number, y: number): boolean {
+    const view = this.lastView;
+    if (!view) return false;
+    // Device [-1, 1] (mirrored, +Y up) -> normalized [0, 1] -> canvas CSS px.
+    const nx = (1 - x) / 2;
+    const ny = (1 - y) / 2;
+    const px = view.ox + (1 - nx) * view.dispW;
+    const py = view.oy + ny * view.dispH;
+    return (
+      this.hitButton(px, py) >= 0 ||
+      this.hitConstraintButton(px, py) >= 0 ||
+      this.hitShapeButton(px, py) >= 0
+    );
   }
 
   /**
@@ -393,126 +631,475 @@ export class DebugOverlay<S extends string = string> {
   }
 
   /* ------------------------------------------------------------------ */
-  /* Mode switcher + CREATE-mode shape row (top edge of the overlay)    */
+  /* AR spatial mirror (SELECT mode)                                     */
   /* ------------------------------------------------------------------ */
 
-  /** CSS-pixel hit test against the last laid-out buttons. */
-  private hitButton(px: number, py: number): OverlayButton | null {
-    for (const b of this.buttons) {
-      if (px >= b.x && px <= b.x + b.width && py >= b.y && py <= b.y + b.height) return b;
+  /**
+   * Translucent CAD mirror: the projected ground grid and ghost meshes are
+   * drawn beneath the hand skeletons, turning the vision canvas into a live
+   * AR spatial view of the 3D environment (in lockstep with pinch-driven
+   * drags — the provider runs inside this same rAF-driven frame).
+   */
+  private drawArMirror(cssWidth: number, cssHeight: number): void {
+    if (!this.arScene) return;
+    const frame = this.arScene(cssWidth, cssHeight);
+    if (!frame) return;
+    const ctx = this.ctx;
+
+    // Ground grid in two batched passes: faint 1-unit minor lines first,
+    // then the stronger major divisions (every 5 units) — a 30 × 30 unit
+    // floor window stays readable at thumbnail scale.
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = AR_GRID_STROKE;
+    ctx.beginPath();
+    for (const line of frame.grid) {
+      if (line.major || line.points.length < 2) continue;
+      ctx.moveTo(line.points[0].x, line.points[0].y);
+      for (let i = 1; i < line.points.length; i++) ctx.lineTo(line.points[i].x, line.points[i].y);
     }
-    return null;
+    ctx.stroke();
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = AR_GRID_MAJOR_STROKE;
+    ctx.beginPath();
+    for (const line of frame.grid) {
+      if (!line.major || line.points.length < 2) continue;
+      ctx.moveTo(line.points[0].x, line.points[0].y);
+      for (let i = 1; i < line.points.length; i++) ctx.lineTo(line.points[i].x, line.points[i].y);
+    }
+    ctx.stroke();
+
+    for (const mesh of frame.meshes) this.drawArMesh(mesh, cssWidth);
+    if (frame.rotationRing) this.drawArRotationRing(frame.rotationRing, cssWidth);
   }
 
-  /**
-   * Lay out this frame's buttons: the mode bar across the top edge and, in
-   * CREATE mode, a shorter shape row directly beneath it.
-   */
-  private layoutButtons(frame: FrameEvent, cssWidth: number): void {
+  /** Rotational compass ring: dashed cyan circle + amber yaw needle. */
+  private drawArRotationRing(ring: ArRotationRing, cssWidth: number): void {
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.setLineDash([9, 7]);
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = AR_RING_STROKE;
+    ctx.shadowColor = AR_SELECTED_GLOW;
+    ctx.shadowBlur = Math.max(5, cssWidth * 0.02);
+    ctx.beginPath();
+    for (const [a, b] of ring.circle) {
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+    }
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.shadowBlur = 0;
+    if (ring.needle) {
+      ctx.lineWidth = 2.5;
+      ctx.strokeStyle = AR_RING_NEEDLE_STROKE;
+      ctx.beginPath();
+      ctx.moveTo(ring.needle[0].x, ring.needle[0].y);
+      ctx.lineTo(ring.needle[1].x, ring.needle[1].y);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  /** One mesh ghost: translucent silhouette fill + crisp accent edges. */
+  private drawArMesh(mesh: ArMeshGhost, cssWidth: number): void {
+    const ctx = this.ctx;
+
+    // Ghost fill over the projected silhouette (2D footprint) of the solid.
+    if (mesh.hull.length >= 3) {
+      ctx.beginPath();
+      ctx.moveTo(mesh.hull[0].x, mesh.hull[0].y);
+      for (let i = 1; i < mesh.hull.length; i++) ctx.lineTo(mesh.hull[i].x, mesh.hull[i].y);
+      ctx.closePath();
+      ctx.fillStyle = mesh.selected ? AR_SELECTED_FILL : AR_GHOST_FILL;
+      ctx.fill();
+
+      if (mesh.selected) {
+        // Energetic highlight: glowing cyan halo behind an amber outline.
+        ctx.save();
+        ctx.shadowColor = AR_SELECTED_GLOW;
+        ctx.shadowBlur = Math.max(6, cssWidth * 0.025);
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = AR_SELECTED_OUTLINE;
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+
+    // Crisp accent edges (projected EdgesGeometry) on top of the fill.
+    ctx.lineWidth = mesh.selected ? 2 : 1.25;
+    ctx.strokeStyle = mesh.selected ? AR_SELECTED_EDGE_STROKE : AR_EDGE_STROKE;
+    ctx.beginPath();
+    for (const [a, b] of mesh.edges) {
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+    }
+    ctx.stroke();
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Mode switcher buttons (top edge of the overlay)                    */
+  /* ------------------------------------------------------------------ */
+
+  /** CSS-pixel hit test against the last rendered mode buttons. */
+  private hitButton(px: number, py: number): number {
+    for (let i = 0; i < this.buttonRects.length; i++) {
+      const r = this.buttonRects[i];
+      if (px >= r.x && px <= r.x + r.width && py >= r.y && py <= r.y + r.height) return i;
+    }
+    return -1;
+  }
+
+  private requestMode(index: number): void {
+    this.onModeRequest?.(MODE_BUTTONS[index]);
+  }
+
+  /** Shared layout metrics of the top-edge button bars (mode + constraint). */
+  private barMetrics(cssWidth: number): { margin: number; gap: number; height: number } {
     const scale = this.fontScale(cssWidth);
-    const margin = Math.round(8 * scale);
-    const gap = Math.round(6 * scale);
-    const modeHeight = Math.max(22, Math.round(32 * scale));
-    const shapeHeight = Math.max(18, Math.round(26 * scale));
-    this.buttons = [];
-
-    const row = (count: number, i: number) =>
-      margin + i * ((cssWidth - margin * 2 - gap * (count - 1)) / count + gap);
-    const rowWidth = (count: number) => (cssWidth - margin * 2 - gap * (count - 1)) / count;
-
-    MODE_BUTTONS.forEach((mode, i) => {
-      this.buttons.push({
-        key: `mode:${mode}`,
-        label: `[ ${mode.toUpperCase()} ]`,
-        active: frame.mode === mode,
-        x: row(MODE_BUTTONS.length, i),
-        y: margin,
-        width: rowWidth(MODE_BUTTONS.length),
-        height: modeHeight,
-        activate: () => this.onModeRequest?.(mode),
-      });
-    });
-
-    if (frame.mode !== 'create' || this.shapes.length === 0) return;
-    const y = margin + modeHeight + gap;
-    this.shapes.forEach((shape, i) => {
-      this.buttons.push({
-        key: `shape:${shape.id}`,
-        label: shape.label,
-        active: this.activeShapeId === shape.id,
-        x: row(this.shapes.length, i),
-        y,
-        width: rowWidth(this.shapes.length),
-        height: shapeHeight,
-        activate: () => {
-          this.activeShapeId = shape.id;
-          this.onShapeRequest?.(shape.id);
-        },
-      });
-    });
+    return {
+      margin: Math.round(8 * scale),
+      gap: Math.round(6 * scale),
+      height: Math.max(22, Math.round(32 * scale)),
+    };
   }
 
   /**
-   * Finger interaction with the buttons (see `ButtonPointer`): the index tip
-   * (landmark 8) dwelling over a button for `dwellMs` activates it; a pinch
-   * while the tip is over a button activates it immediately.
+   * Finger interaction with the mode buttons: the index tip (landmark 8)
+   * dwelling over a button for `dwellMs` activates it; a *fresh* pinch that
+   * closes while the tip is over a button activates it immediately (latched
+   * once per pinch so the same pinch cannot scrub across buttons — and a
+   * pinch that began elsewhere, e.g. a mesh drag, never toggles a mode as
+   * it sweeps across the bar).
    */
-  private updateFingerInteraction(frame: FrameEvent, view: ViewTransform): void {
-    const samples = frame.hands.map((hand) => {
+  private updateModeInteraction(frame: FrameEvent, view: ViewTransform, dt: number): void {
+    let dwellTarget = -1;
+    let pinchTarget = -1;
+    for (const hand of frame.hands) {
       const tip = this.toCanvas(hand, INDEX_TIP, view);
-      return { target: this.hitButton(tip.x, tip.y)?.key ?? null, pinching: hand.pinchActive };
-    });
-    const activated = this.pointer.update(samples, frame.timestamp);
-    if (activated === null) return;
-    this.buttons.find((b) => b.key === activated)?.activate();
+      const index = this.hitButton(tip.x, tip.y);
+      if (index < 0) continue;
+      if (dwellTarget < 0) dwellTarget = index;
+      const freshPinch = hand.pinchActive && !this.prevPinchStates.get(hand.handedness);
+      if (pinchTarget < 0 && freshPinch) pinchTarget = index;
+    }
+
+    if (pinchTarget >= 0 && !this.pinchLatched) {
+      this.requestMode(pinchTarget);
+      this.pinchLatched = true;
+    }
+    if (pinchTarget < 0) this.pinchLatched = false;
+
+    // Dwell clock from frame timestamps; capped so a stalled camera feed
+    // cannot complete a dwell in one jump.
+    if (dwellTarget !== this.dwellTarget) {
+      this.dwellTarget = dwellTarget;
+      this.dwellElapsed = 0;
+    } else if (dwellTarget >= 0 && dt > 0) {
+      this.dwellElapsed += dt;
+    }
+    if (this.dwellTarget >= 0 && this.dwellElapsed >= this.dwellMs) {
+      this.requestMode(this.dwellTarget);
+      this.dwellTarget = -1;
+      this.dwellElapsed = 0;
+    }
   }
 
   /**
-   * Boxy, sharp-cornered toggle buttons. The active one is inverted — solid
-   * light fill, dark text, high-contrast indicator bar — while a dwell fills
-   * a progress bar along the bottom edge of the hovered button.
+   * Boxy mode switcher across the top edge: three sharp-cornered, mutually
+   * exclusive toggle buttons. The active one is inverted — solid light fill,
+   * dark text, high-contrast indicator bar — while a dwell fills a progress
+   * bar along the bottom edge of the hovered button.
    */
-  private drawButtons(cssWidth: number): void {
+  private drawModeButtons(frame: FrameEvent, cssWidth: number): void {
     const ctx = this.ctx;
     const scale = this.fontScale(cssWidth);
+    const { margin, gap, height } = this.barMetrics(cssWidth);
+    const width = (cssWidth - margin * 2 - gap * (MODE_BUTTONS.length - 1)) / MODE_BUTTONS.length;
+
+    this.buttonRects = [];
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    for (const b of this.buttons) {
-      const small = b.key.startsWith('shape:');
-      const { x, y, width, height } = b;
+    MODE_BUTTONS.forEach((mode, i) => {
+      const x = margin + i * (width + gap);
+      this.buttonRects.push({ x, y: margin, width, height });
+      const label = `[ ${mode.toUpperCase()} ]`;
       // Shrink the label to fit the button.
-      let fontSize = Math.max(8, Math.round((small ? 11 : 13) * scale));
+      let fontSize = Math.max(9, Math.round(13 * scale));
       ctx.font = `bold ${fontSize}px ui-monospace, monospace`;
-      while (fontSize > 7 && ctx.measureText(b.label).width > width - 6) {
+      while (fontSize > 8 && ctx.measureText(label).width > width - 8) {
         fontSize -= 1;
         ctx.font = `bold ${fontSize}px ui-monospace, monospace`;
       }
 
-      if (b.active) {
+      const active = frame.mode === mode;
+      if (active) {
+        ctx.fillStyle = '#f8fafc'; // solid inverted background
+        ctx.fillRect(x, margin, width, height);
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = '#0f172a';
+        ctx.strokeRect(x + 1, margin + 1, width - 2, height - 2);
+        ctx.fillStyle = '#0284c7'; // high-contrast indicator bar
+        ctx.fillRect(x + 3, margin + height - 7, width - 6, 4);
+        ctx.fillStyle = '#0f172a';
+      } else {
+        const dwelling = this.dwellTarget === i;
+        ctx.fillStyle = dwelling ? 'rgba(15, 23, 42, 0.85)' : 'rgba(15, 23, 42, 0.6)';
+        ctx.fillRect(x, margin, width, height);
+        ctx.lineWidth = dwelling ? 2 : 1.5;
+        ctx.strokeStyle = dwelling ? '#e2e8f0' : 'rgba(148, 163, 184, 0.55)';
+        ctx.strokeRect(x + 1, margin + 1, width - 2, height - 2);
+        if (dwelling && this.dwellMs > 0) {
+          const progress = Math.min(1, this.dwellElapsed / this.dwellMs);
+          ctx.fillStyle = '#38bdf8';
+          ctx.fillRect(x + 2, margin + height - 5, (width - 4) * progress, 3);
+        }
+        ctx.fillStyle = dwelling ? '#f8fafc' : '#cbd5e1';
+      }
+      ctx.fillText(label, x + width / 2, margin + height / 2);
+    });
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Drag-constraint toggles (SELECT mode, top-left corner)             */
+  /* ------------------------------------------------------------------ */
+
+  /** CSS-pixel hit test against the last rendered constraint buttons. */
+  private hitConstraintButton(px: number, py: number): number {
+    for (let i = 0; i < this.constraintRects.length; i++) {
+      const r = this.constraintRects[i];
+      if (px >= r.x && px <= r.x + r.width && py >= r.y && py <= r.y + r.height) return i;
+    }
+    return -1;
+  }
+
+  private requestConstraint(index: number): void {
+    const constraint = CONSTRAINT_BUTTONS[index];
+    if (!constraint || this.dragConstraint === constraint) return;
+    this.dragConstraint = constraint;
+    this.onDragConstraintRequest?.(constraint);
+  }
+
+  /**
+   * Finger interaction with the constraint stack: the same dwell /
+   * fresh-pinch model as the mode bar, active only while the buttons are
+   * visible (SELECT mode).
+   */
+  private updateConstraintInteraction(frame: FrameEvent, view: ViewTransform, dt: number): void {
+    if (frame.mode !== 'select') {
+      this.constraintDwellTarget = -1;
+      this.constraintDwellElapsed = 0;
+      this.constraintPinchLatched = false;
+      return;
+    }
+    let dwellTarget = -1;
+    let pinchTarget = -1;
+    for (const hand of frame.hands) {
+      const tip = this.toCanvas(hand, INDEX_TIP, view);
+      const index = this.hitConstraintButton(tip.x, tip.y);
+      if (index < 0) continue;
+      if (dwellTarget < 0) dwellTarget = index;
+      const freshPinch = hand.pinchActive && !this.prevPinchStates.get(hand.handedness);
+      if (pinchTarget < 0 && freshPinch) pinchTarget = index;
+    }
+
+    if (pinchTarget >= 0 && !this.constraintPinchLatched) {
+      this.requestConstraint(pinchTarget);
+      this.constraintPinchLatched = true;
+    }
+    if (pinchTarget < 0) this.constraintPinchLatched = false;
+
+    if (dwellTarget !== this.constraintDwellTarget) {
+      this.constraintDwellTarget = dwellTarget;
+      this.constraintDwellElapsed = 0;
+    } else if (dwellTarget >= 0 && dt > 0) {
+      this.constraintDwellElapsed += dt;
+    }
+    if (this.constraintDwellTarget >= 0 && this.constraintDwellElapsed >= this.dwellMs) {
+      this.requestConstraint(this.constraintDwellTarget);
+      this.constraintDwellTarget = -1;
+      this.constraintDwellElapsed = 0;
+    }
+  }
+
+  /**
+   * SELECT-mode drag-constraint toggles, stacked vertically in the top-left
+   * corner below the mode bar: `[ XZ PLANE ]` (default active) and
+   * `[ Y AXIS (ELEVATE) ]` — mutually exclusive, boxy industrial style
+   * (crisp border, monospace, inverted background when active) with the
+   * same dwell progress bar as the mode buttons.
+   */
+  private drawConstraintButtons(cssWidth: number): void {
+    const ctx = this.ctx;
+    const scale = this.fontScale(cssWidth);
+    const { margin, gap, height: barHeight } = this.barMetrics(cssWidth);
+    const height = Math.max(20, Math.round(26 * scale));
+    const width = Math.min(Math.round((cssWidth - margin * 2) * 0.55), 190);
+    const top = margin + barHeight + gap;
+
+    this.constraintRects = [];
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    CONSTRAINT_BUTTONS.forEach((constraint, i) => {
+      const x = margin;
+      const y = top + i * (height + gap);
+      this.constraintRects.push({ x, y, width, height });
+      const label = CONSTRAINT_LABELS[constraint];
+      // Shrink the label to fit the button.
+      let fontSize = Math.max(9, Math.round(12 * scale));
+      ctx.font = `bold ${fontSize}px ui-monospace, monospace`;
+      while (fontSize > 7 && ctx.measureText(label).width > width - 8) {
+        fontSize -= 1;
+        ctx.font = `bold ${fontSize}px ui-monospace, monospace`;
+      }
+
+      const active = this.dragConstraint === constraint;
+      if (active) {
         ctx.fillStyle = '#f8fafc'; // solid inverted background
         ctx.fillRect(x, y, width, height);
         ctx.lineWidth = 2;
         ctx.strokeStyle = '#0f172a';
         ctx.strokeRect(x + 1, y + 1, width - 2, height - 2);
         ctx.fillStyle = '#0284c7'; // high-contrast indicator bar
-        ctx.fillRect(x + 3, y + height - (small ? 5 : 7), width - 6, small ? 3 : 4);
+        ctx.fillRect(x + 3, y + height - 6, width - 6, 3);
         ctx.fillStyle = '#0f172a';
       } else {
-        const dwelling = this.pointer.hovered === b.key;
+        const dwelling = this.constraintDwellTarget === i;
         ctx.fillStyle = dwelling ? 'rgba(15, 23, 42, 0.85)' : 'rgba(15, 23, 42, 0.6)';
         ctx.fillRect(x, y, width, height);
-        ctx.lineWidth = dwelling ? 2 : 1.5;
+        ctx.lineWidth = dwelling ? 2 : 1;
         ctx.strokeStyle = dwelling ? '#e2e8f0' : 'rgba(148, 163, 184, 0.55)';
         ctx.strokeRect(x + 1, y + 1, width - 2, height - 2);
-        const progress = dwelling ? this.pointer.progress : 0;
-        if (progress > 0) {
+        if (dwelling && this.dwellMs > 0) {
+          const progress = Math.min(1, this.constraintDwellElapsed / this.dwellMs);
           ctx.fillStyle = '#38bdf8';
           ctx.fillRect(x + 2, y + height - 5, (width - 4) * progress, 3);
         }
         ctx.fillStyle = dwelling ? '#f8fafc' : '#cbd5e1';
       }
-      ctx.fillText(b.label, x + width / 2, y + height / 2);
+      ctx.fillText(label, x + width / 2, y + height / 2);
+    });
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Shape picker (CREATE mode, row below the mode bar)                 */
+  /* ------------------------------------------------------------------ */
+
+  /** CSS-pixel hit test against the last rendered shape buttons. */
+  private hitShapeButton(px: number, py: number): number {
+    for (let i = 0; i < this.shapeRects.length; i++) {
+      const r = this.shapeRects[i];
+      if (px >= r.x && px <= r.x + r.width && py >= r.y && py <= r.y + r.height) return i;
     }
+    return -1;
+  }
+
+  private requestShape(index: number): void {
+    const shape = this.shapes[index];
+    if (!shape || this.activeShapeId === shape.id) return;
+    this.activeShapeId = shape.id;
+    this.onShapeRequest?.(shape.id);
+  }
+
+  /**
+   * Finger interaction with the shape row: the same dwell / fresh-pinch
+   * model as the mode bar, active only while the row is visible (CREATE).
+   */
+  private updateShapeInteraction(frame: FrameEvent, view: ViewTransform, dt: number): void {
+    if (frame.mode !== 'create') {
+      this.shapeDwellTarget = -1;
+      this.shapeDwellElapsed = 0;
+      this.shapePinchLatched = false;
+      return;
+    }
+    let dwellTarget = -1;
+    let pinchTarget = -1;
+    for (const hand of frame.hands) {
+      const tip = this.toCanvas(hand, INDEX_TIP, view);
+      const index = this.hitShapeButton(tip.x, tip.y);
+      if (index < 0) continue;
+      if (dwellTarget < 0) dwellTarget = index;
+      const freshPinch = hand.pinchActive && !this.prevPinchStates.get(hand.handedness);
+      if (pinchTarget < 0 && freshPinch) pinchTarget = index;
+    }
+
+    if (pinchTarget >= 0 && !this.shapePinchLatched) {
+      this.requestShape(pinchTarget);
+      this.shapePinchLatched = true;
+    }
+    if (pinchTarget < 0) this.shapePinchLatched = false;
+
+    if (dwellTarget !== this.shapeDwellTarget) {
+      this.shapeDwellTarget = dwellTarget;
+      this.shapeDwellElapsed = 0;
+    } else if (dwellTarget >= 0 && dt > 0) {
+      this.shapeDwellElapsed += dt;
+    }
+    if (this.shapeDwellTarget >= 0 && this.shapeDwellElapsed >= this.dwellMs) {
+      this.requestShape(this.shapeDwellTarget);
+      this.shapeDwellTarget = -1;
+      this.shapeDwellElapsed = 0;
+    }
+  }
+
+  /**
+   * CREATE-mode shape row directly below the mode bar: equal-width,
+   * mutually exclusive boxy toggles (inverted when active) with the same
+   * dwell progress bar as the mode buttons. The active shape needs no dwell
+   * feedback (re-selecting it is a no-op).
+   */
+  private drawShapeButtons(cssWidth: number): void {
+    this.shapeRects = [];
+    const count = this.shapes.length;
+    if (count === 0) return;
+    const ctx = this.ctx;
+    const scale = this.fontScale(cssWidth);
+    const { margin, gap, height: barHeight } = this.barMetrics(cssWidth);
+    const height = Math.max(20, Math.round(26 * scale));
+    const width = (cssWidth - margin * 2 - gap * (count - 1)) / count;
+    const y = margin + barHeight + gap;
+
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    this.shapes.forEach((shape, i) => {
+      const x = margin + i * (width + gap);
+      this.shapeRects.push({ x, y, width, height });
+      // Shrink the label to fit the button.
+      let fontSize = Math.max(9, Math.round(12 * scale));
+      ctx.font = `bold ${fontSize}px ui-monospace, monospace`;
+      while (fontSize > 7 && ctx.measureText(shape.label).width > width - 6) {
+        fontSize -= 1;
+        ctx.font = `bold ${fontSize}px ui-monospace, monospace`;
+      }
+
+      if (this.activeShapeId === shape.id) {
+        ctx.fillStyle = '#f8fafc'; // solid inverted background
+        ctx.fillRect(x, y, width, height);
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = '#0f172a';
+        ctx.strokeRect(x + 1, y + 1, width - 2, height - 2);
+        ctx.fillStyle = '#0284c7'; // high-contrast indicator bar
+        ctx.fillRect(x + 3, y + height - 6, width - 6, 3);
+        ctx.fillStyle = '#0f172a';
+      } else {
+        const dwelling = this.shapeDwellTarget === i;
+        ctx.fillStyle = dwelling ? 'rgba(15, 23, 42, 0.85)' : 'rgba(15, 23, 42, 0.6)';
+        ctx.fillRect(x, y, width, height);
+        ctx.lineWidth = dwelling ? 2 : 1.5;
+        ctx.strokeStyle = dwelling ? '#e2e8f0' : 'rgba(148, 163, 184, 0.55)';
+        ctx.strokeRect(x + 1, y + 1, width - 2, height - 2);
+        if (dwelling && this.dwellMs > 0) {
+          const progress = Math.min(1, this.shapeDwellElapsed / this.dwellMs);
+          ctx.fillStyle = '#38bdf8';
+          ctx.fillRect(x + 2, y + height - 5, (width - 4) * progress, 3);
+        }
+        ctx.fillStyle = dwelling ? '#f8fafc' : '#cbd5e1';
+      }
+      ctx.fillText(shape.label, x + width / 2, y + height / 2);
+    });
     ctx.textAlign = 'left';
     ctx.textBaseline = 'alphabetic';
   }
@@ -557,6 +1144,10 @@ export class DebugOverlay<S extends string = string> {
     if (frame.metrics.zoomAnchor !== null) {
       const turn = ((frame.metrics.zoomAngle ?? 0) * 180) / Math.PI;
       lines.push(`anchor: ${frame.metrics.zoomAnchor}  turn: ${turn.toFixed(0)}°`);
+    }
+    if (frame.metrics.selectRotation !== null) {
+      const rotate = ((frame.metrics.selectRotation * 180) / Math.PI).toFixed(0);
+      lines.push(`rotate: ${rotate}°`);
     }
 
     const scale = this.fontScale(cssWidth);

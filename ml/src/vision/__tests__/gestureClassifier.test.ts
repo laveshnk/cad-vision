@@ -31,6 +31,11 @@ interface HandSpec {
    * wrist, like twisting a doorknob.
    */
   twist?: number;
+  /**
+   * In-plane tilt (radians): rigid rotation of the whole hand about the
+   * wrist in the image plane — drives the open-palm rotation gesture.
+   */
+  tilt?: number;
   /** Raw-frame offset applied to the whole hand. */
   dx?: number;
   dy?: number;
@@ -52,6 +57,7 @@ function makeHand(handedness: 'Left' | 'Right', spec: HandSpec = {}): HandFrame 
     thumbUp = false,
     extend = [],
     twist = 0,
+    tilt = 0,
     dx = 0,
     dy = 0,
   } = spec;
@@ -98,10 +104,17 @@ function makeHand(handedness: 'Left' | 'Right', spec: HandSpec = {}): HandFrame 
     y: p.y,
     z: -(p.x - wx) * s + p.z * c,
   }));
+  const tc = Math.cos(tilt);
+  const ts = Math.sin(tilt);
+  const tilted = twisted.map((p) => ({
+    x: wx + (p.x - wx) * tc - (p.y - wy) * ts,
+    y: wy + (p.x - wx) * ts + (p.y - wy) * tc,
+    z: p.z,
+  }));
   return {
     handedness,
     score: 0.9,
-    landmarks: twisted.map((p) => buildLandmark(p, 1000, 1000)),
+    landmarks: tilted.map((p) => buildLandmark(p, 1000, 1000)),
   };
 }
 
@@ -780,5 +793,172 @@ describe('GestureClassifier — hand loss', () => {
 
     const idle = classifier.process([], (t += 100));
     expect(idle.snapshots).toHaveLength(0);
+  });
+});
+
+describe('GestureClassifier — open-palm rotation (SELECT mode)', () => {
+  it('engages when one hand pinches and the other shows an open palm', () => {
+    const classifier = new GestureClassifier({ ...TEST_OPTIONS, initialMode: 'select' });
+    let t = 0;
+    const result = classifier.process(
+      [makeHand('Right', { pinchDist: 0.04 }), makeHand('Left', {})],
+      (t += 100)
+    );
+    const rotate = result.events.find((e) => e.type === 'select_rotate');
+    expect(rotate).toBeDefined();
+    if (rotate?.type === 'select_rotate') {
+      expect(rotate.hand).toBe('Right');
+      expect(rotate.palmHand).toBe('Left');
+      expect(rotate.deltaRotation).toBeCloseTo(0);
+    }
+    expect(classifier.currentState).toBe('SELECTING');
+  });
+
+  it('accumulates palm tilt as the anchored rotation delta', () => {
+    const classifier = new GestureClassifier({ ...TEST_OPTIONS, initialMode: 'select' });
+    let t = 0;
+    classifier.process(
+      [makeHand('Right', { pinchDist: 0.04 }), makeHand('Left', {})],
+      (t += 100)
+    );
+    const result = classifier.process(
+      [makeHand('Right', { pinchDist: 0.04 }), makeHand('Left', { tilt: 0.3 })],
+      (t += 100)
+    );
+    const rotate = result.events.find((e) => e.type === 'select_rotate');
+    expect(rotate).toBeDefined();
+    if (rotate?.type === 'select_rotate') {
+      expect(rotate.deltaRotation).toBeCloseTo(0.3, 5);
+    }
+    // Same tilt again: the cumulative delta is stable (no drift).
+    const again = classifier.process(
+      [makeHand('Right', { pinchDist: 0.04 }), makeHand('Left', { tilt: 0.3 })],
+      (t += 100)
+    );
+    const repeat = again.events.find((e) => e.type === 'select_rotate');
+    if (repeat?.type === 'select_rotate') {
+      expect(repeat.deltaRotation).toBeCloseTo(0.3, 5);
+    }
+  });
+
+  it('wraps the palm tilt across ±π without a jump', () => {
+    const classifier = new GestureClassifier({ ...TEST_OPTIONS, initialMode: 'select' });
+    let t = 0;
+    classifier.process(
+      [makeHand('Right', { pinchDist: 0.04 }), makeHand('Left', { tilt: 3.0 })],
+      (t += 100)
+    );
+    const result = classifier.process(
+      [makeHand('Right', { pinchDist: 0.04 }), makeHand('Left', { tilt: -3.0 })],
+      (t += 100)
+    );
+    const rotate = result.events.find((e) => e.type === 'select_rotate');
+    expect(rotate).toBeDefined();
+    if (rotate?.type === 'select_rotate') {
+      // -6 rad of tilt, unwrapped through +2π.
+      expect(rotate.deltaRotation).toBeCloseTo(-6 + 2 * Math.PI, 5);
+    }
+  });
+
+  it('ends when the secondary hand closes into a pinch', () => {
+    const classifier = new GestureClassifier({ ...TEST_OPTIONS, initialMode: 'select' });
+    let t = 0;
+    classifier.process(
+      [makeHand('Right', { pinchDist: 0.04 }), makeHand('Left', {})],
+      (t += 100)
+    );
+    const result = classifier.process(
+      [makeHand('Right', { pinchDist: 0.04 }), makeHand('Left', { pinchDist: 0.04 })],
+      (t += 100)
+    );
+    const end = result.events.find((e) => e.type === 'select_rotate_end');
+    expect(end).toBeDefined();
+    if (end?.type === 'select_rotate_end') {
+      expect(end.palmHand).toBe('Left');
+      expect(end.reason).toBe('palm closed');
+    }
+    expect(result.events.find((e) => e.type === 'select_rotate')).toBeUndefined();
+  });
+
+  it('ends when the pinch releases and re-anchors on the next open palm', () => {
+    const classifier = new GestureClassifier({ ...TEST_OPTIONS, initialMode: 'select' });
+    let t = 0;
+    classifier.process(
+      [makeHand('Right', { pinchDist: 0.04 }), makeHand('Left', { tilt: 0.3 })],
+      (t += 100)
+    );
+    const release = classifier.process(
+      [makeHand('Right', { pinchDist: 0.2 }), makeHand('Left', { tilt: 0.3 })],
+      (t += 100)
+    );
+    const end = release.events.find((e) => e.type === 'select_rotate_end');
+    expect(end).toBeDefined();
+    if (end?.type === 'select_rotate_end') {
+      expect(end.reason).toBe('pinch released');
+    }
+    // Re-pinching with the palm at its new tilt restarts the anchor at 0
+    // (the object keeps its yaw — the delta is always gesture-relative).
+    const reEngage = classifier.process(
+      [makeHand('Right', { pinchDist: 0.04 }), makeHand('Left', { tilt: 0.3 })],
+      (t += 100)
+    );
+    const rotate = reEngage.events.find((e) => e.type === 'select_rotate');
+    expect(rotate).toBeDefined();
+    if (rotate?.type === 'select_rotate') {
+      expect(rotate.deltaRotation).toBeCloseTo(0, 5);
+    }
+  });
+
+  it('requires a real open palm — a fist secondary hand does not rotate', () => {
+    const classifier = new GestureClassifier({ ...TEST_OPTIONS, initialMode: 'select' });
+    let t = 0;
+    const result = classifier.process(
+      [makeHand('Right', { pinchDist: 0.04 }), makeHand('Left', { fist: true })],
+      (t += 100)
+    );
+    expect(result.events.find((e) => e.type === 'select_rotate')).toBeUndefined();
+    expect(result.events.find((e) => e.type === 'select_rotate_end')).toBeUndefined();
+  });
+
+  it('does not rotate outside SELECT mode', () => {
+    const classifier = new GestureClassifier({ ...TEST_OPTIONS, initialMode: 'create' });
+    let t = 0;
+    const result = classifier.process(
+      [makeHand('Right', { pinchDist: 0.04 }), makeHand('Left', {})],
+      (t += 100)
+    );
+    expect(result.events.find((e) => e.type === 'select_rotate')).toBeUndefined();
+    expect(classifier.currentState).toBe('DRAWING_BASE');
+  });
+
+  it('ends with a mode switch while rotating', () => {
+    const classifier = new GestureClassifier({ ...TEST_OPTIONS, initialMode: 'select' });
+    let t = 0;
+    classifier.process(
+      [makeHand('Right', { pinchDist: 0.04 }), makeHand('Left', {})],
+      (t += 100)
+    );
+    const events = classifier.setMode('view', (t += 100));
+    const end = events.find((e) => e.type === 'select_rotate_end');
+    expect(end).toBeDefined();
+    if (end?.type === 'select_rotate_end') {
+      expect(end.reason).toBe('mode switch');
+    }
+  });
+
+  it('reports the live rotation delta in metrics', () => {
+    const classifier = new GestureClassifier({ ...TEST_OPTIONS, initialMode: 'select' });
+    let t = 0;
+    classifier.process(
+      [makeHand('Right', { pinchDist: 0.04 }), makeHand('Left', {})],
+      (t += 100)
+    );
+    const result = classifier.process(
+      [makeHand('Right', { pinchDist: 0.04 }), makeHand('Left', { tilt: -0.5 })],
+      (t += 100)
+    );
+    expect(result.metrics.selectRotation).toBeCloseTo(-0.5, 5);
+    const idle = classifier.process([makeHand('Right', { pinchDist: 0.04 })], (t += 100));
+    expect(idle.metrics.selectRotation).toBeNull();
   });
 });
