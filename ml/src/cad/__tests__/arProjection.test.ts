@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { convexHull2D, isBehindCamera, isSegmentOnCanvas, ndcToCanvas, remapNdcX } from '../arProjection';
+import { convexHull2D, isBehindCamera, isSegmentOnCanvas, ndcToCanvas, canvasToNdc, remapNdcX } from '../arProjection';
 
 describe('ndcToCanvas', () => {
   it('maps NDC corners to the canvas corners (Y axis flipped)', () => {
@@ -14,6 +14,39 @@ describe('ndcToCanvas', () => {
 
   it('scales linearly across the canvas', () => {
     expect(ndcToCanvas(0.5, -0.25, 0, 200, 100)).toEqual({ x: 150, y: 62.5, z: 0 });
+  });
+});
+
+describe('canvasToNdc', () => {
+  it('maps the canvas corners back to the NDC corners (Y axis flipped)', () => {
+    expect(canvasToNdc(0, 200, 300, 200)).toEqual({ x: -1, y: -1 });
+    expect(canvasToNdc(300, 0, 300, 200)).toEqual({ x: 1, y: 1 });
+  });
+
+  it('maps the canvas center to the NDC origin', () => {
+    expect(canvasToNdc(200, 120, 400, 240)).toEqual({ x: 0, y: 0 });
+  });
+
+  it('is the exact inverse of ndcToCanvas (round-trips)', () => {
+    const w = 1280;
+    const h = 720;
+    for (const [x, y] of [
+      [-1, -1],
+      [1, 1],
+      [0, 0],
+      [0.37, -0.82],
+      [-0.55, 0.21],
+    ]) {
+      const projected = ndcToCanvas(x, y, 0, w, h);
+      const roundTrip = canvasToNdc(projected.x, projected.y, w, h);
+      expect(roundTrip.x).toBeCloseTo(x, 10);
+      expect(roundTrip.y).toBeCloseTo(y, 10);
+    }
+  });
+
+  it('degenerates to the origin for an empty canvas', () => {
+    expect(canvasToNdc(50, 50, 0, 0)).toEqual({ x: 0, y: 0 });
+    expect(canvasToNdc(50, 50, -10, 80)).toEqual({ x: 0, y: 0 });
   });
 });
 

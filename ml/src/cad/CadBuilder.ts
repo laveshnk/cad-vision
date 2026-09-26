@@ -41,8 +41,8 @@
  *
  * Selection (SELECT mode):
  *   pickAt(x, y, t)      → raycast a device-space pinch position against the
- *                          committed meshes: a hit selects that mesh
- *                          (highlighted) and arms a drag; a miss clears the
+ *                          committed meshes: a hit selects that mesh (outline
+ *                          highlight) and arms a drag; a miss clears the
  *                          selection. A quick pinch (tap) therefore just
  *                          selects — the selection persists after release.
  *   dragTo(x, y, t)      → once the pinch has been held for `dragHoldMs`,
@@ -62,10 +62,14 @@
  *                          the 3D viewport and the AR mirror.
  *   setSelectedColor(h)   → live-repaint the selected mesh's body material
  *                          from a `#rgb` / `#rrggbb` hex string (SELECT-mode
- *                          color wheel; the selection highlight is kept).
+ *                          color wheel; the selection outline is kept).
  *   selectedProjection()  → the selected mesh's center projected onto a
  *                          width × height canvas (CSS px) so the host can
  *                          anchor selection-adjacent UI (the color wheel).
+ *   deleteSelectedMesh()  → remove the selected mesh from the scene and the
+ *                          committed list, disposing its geometry /
+ *                          material / edge overlays (the host gates this
+ *                          behind a confirmation dialog).
  *   endDrag() / deselect() → finish the drag / clear the selection.
  */
 
@@ -183,6 +187,14 @@ const MARKER = new THREE.SphereGeometry(0.07, 12, 8);
  */
 const EDGE_THRESHOLD: Record<CadTool, number> = { box: 1, cuboid: 1, cylinder: 15, sphere: 25 };
 
+/**
+ * Selection outline accent (bright sky on the matte dark-gray bodies) and the
+ * world-units gap the outline shell keeps around the selected mesh — the
+ * silhouette border stays equally visible on small and large solids alike.
+ */
+const SELECTION_OUTLINE_COLOR = 0x0ea5e9;
+const SELECTION_OUTLINE_OFFSET = 0.05;
+
 export class CadBuilder {
   private readonly scene: CadScene;
   private readonly options: Required<CadBuilderOptions>;
@@ -239,6 +251,13 @@ export class CadBuilder {
   private rotationNeedle: THREE.Line | null = null;
   /** Compass-ring radius in world units (refreshed from the selection's extents). */
   private rotationRingRadius = 1;
+  /**
+   * Selection outline: an inverted-hull shell (the selected mesh's own
+   * geometry with a back-face accent material, scaled a hair larger) drawn
+   * around the selected mesh. Built lazily and reused across selections —
+   * only its geometry / transform are refreshed.
+   */
+  private selectionOutline: THREE.Mesh | null = null;
 
   constructor(scene: CadScene, options: CadBuilderOptions = {}) {
     this.scene = scene;
@@ -446,6 +465,7 @@ export class CadBuilder {
     this.committed.length = 0;
     this.selected = null;
     this.selectionDrag = null;
+    this.hideSelectionOutline();
     this.endRotateSelection();
   }
 
@@ -474,6 +494,11 @@ export class CadBuilder {
   dispose(): void {
     this.clear();
     this.scene.scene.remove(this.root);
+    if (this.selectionOutline) {
+      this.scene.scene.remove(this.selectionOutline);
+      (this.selectionOutline.material as THREE.Material).dispose();
+      this.selectionOutline = null;
+    }
     if (this.rotationRing) {
       this.scene.scene.remove(this.rotationRing);
       this.rotationRing.traverse((obj) => {
@@ -576,6 +601,7 @@ export class CadBuilder {
           : (y - drag.startDeviceY) * this.options.dragElevationScale;
       mesh.position.y = THREE.MathUtils.clamp(drag.baseY + lift, drag.minY, drag.maxY);
     }
+    this.syncSelectionOutline(); // the outline follows the dragged mesh exactly
     if (this.rotating) this.updateRotationRing();
   }
 
@@ -669,6 +695,7 @@ export class CadBuilder {
     const anchor = this.selectionRotationAnchor;
     if (anchor === null) return; // no selection to anchor at
     mesh.rotation.y = anchor + deltaRotation;
+    this.syncSelectionOutline(); // the outline follows the spun mesh exactly
     if (this.rotating) this.updateRotationRing();
   }
 
@@ -700,8 +727,8 @@ export class CadBuilder {
   /**
    * Live-repaint the active selection's body material from a CSS hex string
    * (`#rgb` or `#rrggbb`, case-insensitive — the SELECT-mode color wheel's
-   * format). The selection highlight (emissive tint + accent edges) is kept,
-   * so the mesh stays visibly selected in its new color.
+   * format). The selection outline highlight is a separate shell, so the
+   * repainted mesh stays visibly selected in its new color.
    * @returns true when the color was applied; false when nothing is selected
    * or the hex is malformed (the scene is left untouched).
    */
@@ -732,15 +759,33 @@ export class CadBuilder {
     return { x: projected.x, y: projected.y };
   }
 
+  /**
+   * Delete the active selection: remove the mesh from the committed scene
+   * graph, dispose its geometry, material and edge overlays (GPU memory is
+   * reclaimed), and clear every selection reference — drag anchor, rotation
+   * gesture and highlight. A no-op when nothing is selected. The orchestrator
+   * only reaches this after its confirmation dialog (destructive action).
+   */
+  deleteSelectedMesh(): void {
+    const mesh = this.selected;
+    if (!mesh) return;
+    this.endDrag(); // drop any active drag anchor + running rotation
+    this.deselect(); // restore the highlight state + clear selection refs
+    this.root.remove(mesh);
+    const index = this.committed.indexOf(mesh);
+    if (index >= 0) this.committed.splice(index, 1);
+    disposeMesh(mesh);
+  }
+
   /** End the active selection drag (the selection itself persists). */
   endDrag(): void {
     this.selectionDrag = null;
     this.endRotateSelection();
   }
 
-  /** Clear the selection and its highlight. */
+  /** Clear the selection and remove its outline highlight. */
   deselect(): void {
-    if (this.selected) this.setSelectionStyle(this.selected, false);
+    this.hideSelectionOutline();
     this.selected = null;
     this.selectionDrag = null;
     this.endRotateSelection();
@@ -750,21 +795,72 @@ export class CadBuilder {
     if (this.selected === mesh) return;
     this.deselect();
     this.selected = mesh;
-    this.setSelectionStyle(mesh, true);
+    this.showSelectionOutline(mesh);
   }
 
-  /** Highlight / restore a committed mesh: emissive tint + accent edges. */
-  private setSelectionStyle(mesh: THREE.Mesh, selected: boolean): void {
-    const body = mesh.material as THREE.MeshStandardMaterial;
-    body.emissive.setHex(selected ? 0x0284c7 : 0x000000);
-    body.emissiveIntensity = selected ? 0.35 : 1;
-    for (const child of mesh.children) {
-      if (child instanceof THREE.LineSegments) {
-        (child.material as THREE.LineBasicMaterial).color.setHex(
-          selected ? 0x0284c7 : this.options.edgeColor
-        );
-      }
-    }
+  /**
+   * Outline highlight: draw a distinct silhouette border around the selected
+   * mesh instead of touching its base material or edge overlays (a color
+   * picked on the wheel therefore repaints a *clean* mesh). The shell shares
+   * the mesh's geometry with a `BackSide` accent material and is uniformly
+   * scaled so its silhouette floats `SELECTION_OUTLINE_OFFSET` world units
+   * beyond the mesh — equally visible on boxes, cylinders and spheres (an
+   * `EdgesGeometry` outline would vanish on smooth spheres).
+   *
+   * Like the rotation ring, the shell lives in the scene (not the committed
+   * root), so it never shows up in the STL export, the raycast pick or the
+   * AR ghost list.
+   */
+  private showSelectionOutline(mesh: THREE.Mesh): void {
+    const outline = this.ensureSelectionOutline();
+    outline.geometry = mesh.geometry;
+    outline.scale.setScalar(this.outlineScale(mesh));
+    this.syncSelectionOutline();
+    outline.visible = true;
+  }
+
+  /** Hide the outline shell (kept for reuse; the geometry is re-bound next select). */
+  private hideSelectionOutline(): void {
+    if (this.selectionOutline) this.selectionOutline.visible = false;
+  }
+
+  /** Copy the selected mesh's position / rotation onto the outline shell. */
+  private syncSelectionOutline(): void {
+    const mesh = this.selected;
+    const outline = this.selectionOutline;
+    if (!mesh || !outline) return;
+    outline.position.copy(mesh.position);
+    outline.quaternion.copy(mesh.quaternion);
+  }
+
+  /** Uniform scale that keeps `SELECTION_OUTLINE_OFFSET` world units of shell. */
+  private outlineScale(mesh: THREE.Mesh): number {
+    if (!mesh.geometry.boundingSphere) mesh.geometry.computeBoundingSphere();
+    const radius = mesh.geometry.boundingSphere?.radius ?? 0.5;
+    return radius > 1e-6 ? 1 + SELECTION_OUTLINE_OFFSET / radius : 1;
+  }
+
+  /**
+   * Build the reusable outline shell once: an inverted hull (back faces only)
+   * in the selection accent. Its geometry is re-bound per selection, so only
+   * the material is owned here.
+   */
+  private ensureSelectionOutline(): THREE.Mesh {
+    if (this.selectionOutline) return this.selectionOutline;
+    const outline = new THREE.Mesh(
+      new THREE.BufferGeometry(), // placeholder — re-bound on every select
+      new THREE.MeshBasicMaterial({
+        color: SELECTION_OUTLINE_COLOR,
+        side: THREE.BackSide,
+        fog: false,
+      })
+    );
+    outline.name = 'cad-selection-outline';
+    outline.visible = false;
+    outline.frustumCulled = false; // mirrors the (possibly dragged) mesh exactly
+    this.selectionOutline = outline;
+    this.scene.scene.add(outline);
+    return outline;
   }
 
   /**

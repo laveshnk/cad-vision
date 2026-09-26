@@ -21,6 +21,10 @@ export type {
   ArSceneFrame,
   ArSceneProvider,
   DragConstraint,
+  OverlayHudDisc,
+  OverlayHudRect,
+  OverlaySelectionHud,
+  SelectionHudProvider,
 } from './DebugOverlay';
 export {
   measureHandShape,

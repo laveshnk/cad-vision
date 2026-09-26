@@ -23,7 +23,7 @@
  */
 
 import * as THREE from 'three';
-import { ndcToCanvas, remapNdcX, type ProjectedPoint } from './arProjection';
+import { canvasToNdc, ndcToCanvas, remapNdcX, type ProjectedPoint } from './arProjection';
 
 export interface CadSceneOptions {
   /** Background & fog color. */
@@ -277,6 +277,26 @@ export class CadScene {
     const aspect = this.interactionAspect ?? this.camera.aspect;
     const viewAspect = canvasHeight > 0 ? canvasWidth / canvasHeight : aspect;
     return ndcToCanvas(remapNdcX(x, aspect, viewAspect), y, 0, canvasWidth, canvasHeight);
+  }
+
+  /**
+   * Inverse of `deviceToCanvas`: map a point on a canvas showing the view
+   * camera (the 3D viewport, CSS px) back into device space ([-1, 1], +Y up).
+   * Lets the host mirror viewport-local UI geometry (the SELECT-mode color
+   * wheel / Delete HUD) into the webcam frame, so the camera thumbnail can
+   * draw a HUD exactly where a fingertip has to point.
+   */
+  canvasToDevice(
+    screenX: number,
+    screenY: number,
+    canvasWidth: number,
+    canvasHeight: number
+  ): { x: number; y: number } {
+    const aspect = this.interactionAspect ?? this.camera.aspect;
+    const viewAspect = canvasHeight > 0 ? canvasWidth / canvasHeight : aspect;
+    const ndc = canvasToNdc(screenX, screenY, canvasWidth, canvasHeight);
+    // Undo the aspect remap: ndcX_view = deviceX * aspect / viewAspect.
+    return { x: remapNdcX(ndc.x, viewAspect, aspect), y: ndc.y };
   }
 
   /**
