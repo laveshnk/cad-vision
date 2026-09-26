@@ -8,7 +8,7 @@
  * vision or CAD imports.
  */
 
-export type ToolId = 'box' | 'cylinder' | 'sphere';
+export type ToolId = 'box' | 'cuboid' | 'cylinder' | 'sphere';
 
 export interface ToolbarCallbacks {
   onToolSelect?: (tool: ToolId) => void;
@@ -27,8 +27,9 @@ interface ToolSpec {
 }
 
 const TOOLS: readonly ToolSpec[] = [
-  { id: 'box', label: 'Box', title: 'Box — pinch-drag a rectangle footprint' },
-  { id: 'cylinder', label: 'Cylinder', title: 'Cylinder — pinch-drag a base circle' },
+  { id: 'box', label: 'Box', title: 'Box — two-hand pinch sizes a square base' },
+  { id: 'cuboid', label: 'Cuboid', title: 'Cuboid — two-hand pinch spans a rectangle base' },
+  { id: 'cylinder', label: 'Cylinder', title: 'Cylinder — two-hand pinch sizes a base circle' },
   { id: 'sphere', label: 'Sphere', title: 'Sphere — pinch-drag a base circle' },
 ];
 
@@ -36,6 +37,8 @@ const TOOLS: readonly ToolSpec[] = [
 const ICONS = {
   logo: '<path d="M12 2 2 7l10 5 10-5-10-5Z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>',
   box: '<path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/>',
+  cuboid:
+    '<path d="M2 9l5-4h15v10l-5 4H2Z"/><path d="M2 9h15v10"/><path d="M17 9l5-4"/>',
   cylinder: '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/>',
   sphere:
     '<circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/>',

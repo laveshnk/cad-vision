@@ -667,7 +667,77 @@ describe('GestureClassifier — extrusion', () => {
       ],
       (t += 100)
     );
-    expect(typesOf(result.events)).toContain('extrude_end');
+    expect(result.events.find((e) => e.type === 'extrude_end')).toMatchObject({ heightSet: true });
+    expect(classifier.currentState).toBe('IDLE');
+  });
+
+  it('reports aspect-corrected horizontal / vertical pinch spans', () => {
+    const classifier = new GestureClassifier(TEST_OPTIONS);
+    // Pinch centers: Left (0.3, 0.62), Right (0.7, 0.42) in a square frame.
+    const result = classifier.process(
+      [
+        makeHand('Left', { pinchDist: 0.04, dx: -0.2, dy: 0.1 }),
+        makeHand('Right', { pinchDist: 0.04, dx: 0.2, dy: -0.1 }),
+      ],
+      100
+    );
+    const extrude = result.events.find((e) => e.type === 'extrude');
+    expect(extrude).toBeDefined();
+    if (extrude?.type === 'extrude') {
+      expect(extrude.spanX).toBeCloseTo(0.4);
+      expect(extrude.spanY).toBeCloseTo(0.2);
+    }
+  });
+
+  it('ends flat when the lower pinch releases first; the upper pinch is consumed', () => {
+    const classifier = new GestureClassifier(TEST_OPTIONS);
+    let t = 0;
+    const upper = { pinchDist: 0.04, dx: 0.2, dy: -0.1 };
+    classifier.process(
+      [makeHand('Left', { pinchDist: 0.04, dx: -0.2, dy: 0.1 }), makeHand('Right', upper)],
+      (t += 100)
+    );
+    // Lower (Left) hand releases while the upper (Right) keeps pinching.
+    let result = classifier.process(
+      [makeHand('Left', { pinchDist: 0.2, dx: -0.2, dy: 0.1 }), makeHand('Right', upper)],
+      (t += 100)
+    );
+    expect(result.events.find((e) => e.type === 'extrude_end')).toMatchObject({ heightSet: false });
+    expect(classifier.currentState).toBe('IDLE');
+
+    // The still-held upper pinch neither extrudes nor starts a drawing.
+    result = classifier.process(
+      [makeHand('Left', { pinchDist: 0.2, dx: -0.2, dy: 0.1 }), makeHand('Right', { ...upper, dy: -0.2 })],
+      (t += 100)
+    );
+    expect(result.events).toEqual([]);
+    expect(classifier.currentState).toBe('IDLE');
+
+    // Once released, the upper hand can pinch-draw again.
+    classifier.process([makeHand('Right', { ...upper, pinchDist: 0.2 })], (t += 100));
+    result = classifier.process([makeHand('Right', upper)], (t += 100));
+    expect(typesOf(result.events)).toContain('pinch_start');
+    expect(classifier.currentState).toBe('DRAWING_BASE');
+  });
+
+  it('ends flat when both pinches release on the same frame', () => {
+    const classifier = new GestureClassifier(TEST_OPTIONS);
+    let t = 0;
+    classifier.process(
+      [
+        makeHand('Left', { pinchDist: 0.04, dx: -0.2, dy: 0.1 }),
+        makeHand('Right', { pinchDist: 0.04, dx: 0.2, dy: -0.1 }),
+      ],
+      (t += 100)
+    );
+    const result = classifier.process(
+      [
+        makeHand('Left', { pinchDist: 0.2, dx: -0.2, dy: 0.1 }),
+        makeHand('Right', { pinchDist: 0.2, dx: 0.2, dy: -0.1 }),
+      ],
+      (t += 100)
+    );
+    expect(result.events.find((e) => e.type === 'extrude_end')).toMatchObject({ heightSet: false });
     expect(classifier.currentState).toBe('IDLE');
   });
 

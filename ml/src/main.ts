@@ -110,8 +110,9 @@ engine.onExtrude((e) => builder.onExtrude(e));
 
 // Releasing the last pinch (or a fist / zoom transition) commits the pending
 // build as a solid mesh.
+// Flat when both pinches let go together or the lower one let go first.
 engine.on('extrude_end', (event) => {
-  if (event.type === 'extrude_end') builder.commit();
+  if (event.type === 'extrude_end') builder.commit({ flat: !event.heightSet });
 });
 engine.on('orbit_start', (event) => {
   if (event.type === 'orbit_start') builder.commit();

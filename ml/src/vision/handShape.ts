@@ -126,13 +126,7 @@ const PALM_INDICES = [0, 5, 9, 13, 17];
  */
 export function palmCenter2D(hand: HandFrame): Vec2 {
   const lms = hand.landmarks;
-  let aspect = 1; // pixel height per pixel width of one normalized unit
-  for (const lm of lms) {
-    if (lm.normalized.x > 0.05 && lm.normalized.y > 0.05 && lm.pixel.x > 0) {
-      aspect = (lm.pixel.y / lm.normalized.y) / (lm.pixel.x / lm.normalized.x);
-      break;
-    }
-  }
+  const aspect = frameAspect(hand);
   let x = 0;
   let y = 0;
   for (const i of PALM_INDICES) {
@@ -140,6 +134,20 @@ export function palmCenter2D(hand: HandFrame): Vec2 {
     y += lms[i].normalized.y;
   }
   return { x: -x / PALM_INDICES.length, y: (-y / PALM_INDICES.length) * aspect };
+}
+
+/**
+ * Video frame aspect (height / width in pixels) recovered from the
+ * landmarks' pixel vs. normalized coordinates; multiply a normalized y by it
+ * to express it in units of video width. Falls back to 1.
+ */
+export function frameAspect(hand: HandFrame): number {
+  for (const lm of hand.landmarks) {
+    if (lm.normalized.x > 0.05 && lm.normalized.y > 0.05 && lm.pixel.x > 0) {
+      return (lm.pixel.y / lm.normalized.y) / (lm.pixel.x / lm.normalized.x);
+    }
+  }
+  return 1;
 }
 
 /** Wrap an angle difference into (-π, π]. */
