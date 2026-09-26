@@ -19,6 +19,7 @@ import { centroid, distance3, midpoint3, subtract3 } from './coordinates';
 import { EmaScalar } from './filters';
 import { PathStraightener, type PathStraightenerOptions } from './PathStraightener';
 import {
+  frameAspect,
   measureHandShape,
   measureWristRoll,
   palmCenter2D,
@@ -117,6 +118,11 @@ interface HandTrack {
   pinchStartPos: Vec3 | null;
   lastPinchCenter: Vec3 | null;
   pinchEma: EmaScalar | null;
+  /**
+   * The pinch already finished a two-hand build (the lower hand released
+   * first); it is ignored until released so it cannot start a new drawing.
+   */
+  pinchConsumed: boolean;
   /** Fist detection (debounced). */
   fistActive: boolean;
   fistFrames: number;
@@ -195,6 +201,8 @@ export class GestureClassifier {
   private extrudeSingleHand: Handedness | null = null;
   private extrudeHeight = 0;
   private extrudePrevY: number | null = null;
+  /** Upper pinch (higher on screen) during the last dual-hand frame; null on a tie. */
+  private extrudeUpperHand: Handedness | null = null;
 
   private lastExtrudeDistance: number | null = null;
   private lastExtrudeScale: number | null = null;
@@ -244,6 +252,7 @@ export class GestureClassifier {
     this.extrudeSingleHand = null;
     this.extrudeHeight = 0;
     this.extrudePrevY = null;
+    this.extrudeUpperHand = null;
     this.lastExtrudeDistance = null;
     this.lastExtrudeScale = null;
     this.lastExtrudeDelta = null;
@@ -287,6 +296,7 @@ export class GestureClassifier {
           this.options.pinchDistanceSmoothing !== null
             ? new EmaScalar(this.options.pinchDistanceSmoothing)
             : null,
+        pinchConsumed: false,
         fistActive: false,
         fistFrames: 0,
         openFrames: 0,
@@ -398,6 +408,7 @@ export class GestureClassifier {
       track.lastPinchCenter = center;
       if (dist > this.options.pinchReleaseThreshold) {
         track.pinchActive = false;
+        track.pinchConsumed = false;
         const startPos = track.pinchStartPos ?? center;
         const endPos = center;
         events.push({
@@ -492,6 +503,7 @@ export class GestureClassifier {
         });
       }
       track.pinchActive = false;
+      track.pinchConsumed = false;
       track.pinchStartPos = null;
     }
     if (this.orbitHand === track.handedness) {
@@ -514,7 +526,22 @@ export class GestureClassifier {
     events: GestureSignalEvent[]
   ): void {
     // Active pinch tracks, including hands absent within the loss-grace window.
-    const activePinches = [...this.tracks.values()].filter((t) => t.pinchActive);
+    let activePinches = [...this.tracks.values()].filter((t) => t.pinchActive && !t.pinchConsumed);
+
+    // Two-hand build: the lower pinch released while the upper one is still
+    // held ends the extrusion as a flat build; the upper pinch is consumed.
+    if (
+      activePinches.length === 1 &&
+      this.state === 'EXTRUDING' &&
+      this.extrudeMode === 'dual-hand' &&
+      this.extrudeUpperHand === activePinches[0].handedness
+    ) {
+      activePinches[0].pinchConsumed = true;
+      activePinches = [];
+      events.push({ type: 'extrude_end', timestamp, mode: 'dual-hand', heightSet: false });
+      this.clearExtrudeReference();
+      this.setState('IDLE', 'lower pinch released first (flat)', timestamp, events);
+    }
 
     // --- ORBITING: maintenance, deltas and teardown (pinch always wins). ---
     if (this.state === 'ORBITING' && this.orbitHand) {
@@ -577,6 +604,7 @@ export class GestureClassifier {
         type: 'extrude_end',
         timestamp,
         mode: this.extrudeMode ?? 'dual-hand',
+        heightSet: this.extrudeMode === 'single-hand',
       });
       this.clearExtrudeReference();
       this.setState('IDLE', 'extrusion released', timestamp, events);
@@ -790,6 +818,12 @@ export class GestureClassifier {
       handB.landmarks[INDEX_TIP].normalized
     );
     const distance = distance3(centerA, centerB);
+    const spanX = Math.abs(centerA.x - centerB.x);
+    const spanY = Math.abs(centerA.y - centerB.y) * frameAspect(handA);
+    // Upper pinch: larger device y (+Y up); a tie leaves it undecided.
+    const yA = a.lastPinchCenter?.y ?? 0;
+    const yB = b.lastPinchCenter?.y ?? 0;
+    this.extrudeUpperHand = yA > yB ? a.handedness : yB > yA ? b.handedness : null;
 
     if (this.extrudeReferenceDistance === null) {
       this.extrudeReferenceDistance = distance;
@@ -809,6 +843,8 @@ export class GestureClassifier {
       distance,
       scaleFactor,
       deltaDistance,
+      spanX,
+      spanY,
     });
   }
 
@@ -886,6 +922,7 @@ export class GestureClassifier {
   }
 
   private clearExtrudeReference(): void {
+    this.extrudeUpperHand = null;
     this.extrudeReferenceDistance = null;
     this.extrudePrevDistance = null;
     this.lastExtrudeDistance = null;

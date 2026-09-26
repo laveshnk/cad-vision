@@ -100,7 +100,7 @@ hands on the mirrored preview.
 | Gesture | Detection | Events |
 | ------- | --------- | ------ |
 | **Pinch / draw** | 3D Euclidean distance between landmarks 4 (thumb tip) and 8 (index tip); trigger `< 0.045`, hysteresis release `> 0.065` (both configurable) | `pinch_start`, `pinch_drag` (position, delta in device space), `pinch_end` |
-| **Extrude (dual-hand)** | both hands pinch; pull distance `D` between pinch centers `center = (P_thumb + P_index) / 2` | `extrude_start`, `extrude` (`distance`, `scaleFactor = D / D₀`, `deltaDistance`), `extrude_end` |
+| **Extrude (dual-hand)** | both hands pinch; pull distance `D` between pinch centers `center = (P_thumb + P_index) / 2` | `extrude_start`, `extrude` (`distance`, `scaleFactor = D / D₀`, `deltaDistance`, `spanX` / `spanY` = horizontal / vertical pinch gap in aspect-corrected units of video width), `extrude_end` (`heightSet`: `false` when both pinches release together or the lower pinch releases first — that upper pinch is then consumed until released) |
 | **Extrude (single-hand)** | while EXTRUDING with one pinch: vertical drag of landmark 8 | `extrude` (`deltaHeight`, `cumulativeHeight`, +Y up) |
 | **Camera move (one fist)** | a *real* closed fist, not just curled fingers (`handShape.ts`): all 4 fingertips folded into the palm — `dist(tip, wrist) < 0.9 · dist(MCP, wrist)`, which rejects claw / hook curls and half-curls — and the thumb tucked over the fingers (thumb tip within 0.75 × palm size of an index / middle / ring knuckle, rejecting a thumbs-up); all ratios, so size / distance / rotation invariant. Needs 3 consecutive frames (app default); once held, thresholds relax by `fistHoldSlack` and one finger may loosen. Only engaged from IDLE with no active pinch, and a pinch never engages from a fist. Palm-center motion is reported as deltas, **straightened** by `PathStraightener` so the camera travels in straight segments instead of copying hand wiggle (see below); the app pans the view so the scene follows the fist (fist right → camera left, fist up → camera down). **Wrist roll** — twisting the fist like a doorknob, measured as the rotation of the knuckle line (index MCP → pinky MCP) around the wrist → middle-MCP axis — turns the scene around the vertical axis with the twist; reported only after the twist exceeds `rollEngageAngle` (0.15 rad ≈ 9°) per fist, per-frame jitter under `rollDeadzone` dropped | `orbit_start`, `orbit` (`deltaX`, `deltaY` device units, `deltaRoll` radians), `orbit_end` |
 | **Zoom / turn (two fists)** | both hands closed fists (same test). The steadier fist (lower smoothed palm speed; switches only when the other is below `zoomAnchorSwitchRatio` 0.5× its speed) is the **anchor** — the pivot — and only the other fist's motion relative to it counts, so the anchor's own jitter is ignored. Distance `D` from the anchor (aspect-corrected palm centers): moving fist farther away → zoom in, closer → zoom out. Circling the anchor → `deltaAngle` (counter-clockwise on screen = +) turns the scene, after `zoomTurnEngageAngle` (0.12 rad ≈ 7°) of sweep so a straight pull doesn't rotate. Engaged from IDLE, or upgraded from a one-fist move when the second fist closes; ends on a pinch, a lost hand, or one hand open longer than `orbitOpenPalmGraceFrames` (then falls back to a one-fist move if the other fist is still closed) | `zoom_start`, `zoom` (`anchor`, `distance`, `scaleFactor = D / D₀`, `deltaScale = D / D_prev`, `deltaAngle`), `zoom_end` |
@@ -148,15 +148,27 @@ The full-bleed viewport is a Three.js scene (floor grid, fog, damped orbit
 camera, starting straight on so the grid is square to the screen) driven entirely by the gesture events above, with the camera rendered
 as a floating thumbnail (top-left, click ⤢ to expand/collapse) over it:
 
-1. **Draw the footprint** — pinch and drag: the pinch start raycasts onto the
-   ground plane (`y = 0`), spawning a translucent wireframe preview of the
-   selected tool; dragging sets the footprint (box: corner-to-corner
-   rectangle, cylinder/sphere: center + radius). Releasing freezes the base.
-2. **Extrude** — pinch with both hands and pull apart to scale, or keep one
-   pinch and drag vertically. Spheres grow their radius instead of height.
-3. **Commit** — releasing the extrude gesture (or engaging a fist / open
-   palm) freezes the preview into a solid matte mesh with crisp
-   `EdgesGeometry` outlines.
+1. **Two-hand build** — pinch with both hands: a translucent wireframe
+   preview of the selected tool spawns centered on the origin `(0, 0, 0)`,
+   its base sized by the two pinches (`baseSizeScale` world units per unit
+   of video width):
+   - **Box** — square, side = straight-line pinch gap;
+   - **Cuboid** — rectangle, horizontal gap → width, vertical gap → depth;
+   - **Cylinder** — circle, diameter = pinch gap;
+   - **Sphere** — diameter = pinch gap.
+2. **Set the height** — relax the **upper** pinch; the base freezes and the
+   still-pinched lower hand's vertical drag sets the height (spheres grow
+   their radius instead). Re-pinch the other hand to resize the base again.
+   Releasing the last pinch commits a solid matte mesh with crisp
+   `EdgesGeometry` outlines (a fist / zoom also commits). Releasing the
+   **lower** pinch first, or both at once, commits a **flat** plate
+   (`flatHeight`, spheres unaffected).
+3. **Single-hand footprint (legacy)** — pinch and drag with one hand: the
+   pinch start raycasts onto the ground plane (`y = 0`) and dragging sets the
+   footprint (box: square, cuboid: corner-to-corner rectangle,
+   cylinder/sphere: center + radius). It is committed with the default height on the next build or
+   camera gesture; pinching the second hand before releasing replaces it
+   with a two-hand build.
 4. **Move the camera** — make a fist and move it: the scene follows your
    hand ("grab and drag") — fist right moves the camera left, fist up moves
    it down — with damping (`CadScene.onPan`); open palm stops.

@@ -7,27 +7,44 @@
  * orchestrator (src/main.ts) is the single place where gesture events are
  * translated into the calls below.
  *
- * Construction flow per primitive:
+ * Two-hand construction (primary flow):
+ *   onExtrude(dual-hand) → both hands pinch: spawn a preview centered on the
+ *                          world origin (0, 0, 0) and size its base from the
+ *                          two pinches: box → square (side = pinch gap);
+ *                          cylinder → circle (diameter = pinch gap); cuboid →
+ *                          rectangle (horizontal gap → width, vertical gap →
+ *                          depth); sphere → diameter. Any drawn single-hand
+ *                          footprint is replaced (committed if it was already
+ *                          released, discarded otherwise).
+ *   onExtrude(single-hand) → one pinch released (the upper hand): the base
+ *                          freezes and the still-pinched hand's vertical
+ *                          travel drives the height (box / cylinder) or
+ *                          radius (sphere). Re-pinching the second hand
+ *                          returns to base sizing, keeping the height.
+ *   commit({ flat })     → the orchestrator calls this when the last pinch
+ *                          releases (or on fist / zoom transitions). `flat`
+ *                          (both pinches released together, or the lower one
+ *                          first) commits a flat plate of `flatHeight`.
+ *
+ * Single-hand footprint drawing (legacy flow):
  *   onPinchStart(x1, y1) → raycast Point A onto the ground plane (y = 0)
  *                          and spawn a wireframe preview for the active tool.
  *   onPinchDrag(x2, y2)  → raycast Point B and update the footprint / base
- *                          dimensions of the preview (box: corner-to-corner
- *                          rectangle; cylinder / sphere: center + radius).
- *   onPinchEnd()         → freeze the footprint and await height / extrusion.
- *   onExtrude(input)     → vertical drag (single-hand) or pull-scale
- *                          (dual-hand) drives the height (box / cylinder)
- *                          or radius (sphere).
- *   commit()             → replace the wireframe with a solid matte mesh +
- *                          EdgesGeometry outlines and add it to the scene.
- *                          The orchestrator triggers this on extrude
- *                          release or fist / open-palm transitions.
+ *                          dimensions of the preview (box: square, cuboid:
+ *                          corner-to-corner rectangle; cylinder / sphere:
+ *                          center + radius).
+ *   onPinchEnd()         → freeze the footprint; it is committed with the
+ *                          default height on the next build / camera gesture.
+ *
+ * commit() replaces the wireframe with a solid matte mesh + EdgesGeometry
+ * outlines and adds it to the scene.
  */
 
 import * as THREE from 'three';
 import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js';
 import type { CadScene } from './CadScene';
 
-export type CadTool = 'box' | 'cylinder' | 'sphere';
+export type CadTool = 'box' | 'cuboid' | 'cylinder' | 'sphere';
 
 /**
  * Extrusion delta; structurally compatible with the vision layer's extrude
@@ -35,8 +52,12 @@ export type CadTool = 'box' | 'cylinder' | 'sphere';
  */
 export interface CadExtrudeInput {
   mode: 'dual-hand' | 'single-hand';
-  /** Cumulative pull scale since extrusion start (dual-hand). */
-  scaleFactor?: number;
+  /**
+   * Horizontal / vertical gap between the two pinch centers (units of video
+   * width, dual-hand).
+   */
+  spanX?: number;
+  spanY?: number;
   /** Cumulative vertical travel in device units (single-hand, +Y up). */
   cumulativeHeight?: number;
 }
@@ -48,8 +69,10 @@ export interface CadBuilderOptions {
   minSize?: number;
   /** Height used when committing a build that was never extruded. */
   defaultHeight?: number;
-  /** Baseline height that the dual-hand scale factor multiplies. */
-  extrudeBaseHeight?: number;
+  /** Height of a flat commit (two-hand build without a height step). */
+  flatHeight?: number;
+  /** World units of base size per unit (video width) of two-hand pinch gap. */
+  baseSizeScale?: number;
   /** World units of extrusion per device-space unit of vertical drag. */
   extrudeScale?: number;
   /** Device-space drag distance that re-purposes a pinch as a new drawing. */
@@ -64,7 +87,11 @@ export interface CadBuilderOptions {
   edgeColor?: number;
 }
 
-type BuildPhase = 'footprint' | 'awaiting-height' | 'height';
+/**
+ * footprint / awaiting-height: single-hand drawing. base: two-hand base
+ * sizing. height: one pinch released, the other drives the height.
+ */
+type BuildPhase = 'footprint' | 'awaiting-height' | 'base' | 'height';
 
 /** Wireframe preview handles (fill + wireframe + Point-A marker). */
 interface Preview {
@@ -89,6 +116,8 @@ interface Build {
   height: number;
   phase: BuildPhase;
   preview: Preview;
+  /** Two-hand build: centered on the world origin, sized by the pinch gap. */
+  centered: boolean;
   /** Extrusion rebase snapshots for continuity across mode switches. */
   extrudeMode: 'dual-hand' | 'single-hand' | null;
   baseHeight: number;
@@ -105,7 +134,7 @@ const MARKER = new THREE.SphereGeometry(0.07, 12, 8);
  * EdgesGeometry crease thresholds per tool: boxes show every edge,
  * cylinders only the top/bottom rims, spheres stay smooth.
  */
-const EDGE_THRESHOLD: Record<CadTool, number> = { box: 1, cylinder: 15, sphere: 25 };
+const EDGE_THRESHOLD: Record<CadTool, number> = { box: 1, cuboid: 1, cylinder: 15, sphere: 25 };
 
 export class CadBuilder {
   private readonly scene: CadScene;
@@ -126,7 +155,8 @@ export class CadBuilder {
       minFootprint: options.minFootprint ?? 0.15,
       minSize: options.minSize ?? 0.05,
       defaultHeight: options.defaultHeight ?? 0.5,
-      extrudeBaseHeight: options.extrudeBaseHeight ?? 0.5,
+      flatHeight: options.flatHeight ?? 0.05,
+      baseSizeScale: options.baseSizeScale ?? 10,
       extrudeScale: options.extrudeScale ?? 4.5,
       redrawDistance: options.redrawDistance ?? 0.35,
       groundRadius: options.groundRadius ?? 16,
@@ -156,7 +186,7 @@ export class CadBuilder {
     if (this.tool === tool) return;
     this.tool = tool;
     const build = this.build;
-    if (build && build.phase === 'footprint') {
+    if (build && (build.phase === 'footprint' || build.phase === 'base')) {
       // Swap the preview geometry while keeping the drawn footprint.
       this.disposePreview(build);
       build.tool = tool;
@@ -173,24 +203,7 @@ export class CadBuilder {
   /** Pinch engaged at device coords (x, y): lock Point A, spawn a preview. */
   onPinchStart(x: number, y: number): void {
     if (this.build) return; // pending build: this pinch is likely extrude prep
-    const origin = this.groundPoint(x, y);
-    const preview = this.createPreview();
-    this.build = {
-      tool: this.tool,
-      origin,
-      point: origin.clone(),
-      width: 0,
-      depth: 0,
-      radius: 0,
-      height: this.options.minSize,
-      phase: 'footprint',
-      preview,
-      extrudeMode: null,
-      baseHeight: 0,
-      baseRadius: 0,
-    };
-    this.scene.scene.add(preview.group);
-    this.refreshPreview();
+    this.startBuild(this.groundPoint(x, y), 'footprint', false);
   }
 
   /**
@@ -228,41 +241,28 @@ export class CadBuilder {
   }
 
   /**
-   * Extrusion delta: single-hand vertical drag adds height (device units
-   * scaled into world units); dual-hand pull scales the baseline height.
-   * Spheres grow their radius instead of a height.
+   * Extrusion input. Dual-hand: size the base of a two-hand build centered
+   * on the origin from the pinch gap. Single-hand: vertical drag (device
+   * units scaled into world units) adds height; spheres grow their radius.
    */
   onExtrude(input: CadExtrudeInput): void {
-    const build = this.build;
-    if (!build) return;
-    if (build.phase === 'footprint') {
-      // Extrusion can begin straight from a drag (e.g. the second hand
-      // pinches while the first is still drawing): freeze the footprint.
-      build.phase = 'awaiting-height';
-    }
-    if (build.phase === 'awaiting-height') {
-      build.phase = 'height';
-      build.extrudeMode = null;
-    }
-    if (build.extrudeMode !== input.mode) {
-      // First extrusion frame or a mode switch: rebase so dimensions stay
-      // continuous across the transition.
-      const first = build.extrudeMode === null;
-      build.extrudeMode = input.mode;
-      build.baseHeight = first
-        ? Math.max(build.height, this.options.extrudeBaseHeight)
-        : build.height;
-      build.baseRadius = first
-        ? Math.max(build.radius, this.options.minSize)
-        : build.radius;
-    }
     if (input.mode === 'dual-hand') {
-      const scale = Math.max(input.scaleFactor ?? 1, 0.05);
-      build.height = Math.max(this.options.minSize, build.baseHeight * scale);
-      build.radius = Math.max(this.options.minSize, build.baseRadius * scale);
-    } else {
-      const growth = (input.cumulativeHeight ?? 0) * this.options.extrudeScale;
-      build.height = Math.max(this.options.minSize, build.baseHeight + growth);
+      this.sizeBase(input.spanX, input.spanY);
+      return;
+    }
+    const build = this.build;
+    if (!build || !build.centered) return;
+    if (build.extrudeMode !== 'single-hand') {
+      // First single-hand frame: rebase so the height grows from where the
+      // base phase left it.
+      build.extrudeMode = 'single-hand';
+      build.phase = 'height';
+      build.baseHeight = build.height;
+      build.baseRadius = build.radius;
+    }
+    const growth = (input.cumulativeHeight ?? 0) * this.options.extrudeScale;
+    build.height = Math.max(this.options.minSize, build.baseHeight + growth);
+    if (build.tool === 'sphere') {
       build.radius = Math.max(this.options.minSize, build.baseRadius + growth);
     }
     this.refreshPreview();
@@ -270,21 +270,21 @@ export class CadBuilder {
 
   /**
    * Commit the active build: replace the wireframe preview with a solid
-   * matte mesh (+ crisp edge overlays) and keep it in the scene.
+   * matte mesh (+ crisp edge overlays) and keep it in the scene. `flat`
+   * commits a plate of `flatHeight` instead (spheres are unaffected).
    * @returns true if a mesh was committed.
    */
-  commit(): boolean {
+  commit({ flat = false }: { flat?: boolean } = {}): boolean {
     const build = this.build;
-    if (!build || (build.phase !== 'awaiting-height' && build.phase !== 'height')) {
-      return false;
-    }
+    if (!build || build.phase === 'footprint') return false;
     const footprint = Math.max(build.width, build.depth, build.radius);
     if (footprint < this.options.minFootprint) {
       this.cancel();
       return false;
     }
-    const height =
-      build.phase === 'height'
+    const height = flat
+      ? this.options.flatHeight
+      : build.phase === 'height'
         ? build.height
         : Math.max(build.height, this.options.defaultHeight);
     const radius = Math.max(build.radius, this.options.minSize);
@@ -389,14 +389,84 @@ export class CadBuilder {
     return point;
   }
 
+  /** Spawn a new build (preview + state) anchored at `origin`. */
+  private startBuild(origin: THREE.Vector3, phase: BuildPhase, centered: boolean): Build {
+    const preview = this.createPreview();
+    const build: Build = {
+      tool: this.tool,
+      origin,
+      point: origin.clone(),
+      width: 0,
+      depth: 0,
+      radius: 0,
+      height: this.options.minSize,
+      phase,
+      preview,
+      centered,
+      extrudeMode: null,
+      baseHeight: 0,
+      baseRadius: 0,
+    };
+    this.build = build;
+    this.scene.scene.add(preview.group);
+    this.refreshPreview();
+    return build;
+  }
+
+  /**
+   * Two-hand base sizing around (0, 0, 0) from the pinch spans (units of
+   * video width): cuboid → width × depth rectangle from the horizontal /
+   * vertical gaps; box → square and cylinder / sphere → diameter from the
+   * straight-line gap. Starts the centered build on the first dual-hand
+   * frame; a single-hand footprint in progress is dropped (it was the
+   * lead-in to this pinch) and a released one is committed first.
+   */
+  private sizeBase(spanX: number | undefined, spanY: number | undefined): void {
+    if (spanX === undefined || spanY === undefined) return;
+    let build = this.build;
+    if (build && !build.centered) {
+      if (build.phase === 'footprint') this.cancel();
+      else this.commit();
+      build = null;
+    }
+    if (!build) build = this.startBuild(new THREE.Vector3(0, 0, 0), 'base', true);
+    build.phase = 'base';
+    build.extrudeMode = 'dual-hand';
+    const { minSize, baseSizeScale } = this.options;
+    const size = Math.max(minSize, Math.hypot(spanX, spanY) * baseSizeScale);
+    if (build.tool === 'cuboid') {
+      build.width = Math.max(minSize, spanX * baseSizeScale);
+      build.depth = Math.max(minSize, spanY * baseSizeScale);
+    } else {
+      build.width = size;
+      build.depth = size;
+    }
+    build.radius = size / 2;
+    this.refreshPreview();
+  }
+
   /** Update footprint dimensions from a ground-plane Point B. */
   private updateFootprint(point: THREE.Vector3): void {
     const build = this.build;
     if (!build || build.phase !== 'footprint') return;
-    build.point = point;
-    build.width = Math.abs(point.x - build.origin.x);
-    build.depth = Math.abs(point.z - build.origin.z);
-    build.radius = Math.hypot(point.x - build.origin.x, point.z - build.origin.z);
+    const dx = point.x - build.origin.x;
+    const dz = point.z - build.origin.z;
+    build.radius = Math.hypot(dx, dz);
+    if (build.tool === 'box') {
+      // Square: the larger extent, extended from Point A toward Point B.
+      const side = Math.max(Math.abs(dx), Math.abs(dz));
+      build.width = side;
+      build.depth = side;
+      build.point = new THREE.Vector3(
+        build.origin.x + (dx < 0 ? -side : side),
+        0,
+        build.origin.z + (dz < 0 ? -side : side)
+      );
+    } else {
+      build.point = point;
+      build.width = Math.abs(dx);
+      build.depth = Math.abs(dz);
+    }
     this.refreshPreview();
   }
 
@@ -411,7 +481,8 @@ export class CadBuilder {
     let scaleY = min;
     let scaleZ = min;
     switch (build.tool) {
-      case 'box': {
+      case 'box':
+      case 'cuboid': {
         const height = Math.max(build.height, min);
         scaleX = Math.max(build.width, min);
         scaleY = height;
@@ -443,11 +514,11 @@ export class CadBuilder {
   }
 
   /**
-   * Footprint anchor: boxes span corner-to-corner (midpoint center);
+   * Footprint anchor: boxes / cuboids span corner-to-corner (midpoint center);
    * cylinders / spheres are centered on Point A with radius to Point B.
    */
   private buildCenter(build: Build): THREE.Vector3 {
-    if (build.tool === 'box') {
+    if (build.tool === 'box' || build.tool === 'cuboid') {
       return new THREE.Vector3(
         (build.origin.x + build.point.x) / 2,
         0,
@@ -467,6 +538,7 @@ export class CadBuilder {
   ): THREE.BufferGeometry {
     switch (tool) {
       case 'box':
+      case 'cuboid':
         return new THREE.BoxGeometry(width, height, depth);
       case 'cylinder':
         return new THREE.CylinderGeometry(radius, radius, height, 48);
@@ -479,6 +551,7 @@ export class CadBuilder {
   private unitGeometry(tool: CadTool): THREE.BufferGeometry {
     switch (tool) {
       case 'box':
+      case 'cuboid':
         return UNIT_BOX;
       case 'cylinder':
         return UNIT_CYLINDER;
