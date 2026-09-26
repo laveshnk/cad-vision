@@ -32,7 +32,10 @@
  * In SELECT mode the overlay additionally renders a live AR spatial mirror
  * of the 3D CAD scene (translucent ground grid + mesh ghosts) through the
  * `arScene` provider — plain projected 2D data supplied by the host, so this
- * module stays free of Three.js.
+ * module stays free of Three.js. It also mirrors the selection's floating
+ * controls (color-wheel disc outline + Delete button, device-space data via
+ * the `selectionHud` provider) so users can visually align their hands with
+ * the viewport-anchored UI.
  */
 
 import { HandLandmarker } from '@mediapipe/tasks-vision';
@@ -177,6 +180,57 @@ export interface ArSceneFrame {
  */
 export type ArSceneProvider = (width: number, height: number) => ArSceneFrame | null;
 
+/* -------------------------------------------------------------------- */
+/* SELECT-mode selection-HUD mirror (color wheel + Delete button)       */
+/* -------------------------------------------------------------------- */
+
+/**
+ * A disc in device space ([-1, 1], +X right in the mirrored view, +Y up):
+ * center plus per-axis radii — an ellipse, since device units map onto the
+ * video rect's width / height separately. Mirrors the color wheel.
+ */
+export interface OverlayHudDisc {
+  x: number;
+  y: number;
+  radiusX: number;
+  radiusY: number;
+}
+
+/**
+ * A rectangle in device space: (x, y) is its minimum corner (left edge,
+ * bottom edge — +Y up), with width / height extending toward +X / +Y.
+ * Mirrors the selection HUD's Delete button.
+ */
+export interface OverlayHudRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * One frame of the SELECT-mode selection HUD, expressed in device space so
+ * the drawn controls sit exactly where a tracked fingertip must point to hit
+ * the real (viewport-anchored) controls.
+ */
+export interface OverlaySelectionHud {
+  /** Color-wheel disc outline, or null while the wheel is dismissed. */
+  wheel: OverlayHudDisc | null;
+  /** Delete-button bounds, or null while the selection HUD is hidden. */
+  deleteButton: OverlayHudRect | null;
+  /** Color-lock dwell completion [0, 1] (fills the wheel outline ring). */
+  wheelProgress: number;
+  /** Delete-button dwell completion [0, 1] (fills the delete HUD). */
+  deleteProgress: number;
+}
+
+/**
+ * Supplies the selection HUD per rendered frame; null skips the layer (no
+ * selection, outside SELECT mode, or while the delete confirmation is open).
+ * Plain data from the host — the overlay stays free of UI dependencies.
+ */
+export type SelectionHudProvider = () => OverlaySelectionHud | null;
+
 /** AR mirror paint: minor ground-grid strokes (1-unit lines). */
 const AR_GRID_STROKE = 'rgba(0, 150, 255, 0.18)';
 /** AR mirror paint: major ground-grid divisions (stronger, every 5 units). */
@@ -197,6 +251,18 @@ const AR_SELECTED_GLOW = 'rgba(0, 200, 255, 0.8)';
 const AR_RING_STROKE = 'rgba(0, 200, 255, 0.9)';
 /** AR mirror paint: amber yaw needle inside the compass ring. */
 const AR_RING_NEEDLE_STROKE = 'rgba(251, 191, 36, 0.95)';
+
+/** Selection-HUD paint: color-wheel disc tint + outline. */
+const HUD_WHEEL_FILL = 'rgba(56, 189, 248, 0.10)';
+const HUD_WHEEL_STROKE = 'rgba(255, 255, 255, 0.9)';
+/** Selection-HUD paint: color-lock dwell arc filling the wheel outline. */
+const HUD_WHEEL_PROGRESS_STROKE = '#38bdf8';
+/** Selection-HUD paint: Delete button tint + outline (danger red). */
+const HUD_DELETE_FILL = 'rgba(248, 113, 113, 0.14)';
+const HUD_DELETE_STROKE = 'rgba(248, 113, 113, 0.9)';
+/** Selection-HUD paint: Delete label + its dwell progress fill. */
+const HUD_DELETE_LABEL = '#fecaca';
+const HUD_DELETE_PROGRESS_FILL = '#f87171';
 
 /** Options for the debug overlay. */
 /** A CREATE-mode shape button: `id` is the host's opaque shape key. */
@@ -250,6 +316,13 @@ export interface DebugOverlayOptions<S extends string = string> {
    * and injected here by the orchestrator — the overlay stays Three.js-free.
    */
   arScene?: ArSceneProvider;
+  /**
+   * SELECT-mode selection HUD: mirrors the color-wheel disc outline and the
+   * Delete button (device-space plain data + dwell progress) onto this
+   * canvas, so users can visually align their hands with the viewport's
+   * floating controls. Supplied by the orchestrator; null skips the layer.
+   */
+  selectionHud?: SelectionHudProvider;
 }
 
 /** A hit-testable rectangle in CSS pixels. */
@@ -280,6 +353,7 @@ export class DebugOverlay<S extends string = string> {
   private readonly onDragConstraintRequest: ((constraint: DragConstraint) => void) | null;
   private readonly dwellMs: number;
   private readonly arScene: ArSceneProvider | null;
+  private readonly selectionHud: SelectionHudProvider | null;
   /** Last rendered button rects (CSS px) — hit targets for mouse + finger. */
   private buttonRects: ButtonRect[] = [];
   /** Button the index tip is dwelling over (-1 = none). */
@@ -315,6 +389,7 @@ export class DebugOverlay<S extends string = string> {
     this.onDragConstraintRequest = options.onDragConstraintRequest ?? null;
     this.dwellMs = options.dwellMs ?? 500;
     this.arScene = options.arScene ?? null;
+    this.selectionHud = options.selectionHud ?? null;
     this.shapes = options.shapes ?? [];
     this.onShapeRequest = options.onShapeRequest ?? null;
     this.activeShapeId = options.activeShape ?? this.shapes[0]?.id ?? null;
@@ -376,6 +451,9 @@ export class DebugOverlay<S extends string = string> {
     }
     this.drawDualHandsLink(frame, view, cssWidth);
     this.drawZoomAnchor(frame, view);
+    // SELECT mode: mirror the selection's color wheel + Delete button as a
+    // HUD (drawn over the hands' skeletons so the alignment guide reads).
+    if (frame.mode === 'select') this.drawSelectionHud(view, cssWidth);
     this.drawModeButtons(frame, cssWidth);
     if (frame.mode === 'select') this.drawConstraintButtons(cssWidth);
     else this.constraintRects = [];
@@ -743,6 +821,100 @@ export class DebugOverlay<S extends string = string> {
       ctx.lineTo(b.x, b.y);
     }
     ctx.stroke();
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* SELECT-mode selection HUD (color wheel + Delete mirror)            */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * Mirror the selection's floating controls onto the camera thumbnail: the
+   * color wheel's disc outline and the Delete button, expressed in device
+   * space by the host (the inverse of the viewport mapping the real controls
+   * live in), so the drawn controls sit exactly where a tracked fingertip
+   * must point. Both dwell progress bars (color lock, delete) fill as live
+   * feedback — the same model as the overlay's own buttons.
+   */
+  private drawSelectionHud(view: ViewTransform, cssWidth: number): void {
+    if (!this.selectionHud) return;
+    const hud = this.selectionHud();
+    if (!hud) return;
+    const ctx = this.ctx;
+    const scale = this.fontScale(cssWidth);
+    ctx.save();
+    ctx.translate(view.ox, view.oy);
+
+    if (hud.wheel) {
+      const cx = ((hud.wheel.x + 1) / 2) * view.dispW;
+      const cy = ((1 - hud.wheel.y) / 2) * view.dispH;
+      const rx = Math.max((hud.wheel.radiusX / 2) * view.dispW, 1);
+      const ry = Math.max((hud.wheel.radiusY / 2) * view.dispH, 1);
+      ctx.beginPath();
+      ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+      ctx.fillStyle = HUD_WHEEL_FILL;
+      ctx.fill();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = HUD_WHEEL_STROKE;
+      ctx.stroke();
+      // Color-lock dwell: an arc sweeps the rim as the timed hover fills.
+      if (hud.wheelProgress > 0) {
+        ctx.beginPath();
+        ctx.ellipse(
+          cx,
+          cy,
+          rx,
+          ry,
+          0,
+          -Math.PI / 2,
+          -Math.PI / 2 + Math.min(1, hud.wheelProgress) * Math.PI * 2
+        );
+        ctx.lineWidth = 3.5;
+        ctx.strokeStyle = HUD_WHEEL_PROGRESS_STROKE;
+        ctx.stroke();
+      }
+    }
+
+    if (hud.deleteButton) {
+      // Device rect (min corner, +Y up) → canvas rect (top-left, +Y down).
+      const left = ((hud.deleteButton.x + 1) / 2) * view.dispW;
+      const right = ((hud.deleteButton.x + hud.deleteButton.width + 1) / 2) * view.dispW;
+      const top = ((1 - (hud.deleteButton.y + hud.deleteButton.height)) / 2) * view.dispH;
+      const bottom = ((1 - hud.deleteButton.y) / 2) * view.dispH;
+      const x = Math.min(left, right);
+      const y = Math.min(top, bottom);
+      const width = Math.abs(right - left);
+      const height = Math.abs(bottom - top);
+      if (width > 2 && height > 2) {
+        this.panelPath(x, y, width, height, 6 * scale);
+        ctx.fillStyle = HUD_DELETE_FILL;
+        ctx.fill();
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = HUD_DELETE_STROKE;
+        ctx.stroke();
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.font = `bold ${Math.max(7, Math.round(9 * scale))}px ui-monospace, monospace`;
+        ctx.fillStyle = HUD_DELETE_LABEL;
+        ctx.shadowColor = 'rgba(15, 23, 42, 0.9)';
+        ctx.shadowBlur = 3;
+        ctx.fillText('DEL', x + width / 2, y + height / 2);
+        ctx.shadowBlur = 0;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'alphabetic';
+        // Pointing dwell on Delete fills along its bottom edge.
+        if (hud.deleteProgress > 0) {
+          ctx.fillStyle = HUD_DELETE_PROGRESS_FILL;
+          ctx.fillRect(
+            x + 1,
+            y + height - 3.5,
+            (width - 2) * Math.min(1, hud.deleteProgress),
+            2.5
+          );
+        }
+      }
+    }
+
+    ctx.restore();
   }
 
   /* ------------------------------------------------------------------ */

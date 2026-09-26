@@ -48,6 +48,30 @@ export function ndcToCanvas(
 }
 
 /**
+ * Map a 2D canvas point (CSS px, +Y down) back onto normalized device
+ * coordinates [-1, 1] (+Y up) — the exact inverse of `ndcToCanvas`:
+ *
+ *   ndcX = screenX / canvasWidth * 2 - 1
+ *   ndcY = (1 - screenY / canvasHeight) * 2 - 1
+ *
+ * Used to inverse-map viewport-local UI geometry (the SELECT-mode color wheel
+ * and Delete HUD) back into device space, so the camera thumbnail can mirror
+ * exactly where a fingertip must point.
+ */
+export function canvasToNdc(
+  screenX: number,
+  screenY: number,
+  canvasWidth: number,
+  canvasHeight: number
+): Point2D {
+  if (canvasWidth <= 0 || canvasHeight <= 0) return { x: 0, y: 0 };
+  return {
+    x: (screenX / canvasWidth) * 2 - 1,
+    y: (1 - screenY / canvasHeight) * 2 - 1,
+  };
+}
+
+/**
  * Re-express an NDC x coordinate from one perspective frustum in another that
  * shares the same camera pose and vertical field of view but has a different
  * aspect (width / height). With the vertical extent fixed, horizontal NDC

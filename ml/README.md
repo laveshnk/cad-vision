@@ -44,7 +44,11 @@ src/
 │   └── ArMirror.ts            # plain-data AR projection of grid + meshes for the overlay
 ├── ui/
 │   ├── Toolbar.ts             # CAD toolbar: camera toggle, Clear scene, Export STL
-│   └── ColorWheel.ts          # floating HSL color wheel (SELECT-mode live repaint)
+│   ├── ColorWheel.ts          # floating HSL color wheel + timed hover lock (dwell tracker)
+│   ├── SelectionMenu.ts       # floating selection HUD (Delete action, SELECT mode)
+│   ├── ConfirmDialog.ts       # modal confirmation for destructive actions
+│   ├── hitTest.ts             # root-local DOM hit-tests for the floating overlays
+│   └── ThumbResizer.ts        # mouse-drag resize grip for the camera thumbnail
 └── vision/
     ├── types.ts               # shared types + event payloads
     ├── coordinates.ts         # device-space mapping, vec3 math
@@ -176,7 +180,8 @@ and hands absent > 10 frames re-seed from fresh evidence. Configurable via
 
 The full-bleed viewport is a Three.js scene (floor grid, fog, damped orbit
 camera, starting straight on so the grid is square to the screen) driven entirely by the gesture events above, with the camera rendered
-as a floating thumbnail (top-left, click ⤢ to expand/collapse) over it.
+as a floating thumbnail (top-left, click ⤢ to expand/collapse, drag its
+bottom-right corner to resize) over it.
 Interaction modes are switched with the button bar along the top of the
 camera overlay — mouse click, or **point** (index finger up, other fingers
 curled) and hold the fingertip on a button for 500 ms (a ring marks the
@@ -210,8 +215,9 @@ build:
    cylinder/sphere: center + radius). It is committed with the default height on the next build or
    camera gesture; pinching the second hand before releasing replaces it
    with a two-hand build.
-4. **Select, move & recolor (SELECT mode)** — a quick pinch on a committed
-   mesh **selects** it (highlighted; it stays selected after you let go).
+4. **Select, move, recolor & delete (SELECT mode)** — a quick pinch on a committed
+   mesh **selects** it (a bright outline shell is drawn around it — the
+   mesh's own material is never tinted; it stays selected after you let go).
    To **move** it, pinch and *hold* (the mesh starts following after
    `dragHoldMs`, 300 ms, so a quick pinch never nudges it), drag, and
    release to drop it. Dragging moves it under the active
@@ -224,7 +230,7 @@ build:
    depth as well as sideways. Switching between the toggles mid-drag
    re-anchors, so the mesh never jerks or resets. Pinching empty ground
    deselects (so does leaving SELECT mode), restoring the mesh's normal look
-   — the highlight tint / outline go, a picked color stays. While in SELECT mode the camera thumbnail doubles as a live
+   — the selection outline goes, a picked color stays. While in SELECT mode the camera thumbnail doubles as a live
    **AR spatial mirror**: the ground grid (30 × 30 world units, 1-unit minor
    + stronger 5-unit major lines, off-canvas geometry culled) and every
    committed mesh are projected through the shared 3D camera and drawn as
@@ -238,11 +244,29 @@ build:
    up) — every hue under the fingertip repaints the mesh live (angle =
    hue, radius = saturation, wheel center = gray). This works after a
    quick select-pinch, or with your other hand while one hand holds the
-   mesh. Pinching directly on the wheel
-   confirms the color under the pinch instead of re-picking the scene
-   behind it, and only the grabbing hand's release ends the drag. The
-   wheel hides when the selection is cleared or the mode changes. Pinches
-   never draw or extrude in this mode.
+   mesh. The camera thumbnail mirrors the wheel's disc outline and the
+    Delete button as a HUD, drawn exactly where your fingertip has to point
+    (with live dwell progress), so you can align your hand with the controls
+    while looking at the camera feed. **Hold the fingertip on one color slice
+    for 1.2 seconds** and a
+   countdown ring fills around the cursor; when it completes, the color
+   is locked in and saved to the object, the wheel disappears, and the
+   interaction resets (point again — or re-grab the mesh — to bring it
+   back). The dwell is keyed to 15° hue slices (the desaturated center
+   is one neutral slice), so micro-jitter never restarts the clock,
+   while any slice change or hover loss does. The wheel also hides when
+   the selection is cleared or the mode changes; pinches over the disc
+   never re-pick the 3D scene behind it, and only the grabbing hand's
+   release ends the drag. Pinches never draw or extrude in this mode.
+   **Delete**: the selection HUD below the object carries a **Delete**
+   button — click it, pinch it, point at it (index-tip dwell of ~0.8 s with a progress
+    fill), or press `Delete` / `Backspace`. Every
+   trigger opens a modal confirmation ("Are you sure you want to delete
+   this object? [Confirm] [Cancel]"): only Confirm (button, pinch, or
+   `Enter`) removes the mesh from the scene and frees its geometry /
+   material / edge overlays, while Cancel (button, pinch, `Escape`, or
+   clicking the backdrop) leaves everything untouched. While the dialog
+   is open the scene is frozen — pinches only answer the dialog.
 5. **Orbit the camera** — make a fist and move it: the camera orbits the
    world origin and the scene follows your hand — fist right swings the
    camera left, fist up swings it lower — with damping (`CadScene.onOrbit`);
@@ -378,7 +402,7 @@ The `<canvas id="overlay">` (pure Canvas 2D) mirrors the feed and draws:
 ## Tests
 
 ```bash
-npm test        # vitest — coordinates, filters, handedness stabilizer, path straightener, classifier/FSM + color-wheel math unit tests
+npm test        # vitest — coordinates, filters, handedness stabilizer, path straightener, classifier/FSM + color-wheel math / dwell tracker unit tests
 npm run build   # tsc --noEmit + vite production build
 ```
 

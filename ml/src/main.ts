@@ -12,20 +12,34 @@
  *
  * Interaction modes (VIEW / SELECT / CREATE) are picked on the vision
  * overlay's button bar and gate the gesture routing below: pinches are inert
- * in VIEW, pick / drag / recolor meshes in SELECT (a floating color wheel
- * follows the selection; hand 2 sweeps it while hand 1 holds the pinch), and
- * build primitives in CREATE. Camera gestures (fist orbit / two-fist zoom)
- * stay live in every mode.
+ * in VIEW, pick / drag / recolor / delete meshes in SELECT (a floating color
+ * wheel + Delete HUD follow the selection; a pointing fingertip sweeps the
+ * wheel and a 1.2 s hover locks the color; the Delete button answers to
+ * mouse, pinch, keyboard and a pointing dwell — deletion is
+ * confirmation-gated), and build primitives in CREATE. Camera gestures
+ * (fist orbit / two-fist zoom) stay live in every mode.
  */
 
 import { GestureEngine } from './vision/GestureEngine';
 import { DebugOverlay } from './vision/DebugOverlay';
-import type { FrameEvent, GestureSignalEvent, Handedness } from './vision/types';
+import type {
+  FrameEvent,
+  GestureSignalEvent,
+  Handedness,
+} from './vision/types';
+import type {
+  OverlayHudDisc,
+  OverlayHudRect,
+  OverlaySelectionHud,
+} from './vision/DebugOverlay';
 import { CadScene } from './cad/CadScene';
 import { CadBuilder, type CadTool } from './cad/CadBuilder';
 import { buildArSceneFrame } from './cad/ArMirror';
 import { Toolbar } from './ui/Toolbar';
 import { ColorWheel } from './ui/ColorWheel';
+import { SelectionMenu } from './ui/SelectionMenu';
+import { ConfirmDialog } from './ui/ConfirmDialog';
+import { ThumbResizer } from './ui/ThumbResizer';
 
 const video = document.querySelector<HTMLVideoElement>('#video');
 const canvas = document.querySelector<HTMLCanvasElement>('#overlay');
@@ -111,6 +125,11 @@ const overlay = new DebugOverlay<CadTool>(canvas, {
   // lockstep with pinch-driven drags (the engine emits pinch events before
   // the per-frame event, so ghost and viewport never diverge).
   arScene: (width, height) => buildArSceneFrame(cadScene, builder, width, height),
+  // SELECT-mode selection HUD: the color wheel's disc outline and the Delete
+  // button are mirrored into the camera thumbnail (device space, so the
+  // drawn controls sit exactly where a fingertip must point), with both
+  // dwell progress bars as live feedback.
+  selectionHud: () => selectionHudFrame(),
 });
 
 /* ---- UI ---- */
@@ -118,6 +137,7 @@ const toolbar = new Toolbar(toolbarRoot, {
   onClearScene: () => {
     builder.clear();
     colorWheel.hide(); // no selection left to anchor the wheel
+    selectionMenu.hide(); // …nor the Delete HUD
   },
   onExportStl: () => builder.exportStl(),
   onCameraStart: () => startCamera(),
@@ -128,6 +148,25 @@ const toolbar = new Toolbar(toolbarRoot, {
 // viewport — the bridge below feeds it viewport-local pixels and applies
 // the picked hex through CadBuilder.setSelectedColor.
 const colorWheel = new ColorWheel(viewport);
+
+// Floating selection HUD (SELECT mode): a Delete action anchored below the
+// selection's screen projection. Deletion is destructive, so every trigger
+// routes through the confirmation dialog below before the mesh is removed.
+const selectionMenu = new SelectionMenu(viewport, {
+  onDeleteRequest: () => requestDeleteSelection(),
+});
+
+// Modal safety confirmation ("Are you sure you want to delete this object?
+// [Confirm] [Cancel]") — nothing is deleted until it is answered.
+const confirmDialog = new ConfirmDialog(viewport, {
+  onConfirm: () => confirmDeleteSelection(),
+  onCancel: () => cancelDeleteSelection(),
+});
+
+// Mouse-drag resizing of the floating camera thumbnail: a corner grip inside
+// the video stage scales the card (the overlay re-measures its canvas every
+// frame, so nothing else needs a resize listener).
+const thumbResizer = new ThumbResizer(visionThumb);
 
 function setStatus(text: string): void {
   statusOutput.textContent = text;
@@ -140,15 +179,25 @@ function logGestureEvent(event: GestureSignalEvent): void {
 
 /* ---- Vision -> CAD bridge (device-space coordinates only) ---- */
 
-/** MediaPipe index fingertip — hand 2's cursor on the color wheel. */
+/** MediaPipe index fingertip — the pointing hand's cursor on the color wheel. */
 const INDEX_TIP = 8;
 
 /**
- * The hand currently holding the SELECT-mode pinch on the selected mesh.
- * While it is set, the *other* hand's index fingertip drives the color
- * wheel, and that hand's pinch (confirming a hue) never steals the drag.
+ * The hand currently holding the SELECT-mode drag on the selected mesh (a
+ * quick tap-select leaves it null). The pointing hand driving the color
+ * cursor is any hand other than this one.
  */
 let selectHand: Handedness | null = null;
+
+/**
+ * The color wheel was dismissed by a completed timed hover lock: it stays
+ * hidden until the pointing gesture ends or a fresh object is grabbed
+ * (the interaction resets after a color is locked in).
+ */
+let colorPicked = false;
+
+/** Timestamp of the previous frame processed by the selection UI (dwell clock). */
+let lastSelectionStamp: number | null = null;
 
 /**
  * Device space (the webcam frame; [-1, 1], +Y up) → viewport-local CSS px,
@@ -162,27 +211,39 @@ function deviceToViewport(x: number, y: number): { x: number; y: number } {
 // - SELECT: a quick pinch on a committed mesh selects it (the selection stays
 //   after release, so its color can be changed); pinch and *hold* to move it
 //   (ground plane or vertical lift, per the active constraint toggle) and
-//   release to drop it. A pinch on empty ground deselects. A pinch landing
-//   on the floating color wheel repaints the selection with the hue beneath
-//   it instead of re-picking the 3D scene behind the disc, and only the hand
-//   that grabbed the mesh drags it — the other hand stays free to pick colors.
+//   release to drop it. A pinch on empty ground deselects. The wheel is a
+//   UI surface — a pinch over the disc never re-picks the 3D scene behind it
+//   (color selection is a timed hover, not a pinch) — and a pinch on the
+//   selection HUD's Delete button requests deletion through the
+//   confirmation dialog, never an instant erase. Only the hand that grabbed
+//   the mesh drags it — the other hand stays free to pick colors.
 // Overlay buttons are pressed only by a pointing hand (index finger up), never
 // by a pinch, so pinches always act on the scene.
 // - CREATE: draw a footprint (pinch start/drag raycast onto the ground plane).
 engine.onPinchStart((e) => {
+  const point = deviceToViewport(e.position.x, e.position.y);
+  if (confirmDialog.isOpen) {
+    // Modal: while the delete confirmation is open, a pinch may only answer
+    // it — the scene below stays frozen.
+    if (confirmDialog.hitConfirm(point.x, point.y)) confirmDeleteSelection();
+    else if (confirmDialog.hitCancel(point.x, point.y)) cancelDeleteSelection();
+    return;
+  }
   if (engine.mode === 'select') {
-    const point = deviceToViewport(e.position.x, e.position.y);
-    const wheelColor = colorWheel.pickColorAt(point.x, point.y);
-    if (wheelColor) {
-      builder.setSelectedColor(wheelColor);
+    if (colorWheel.pickColorAt(point.x, point.y) !== null) return;
+    if (selectionMenu.hitDelete(point.x, point.y)) {
+      requestDeleteSelection();
       return;
     }
-    selectHand = builder.pickAt(e.position.x, e.position.y, e.timestamp) ? e.hand : null;
+    const picked = builder.pickAt(e.position.x, e.position.y, e.timestamp);
+    selectHand = picked ? e.hand : null;
+    if (picked) colorPicked = false; // fresh grab re-arms the color wheel
   } else {
     builder.onPinchStart(e.position.x, e.position.y);
   }
 });
 engine.onPinchDrag((e) => {
+  if (confirmDialog.isOpen) return; // modal: the scene is frozen while confirming
   if (engine.mode === 'select') {
     // Only the grabbing hand drags the mesh; hand 2 hovering (or confirming
     // a color on the wheel) never fights the drag.
@@ -267,20 +328,25 @@ engine.on('mode_change', (event) => {
   builder.endDrag();
   if (event.to !== 'select') builder.deselect();
   selectHand = null; // the next frame hides the wheel outside SELECT mode
+  colorPicked = false;
+  lastSelectionStamp = null;
   statusOutput.dataset.mode = event.to;
   setStatus(`Mode: ${event.to.toUpperCase()} — State: ${engine.state}`);
 });
 
-// Debug overlay: re-render on every processed frame; the SELECT-mode color
-// wheel rides along — re-anchored beside the selection's live screen
-// projection and repainting the mesh under the other hand's index fingertip.
+// Debug overlay: re-render on every processed frame; the SELECT-mode
+// selection UI rides along — color wheel + Delete HUD re-anchored beside the
+// selection's live screen projection, with the pointing index fingertip
+// driving the timed hover color lock. The selection UI updates *before* the
+// overlay renders so the thumbnail HUD (wheel outline + Delete mirror) is
+// drawn from the same frame's geometry, never a frame stale.
 engine.on('frame', (event) => {
   if (event.type !== 'frame') return;
   // Hand coords live in the webcam frame: keep the scene's interaction
   // camera at the webcam aspect (true AR proportions, aligned picking).
   if (event.video.height > 0) cadScene.setInteractionAspect(event.video.width / event.video.height);
+  updateSelectionUi(event);
   overlay.render(event);
-  updateColorWheel(event);
 });
 
 // Start in VIEW mode (pure camera navigation): nothing can be created or
@@ -288,30 +354,147 @@ engine.on('frame', (event) => {
 engine.setMode('view');
 
 /**
- * SELECT-mode color wheel: anchored adjacent to the selected mesh's live
- * screen projection (it tracks drags and camera orbits). A *pointing* index
- * fingertip is the live color cursor — every hue it sweeps over repaints the
- * mesh instantly — whether the selection was made with a quick pinch and
- * released, or is still held by the other hand. Hidden outside SELECT mode
- * or when nothing is selected.
+ * Delete flow (SELECT mode): every trigger — the selection HUD's Delete
+ * button (mouse or pinch), or the Delete / Backspace keys — routes through
+ * this confirmation gate; the mesh is only removed on Confirm.
  */
-function updateColorWheel(frame: FrameEvent): void {
+function requestDeleteSelection(): void {
+  if (confirmDialog.isOpen) return;
+  if (engine.mode !== 'select' || !builder.selectedMesh) return;
+  confirmDialog.open();
+}
+
+/** Confirmation answered with Confirm: remove the selected object. */
+function confirmDeleteSelection(): void {
+  if (!confirmDialog.isOpen) return;
+  confirmDialog.close();
+  builder.deleteSelectedMesh();
+  selectHand = null; // the drag died with the object
+  colorPicked = false;
+  lastSelectionStamp = null;
+  colorWheel.hide();
+  selectionMenu.hide();
+  setStatus('Object deleted');
+}
+
+/** Confirmation answered with Cancel: the object stays, nothing changes. */
+function cancelDeleteSelection(): void {
+  if (!confirmDialog.isOpen) return;
+  confirmDialog.close();
+}
+
+/**
+ * SELECT-mode selection UI: the color wheel + Delete HUD float beside the
+ * selected mesh's live screen projection (they track drags and camera
+ * orbits). A *pointing* index fingertip is the live color cursor — hues
+ * repaint the mesh as it sweeps — and dwelling on one color slice for 1.2 s
+ * locks the color in: it is applied and saved to the object, the wheel
+ * disappears, and the interaction resets (the wheel re-arms once the
+ * pointing gesture ends or a fresh object is grabbed). The same fingertip
+ * dwelling on the Delete button for ~0.8 s requests deletion through the
+ * confirmation dialog — finger-interactive alongside mouse, pinch and
+ * keyboard. Hidden while the delete confirmation is open (modal), outside
+ * SELECT mode, or when nothing is selected.
+ */
+function updateSelectionUi(frame: FrameEvent): void {
+  const dtMs =
+    lastSelectionStamp === null ? 0 : Math.max(0, frame.timestamp - lastSelectionStamp);
+  lastSelectionStamp = frame.timestamp;
   const anchor =
-    engine.mode === 'select'
+    !confirmDialog.isOpen && engine.mode === 'select'
       ? builder.selectedProjection(viewportElement.clientWidth, viewportElement.clientHeight)
       : null;
   if (!anchor) {
     colorWheel.hide();
+    selectionMenu.hide();
+    return;
+  }
+  // Cursor: a pointing hand that is not holding the selection pinch.
+  const cursor = frame.hands.find((hand) => hand.pointing && hand.handedness !== selectHand);
+  // The color-picking interaction resets once the pointing gesture ends.
+  if (colorPicked && cursor === undefined) colorPicked = false;
+  const fingertip = cursor?.landmarks[INDEX_TIP];
+  const point = fingertip ? deviceToViewport(fingertip.device.x, fingertip.device.y) : null;
+  // Finger-interactive delete: a pointing fingertip dwelling on the Delete
+  // button triggers the (confirmation-gated) delete request.
+  if (selectionMenu.advanceDeleteDwell(point, dtMs)) {
+    requestDeleteSelection();
+    return;
+  }
+  if (colorPicked) {
+    colorWheel.hide(); // dismissed after a completed timed hover lock
+    selectionMenu.show(anchor.x, anchor.y);
     return;
   }
   colorWheel.show(anchor.x, anchor.y);
-  // Cursor: a pointing hand that is not holding the selection pinch.
-  const cursor = frame.hands.find((hand) => hand.pointing && hand.handedness !== selectHand);
-  const fingertip = cursor?.landmarks[INDEX_TIP];
-  if (!fingertip) return;
-  const point = deviceToViewport(fingertip.device.x, fingertip.device.y);
+  selectionMenu.show(anchor.x, anchor.y);
+  if (!point) {
+    colorWheel.advanceDwell(null, dtMs); // hover lost: the dwell clock resets
+    return;
+  }
   const hex = colorWheel.pickColorAt(point.x, point.y);
-  if (hex) builder.setSelectedColor(hex);
+  const committed = colorWheel.advanceDwell(hex, dtMs);
+  if (committed !== null) {
+    // Timed hover lock complete: apply + save, dismiss the wheel, reset.
+    builder.setSelectedColor(committed);
+    colorPicked = true;
+    colorWheel.hide();
+    setStatus('Color locked');
+    return;
+  }
+  if (hex) builder.setSelectedColor(hex); // live preview while sweeping
+}
+
+/**
+ * One frame of the camera-thumbnail selection HUD: the *real* color wheel
+ * and Delete button placements (viewport-local px) inverse-mapped into
+ * device space via `CadScene.canvasToDevice` — the exact inverse of the
+ * mapping the pointing fingertip travels — so the thumbnail's drawn
+ * controls sit precisely where the finger has to point. Null hides the HUD
+ * (no selection, outside SELECT mode, or while the delete confirmation
+ * dialog freezes the scene).
+ */
+function selectionHudFrame(): OverlaySelectionHud | null {
+  if (engine.mode !== 'select' || !builder.selectedMesh || confirmDialog.isOpen) return null;
+  const width = viewportElement.clientWidth;
+  const height = viewportElement.clientHeight;
+  if (width <= 0 || height <= 0) return null;
+  const toDevice = (px: number, py: number) => cadScene.canvasToDevice(px, py, width, height);
+
+  let wheel: OverlayHudDisc | null = null;
+  const wheelCenter = colorWheel.center;
+  if (wheelCenter) {
+    const center = toDevice(wheelCenter.x, wheelCenter.y);
+    // The disc's px radius maps to different device extents on each axis.
+    const rimX = toDevice(wheelCenter.x + colorWheel.radius, wheelCenter.y);
+    const rimY = toDevice(wheelCenter.x, wheelCenter.y + colorWheel.radius);
+    wheel = {
+      x: center.x,
+      y: center.y,
+      radiusX: Math.abs(rimX.x - center.x),
+      radiusY: Math.abs(rimY.y - center.y),
+    };
+  }
+
+  let deleteButton: OverlayHudRect | null = null;
+  const rect = selectionMenu.deleteRect;
+  if (rect) {
+    const topLeft = toDevice(rect.x, rect.y);
+    const bottomRight = toDevice(rect.x + rect.width, rect.y + rect.height);
+    deleteButton = {
+      x: Math.min(topLeft.x, bottomRight.x),
+      y: Math.min(topLeft.y, bottomRight.y),
+      width: Math.abs(bottomRight.x - topLeft.x),
+      height: Math.abs(bottomRight.y - topLeft.y),
+    };
+  }
+
+  return {
+    wheel,
+    deleteButton,
+    wheelProgress: colorWheel.dwellProgress,
+    deleteProgress: selectionMenu.deleteDwellProgress,
+  };
 }
 
 /** Start webcam + hand tracking (invoked from the toolbar). */
@@ -337,7 +520,10 @@ function stopCamera(): void {
   builder.cancel(); // drop any pending preview so the scene stays clean
   builder.deselect(); // no lingering selection highlight once tracking stops
   selectHand = null;
+  colorPicked = false;
+  lastSelectionStamp = null;
   colorWheel.hide(); // tracking stopped: the floating wheel must not linger
+  selectionMenu.hide(); // …nor the selection HUD
   toolbar.setCameraRunning(false);
   statusOutput.dataset.state = 'IDLE';
   statusOutput.title = '';
@@ -346,8 +532,11 @@ function stopCamera(): void {
   if (ctx) ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
 }
 
-// Floating camera thumbnail: toggle between PiP and expanded states.
+// Floating camera thumbnail: toggle between PiP and expanded states. A
+// manual drag-resize leaves an inline width behind — clear it so the preset
+// CSS sizes take over again.
 thumbExpand.addEventListener('click', () => {
+  visionThumb.style.width = '';
   const expanded = visionThumb.classList.toggle('expanded');
   thumbExpand.textContent = expanded ? '⤡' : '⤢';
   thumbExpand.title = expanded ? 'Collapse camera thumbnail' : 'Expand camera thumbnail';
@@ -356,6 +545,29 @@ thumbExpand.addEventListener('click', () => {
 
 // Expose for experimentation from the browser console.
 Object.assign(window, {
-  cadVision: { engine, overlay, cadScene, builder, toolbar, colorWheel },
+  cadVision: { engine, overlay, cadScene, builder, toolbar, colorWheel, selectionMenu, confirmDialog, thumbResizer },
+});
+
+// Keyboard shortcuts: Delete / Backspace delete the selected object through
+// the same confirmation gate as the HUD button; while the confirmation is
+// open, Enter (or Delete again) confirms and Escape cancels.
+document.addEventListener('keydown', (event) => {
+  if (event.repeat) return; // a held key never double-answers
+  const key = event.key;
+  if (confirmDialog.isOpen) {
+    if (key === 'Escape') {
+      event.preventDefault();
+      cancelDeleteSelection();
+    } else if (key === 'Enter' || key === 'Delete' || key === 'Backspace') {
+      event.preventDefault();
+      confirmDeleteSelection();
+    }
+    return;
+  }
+  if ((key === 'Delete' || key === 'Backspace') && engine.mode === 'select') {
+    if (!builder.selectedMesh) return;
+    event.preventDefault();
+    requestDeleteSelection();
+  }
 });
 

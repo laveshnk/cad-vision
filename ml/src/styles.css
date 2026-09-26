@@ -196,6 +196,40 @@ button:disabled {
   border-radius: 6px;
 }
 
+/* Mouse-resize grip for the camera thumbnail (bottom-right corner of the
+   video stage): diagonal hatch clipped to a corner triangle. The overlay
+   canvas beneath keeps pointer events for its own buttons — the grip sits on
+   top and owns the drag (pointer capture keeps it even outside the card). */
+.thumb-resize {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  z-index: 5;
+  width: 24px;
+  height: 24px;
+  cursor: nwse-resize;
+  touch-action: none; /* the grip is a pointer drag, not a scroll */
+  background: repeating-linear-gradient(
+    135deg,
+    rgba(15, 23, 42, 0.45) 0 1.5px,
+    transparent 1.5px 5px
+  );
+  clip-path: polygon(100% 0, 100% 100%, 0 100%);
+}
+
+.thumb-resize:hover {
+  background: repeating-linear-gradient(
+    135deg,
+    rgba(2, 132, 199, 0.9) 0 1.5px,
+    transparent 1.5px 5px
+  );
+}
+
+/* While dragging: the card tracks the cursor 1:1 (no width transition). */
+.vision-thumb--resizing {
+  transition: none;
+}
+
 /* ---- Vision stage (webcam + 2D overlay) ---- */
 .stage {
   position: relative;
@@ -308,7 +342,8 @@ button:disabled {
   /* Below the camera thumbnail (z-index 30) — the control surface wins. */
   z-index: 20;
   border-radius: 50%;
-  overflow: hidden;
+  /* No overflow clip: the canvas paints its own soft circular rim, so the
+     hover cursor's countdown ring may overhang the disc edge. */
   box-shadow:
     0 6px 20px rgba(15, 23, 42, 0.28),
     inset 0 0 0 1px rgba(255, 255, 255, 0.9);
@@ -330,15 +365,12 @@ button:disabled {
   display: block;
 }
 
-/* Live hover cursor: the second hand's index fingertip on the disc. */
+/* Live hover cursor: the pointing hand's index fingertip on the disc, with
+   the timed hover lock's countdown ring around it. */
 .color-wheel-cursor {
   position: absolute;
-  width: 11px;
-  height: 11px;
-  border-radius: 50%;
-  background: #ffffff;
-  border: 2px solid #ffffff;
-  box-shadow: 0 0 0 1.5px rgba(15, 23, 42, 0.6);
+  width: 28px;
+  height: 28px;
   transform: translate(-50%, -50%);
   opacity: 0;
   transition: opacity 120ms ease;
@@ -346,6 +378,144 @@ button:disabled {
 
 .color-wheel-cursor--visible {
   opacity: 1;
+}
+
+.color-wheel-ring {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.color-wheel-ring-track {
+  fill: none;
+  stroke: rgba(15, 23, 42, 0.35);
+  stroke-width: 3;
+}
+
+/* Countdown arc: stroke-dashoffset is driven from TypeScript (pathLength 100). */
+.color-wheel-ring-fill {
+  fill: none;
+  stroke: #ffffff;
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-dasharray: 100;
+  stroke-dashoffset: 100;
+  transform: rotate(-90deg);
+  transform-origin: center;
+}
+
+.color-wheel-dot {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: #ffffff;
+  border: 2px solid #ffffff;
+  box-shadow: 0 0 0 1.5px rgba(15, 23, 42, 0.6);
+  transform: translate(-50%, -50%);
+}
+
+/* ---- Floating selection action HUD (SELECT mode Delete button) ---- */
+.selection-menu {
+  position: absolute;
+  /* Below the camera thumbnail (z-index 30) — the control surface wins. */
+  z-index: 20;
+  transform: translate(-50%, -50%);
+  opacity: 0;
+  transition: opacity 140ms ease;
+  pointer-events: none;
+}
+
+.selection-menu--visible {
+  opacity: 1;
+}
+
+.selection-menu-delete {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 11px;
+  font-size: 12px;
+  border-radius: 7px;
+  border: 1px solid rgba(185, 28, 28, 0.35);
+  background: rgba(255, 255, 255, 0.92);
+  color: #b91c1c;
+  box-shadow: 0 3px 12px rgba(15, 23, 42, 0.18);
+  /* The one mouse-interactive piece of the selection HUD. */
+  pointer-events: auto;
+}
+
+.selection-menu-delete:hover {
+  background: #fef2f2;
+  border-color: #b91c1c;
+  color: #dc2626;
+}
+
+/* ---- Modal confirm dialog (destructive action safety) ---- */
+.confirm-dialog {
+  position: absolute;
+  inset: 0;
+  /* Above the camera thumbnail (z-index 30): a modal confirmation outranks
+     every floating surface. */
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.confirm-dialog--open {
+  visibility: visible;
+  pointer-events: auto;
+}
+
+.confirm-dialog-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.32);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+}
+
+.confirm-dialog-card {
+  position: relative;
+  max-width: 340px;
+  margin: 16px;
+  padding: 18px 20px;
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(12px) saturate(140%);
+  -webkit-backdrop-filter: blur(12px) saturate(140%);
+  border: 1px solid rgba(15, 23, 42, 0.1);
+  border-radius: 12px;
+  box-shadow: 0 12px 40px rgba(15, 23, 42, 0.28);
+}
+
+.confirm-dialog-message {
+  margin: 0 0 14px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.confirm-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.confirm-dialog-confirm {
+  color: #b91c1c;
+  border-color: rgba(185, 28, 28, 0.45);
+}
+
+.confirm-dialog-confirm:hover {
+  color: #dc2626;
+  background: #fef2f2;
+  border-color: #b91c1c;
 }
 
 /* ---- Footer ---- */
