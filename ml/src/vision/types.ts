@@ -11,6 +11,15 @@
 /** Handedness label (after mirroring correction, i.e. the user's physical hand). */
 export type Handedness = 'Left' | 'Right';
 
+/**
+ * Application interaction mode. Partitions gesture routing:
+ * - `view`:   camera navigation only — pinches are inert;
+ * - `select`: pinches pick / drag committed meshes;
+ * - `create`: pinches draw footprints and extrude new primitives.
+ * Camera gestures (fist orbit / two-fist zoom) stay live in every mode.
+ */
+export type InteractionMode = 'view' | 'select' | 'create';
+
 export interface Vec2 {
   x: number;
   y: number;
@@ -55,8 +64,18 @@ export interface HandFrame {
   landmarks: Landmark[];
 }
 
-/** High-level CAD gesture state driven by the classifier's finite state machine. */
-export type GestureState = 'IDLE' | 'DRAWING_BASE' | 'EXTRUDING' | 'ORBITING' | 'ZOOMING';
+/**
+ * High-level CAD gesture state driven by the classifier's finite state machine.
+ * `SELECTING` is the select-mode analogue of `DRAWING_BASE`: a held pinch picks
+ * / drags an existing mesh instead of drawing a new one.
+ */
+export type GestureState =
+  | 'IDLE'
+  | 'DRAWING_BASE'
+  | 'SELECTING'
+  | 'EXTRUDING'
+  | 'ORBITING'
+  | 'ZOOMING';
 
 export interface PinchStartEvent {
   type: 'pinch_start';
@@ -216,6 +235,14 @@ export interface StateChangeEvent {
   reason: string;
 }
 
+/** The active interaction mode changed (VIEW / SELECT / CREATE). */
+export interface ModeChangeEvent {
+  type: 'mode_change';
+  timestamp: number;
+  from: InteractionMode;
+  to: InteractionMode;
+}
+
 /** Per-hand snapshot for the debug overlay / HUD. */
 export interface HandSnapshot {
   handedness: Handedness;
@@ -252,6 +279,8 @@ export interface FrameEvent {
   type: 'frame';
   timestamp: number;
   state: GestureState;
+  /** Active interaction mode (drives the overlay's mode buttons). */
+  mode: InteractionMode;
   hands: HandSnapshot[];
   metrics: GestureMetrics;
   fps: number;
@@ -272,7 +301,8 @@ export type GestureSignalEvent =
   | ZoomStartEvent
   | ZoomEvent
   | ZoomEndEvent
-  | StateChangeEvent;
+  | StateChangeEvent
+  | ModeChangeEvent;
 
 /** Every event the engine can emit. */
 export type GestureEvent = GestureSignalEvent | FrameEvent;

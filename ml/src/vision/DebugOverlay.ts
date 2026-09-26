@@ -4,6 +4,12 @@
  * Draws the mirrored webcam landmarks (21 per hand) with the MediaPipe skeleton,
  * pinch indicators, and a HUD with live metrics. Pure Canvas 2D — no WebGL.
  *
+ * Along the top edge it renders the interaction-mode switcher ([ VIEW ],
+ * [ SELECT ], [ CREATE ]): boxy, mutually exclusive toggle buttons that
+ * respond to mouse clicks, an index-tip dwell (>= `dwellMs`) or a pinch —
+ * reported through the `onModeRequest` callback. The stats HUD is anchored
+ * bottom-left so the buttons own the top edge.
+ *
  * Alignment: the <video> is CSS-mirrored (`scaleX(-1)`) and displayed with
  * `object-fit: cover`, which center-crops it into its container (the floating
  * camera thumbnail, or that thumbnail expanded). The canvas backing store
@@ -15,7 +21,7 @@
  */
 
 import { HandLandmarker } from '@mediapipe/tasks-vision';
-import type { FrameEvent, GestureState, HandSnapshot } from './types';
+import type { FrameEvent, GestureState, HandSnapshot, InteractionMode } from './types';
 
 const THUMB_TIP = 4;
 const INDEX_TIP = 8;
@@ -27,10 +33,14 @@ export interface SkeletonConnection {
   end: number;
 }
 
-/** State color-coding: green = pinch/draw, blue = orbit, purple = zoom, yellow = idle. */
+/**
+ * State color-coding: green = pinch/draw, cyan = select, blue = orbit,
+ * purple = zoom, yellow = idle.
+ */
 export const STATE_COLORS: Record<GestureState, string> = {
   IDLE: '#facc15', // yellow
   DRAWING_BASE: '#22c55e', // green
+  SELECTING: '#06b6d4', // cyan
   EXTRUDING: '#f97316', // orange
   ORBITING: '#3b82f6', // blue
   ZOOMING: '#a855f7', // purple
@@ -44,6 +54,9 @@ interface HandStyle {
 }
 
 function styleFor(hand: HandSnapshot, state: GestureState): HandStyle {
+  if (state === 'SELECTING') {
+    return { skeleton: '#06b6d4', joint: '#67e8f9', jointFill: '#a5f3fc', label: '#06b6d4' };
+  }
   if (hand.pinchActive || state === 'DRAWING_BASE' || state === 'EXTRUDING') {
     return { skeleton: '#22c55e', joint: '#86efac', jointFill: '#bbf7d0', label: '#22c55e' };
   }
@@ -68,18 +81,75 @@ interface ViewTransform {
   dispH: number;
 }
 
+/** Options for the debug overlay. */
+export interface DebugOverlayOptions {
+  /** Hand skeleton connections (defaults to MediaPipe HAND_CONNECTIONS). */
+  connections?: ReadonlyArray<SkeletonConnection>;
+  /**
+   * Called when a mode button is activated — via mouse click, index-tip
+   * dwell (>= `dwellMs` over the button) or a pinch on the button. The host
+   * decides what to do with the request (typically `engine.setMode`).
+   */
+  onModeRequest?: (mode: InteractionMode) => void;
+  /** Index-tip dwell time (ms) before a hovered mode button activates. Default 500. */
+  dwellMs?: number;
+}
+
+/** A hit-testable rectangle in CSS pixels. */
+interface ButtonRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** Mode buttons, left to right, along the top edge of the overlay. */
+const MODE_BUTTONS: readonly InteractionMode[] = ['view', 'select', 'create'];
+
 export class DebugOverlay {
   private readonly canvas: HTMLCanvasElement;
   private readonly ctx: CanvasRenderingContext2D;
   private readonly connections: ReadonlyArray<SkeletonConnection>;
+  private readonly onModeRequest: ((mode: InteractionMode) => void) | null;
+  private readonly dwellMs: number;
+  /** Last rendered button rects (CSS px) — hit targets for mouse + finger. */
+  private buttonRects: ButtonRect[] = [];
+  /** Button the index tip is dwelling over (-1 = none). */
+  private dwellTarget = -1;
+  private dwellElapsed = 0;
+  private lastFrameTimestamp: number | null = null;
+  /** Latch: one pinch activates at most one button until it leaves the bar. */
+  private pinchLatched = false;
 
-  constructor(canvas: HTMLCanvasElement, connections?: ReadonlyArray<SkeletonConnection>) {
+  constructor(canvas: HTMLCanvasElement, options: DebugOverlayOptions = {}) {
     this.canvas = canvas;
     const ctx = canvas.getContext('2d');
     if (!ctx) throw new Error('DebugOverlay: 2D canvas context unavailable');
     this.ctx = ctx;
-    this.connections = connections ?? HandLandmarker.HAND_CONNECTIONS;
+    this.connections = options.connections ?? HandLandmarker.HAND_CONNECTIONS;
+    this.onModeRequest = options.onModeRequest ?? null;
+    this.dwellMs = options.dwellMs ?? 500;
+    canvas.addEventListener('click', this.onCanvasClick);
+    canvas.addEventListener('mousemove', this.onCanvasMouseMove);
   }
+
+  /** Detach the mode-button mouse listeners (the canvas stays with the host). */
+  dispose(): void {
+    this.canvas.removeEventListener('click', this.onCanvasClick);
+    this.canvas.removeEventListener('mousemove', this.onCanvasMouseMove);
+  }
+
+  /** Click anywhere inside a rendered mode button activates it. */
+  private readonly onCanvasClick = (event: MouseEvent): void => {
+    const index = this.hitButton(event.offsetX, event.offsetY);
+    if (index >= 0) this.requestMode(index);
+  };
+
+  /** Pointer feedback while hovering the mode buttons. */
+  private readonly onCanvasMouseMove = (event: MouseEvent): void => {
+    const hovering = this.hitButton(event.offsetX, event.offsetY) >= 0;
+    this.canvas.style.cursor = hovering ? 'pointer' : 'default';
+  };
 
   /** Render one frame of landmarks + HUD. */
   render(frame: FrameEvent): void {
@@ -91,7 +161,9 @@ export class DebugOverlay {
     }
     this.drawDualHandsLink(frame, view, cssWidth);
     this.drawZoomAnchor(frame, view);
-    this.drawHud(frame, cssWidth);
+    this.drawModeButtons(frame, cssWidth);
+    this.updateModeInteraction(frame, view);
+    this.drawHud(frame, cssWidth, cssHeight);
   }
 
   /**
@@ -285,10 +357,130 @@ export class DebugOverlay {
     ctx.fill();
   }
 
-  /** Rounded HUD panel (top-left, always inside the visible panel) with state, FPS, hands and live metrics. */
-  private drawHud(frame: FrameEvent, cssWidth: number): void {
+  /* ------------------------------------------------------------------ */
+  /* Mode switcher buttons (top edge of the overlay)                    */
+  /* ------------------------------------------------------------------ */
+
+  /** CSS-pixel hit test against the last rendered mode buttons. */
+  private hitButton(px: number, py: number): number {
+    for (let i = 0; i < this.buttonRects.length; i++) {
+      const r = this.buttonRects[i];
+      if (px >= r.x && px <= r.x + r.width && py >= r.y && py <= r.y + r.height) return i;
+    }
+    return -1;
+  }
+
+  private requestMode(index: number): void {
+    this.onModeRequest?.(MODE_BUTTONS[index]);
+  }
+
+  /**
+   * Finger interaction with the mode buttons: the index tip (landmark 8)
+   * dwelling over a button for `dwellMs` activates it; a pinch while the tip
+   * is over a button activates it immediately (latched once per pinch so the
+   * same pinch cannot scrub across buttons).
+   */
+  private updateModeInteraction(frame: FrameEvent, view: ViewTransform): void {
+    let dwellTarget = -1;
+    let pinchTarget = -1;
+    for (const hand of frame.hands) {
+      const tip = this.toCanvas(hand, INDEX_TIP, view);
+      const index = this.hitButton(tip.x, tip.y);
+      if (index < 0) continue;
+      if (dwellTarget < 0) dwellTarget = index;
+      if (pinchTarget < 0 && hand.pinchActive) pinchTarget = index;
+    }
+
+    if (pinchTarget >= 0 && !this.pinchLatched) {
+      this.requestMode(pinchTarget);
+      this.pinchLatched = true;
+    }
+    if (pinchTarget < 0) this.pinchLatched = false;
+
+    // Dwell clock from frame timestamps; capped so a stalled camera feed
+    // cannot complete a dwell in one jump.
+    const dt =
+      this.lastFrameTimestamp === null
+        ? 0
+        : Math.max(0, Math.min(frame.timestamp - this.lastFrameTimestamp, 500));
+    this.lastFrameTimestamp = frame.timestamp;
+    if (dwellTarget !== this.dwellTarget) {
+      this.dwellTarget = dwellTarget;
+      this.dwellElapsed = 0;
+    } else if (dwellTarget >= 0 && dt > 0) {
+      this.dwellElapsed += dt;
+    }
+    if (this.dwellTarget >= 0 && this.dwellElapsed >= this.dwellMs) {
+      this.requestMode(this.dwellTarget);
+      this.dwellTarget = -1;
+      this.dwellElapsed = 0;
+    }
+  }
+
+  /**
+   * Boxy mode switcher across the top edge: three sharp-cornered, mutually
+   * exclusive toggle buttons. The active one is inverted — solid light fill,
+   * dark text, high-contrast indicator bar — while a dwell fills a progress
+   * bar along the bottom edge of the hovered button.
+   */
+  private drawModeButtons(frame: FrameEvent, cssWidth: number): void {
+    const ctx = this.ctx;
+    const scale = this.fontScale(cssWidth);
+    const margin = Math.round(8 * scale);
+    const gap = Math.round(6 * scale);
+    const height = Math.max(22, Math.round(32 * scale));
+    const width = (cssWidth - margin * 2 - gap * (MODE_BUTTONS.length - 1)) / MODE_BUTTONS.length;
+
+    this.buttonRects = [];
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    MODE_BUTTONS.forEach((mode, i) => {
+      const x = margin + i * (width + gap);
+      this.buttonRects.push({ x, y: margin, width, height });
+      const label = `[ ${mode.toUpperCase()} ]`;
+      // Shrink the label to fit the button.
+      let fontSize = Math.max(9, Math.round(13 * scale));
+      ctx.font = `bold ${fontSize}px ui-monospace, monospace`;
+      while (fontSize > 8 && ctx.measureText(label).width > width - 8) {
+        fontSize -= 1;
+        ctx.font = `bold ${fontSize}px ui-monospace, monospace`;
+      }
+
+      const active = frame.mode === mode;
+      if (active) {
+        ctx.fillStyle = '#f8fafc'; // solid inverted background
+        ctx.fillRect(x, margin, width, height);
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = '#0f172a';
+        ctx.strokeRect(x + 1, margin + 1, width - 2, height - 2);
+        ctx.fillStyle = '#0284c7'; // high-contrast indicator bar
+        ctx.fillRect(x + 3, margin + height - 7, width - 6, 4);
+        ctx.fillStyle = '#0f172a';
+      } else {
+        const dwelling = this.dwellTarget === i;
+        ctx.fillStyle = dwelling ? 'rgba(15, 23, 42, 0.85)' : 'rgba(15, 23, 42, 0.6)';
+        ctx.fillRect(x, margin, width, height);
+        ctx.lineWidth = dwelling ? 2 : 1.5;
+        ctx.strokeStyle = dwelling ? '#e2e8f0' : 'rgba(148, 163, 184, 0.55)';
+        ctx.strokeRect(x + 1, margin + 1, width - 2, height - 2);
+        if (dwelling && this.dwellMs > 0) {
+          const progress = Math.min(1, this.dwellElapsed / this.dwellMs);
+          ctx.fillStyle = '#38bdf8';
+          ctx.fillRect(x + 2, margin + height - 5, (width - 4) * progress, 3);
+        }
+        ctx.fillStyle = dwelling ? '#f8fafc' : '#cbd5e1';
+      }
+      ctx.fillText(label, x + width / 2, margin + height / 2);
+    });
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
+  }
+
+  /** Rounded HUD panel (bottom-left, always inside the visible panel) with mode, state, FPS, hands and live metrics. */
+  private drawHud(frame: FrameEvent, cssWidth: number, cssHeight: number): void {
     const ctx = this.ctx;
     const lines: string[] = [];
+    lines.push(`MODE: ${frame.mode.toUpperCase()}`);
     lines.push(`STATE: ${frame.state}`);
     lines.push(`FPS: ${frame.fps.toFixed(1)}`);
     lines.push(
@@ -337,7 +529,9 @@ export class DebugOverlay {
     const panelHeight = lines.length * lineHeight + padding * 2;
 
     const x = 12;
-    const y = 12;
+    // The mode buttons own the top edge, so the stats panel is anchored to
+    // the bottom-left corner (clamped to stay inside the visible panel).
+    const y = Math.max(12, cssHeight - panelHeight - 12);
     ctx.fillStyle = 'rgba(3, 7, 18, 0.78)';
     ctx.strokeStyle = 'rgba(148, 163, 184, 0.22)';
     ctx.lineWidth = 1;

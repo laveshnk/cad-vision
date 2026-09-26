@@ -17,19 +17,6 @@ export interface ToolbarCallbacks {
   onCameraStop?: () => void;
 }
 
-interface ToolSpec {
-  id: ToolId;
-  label: string;
-  title: string;
-}
-
-const TOOLS: readonly ToolSpec[] = [
-  { id: 'box', label: 'Box', title: 'Box — two-hand pinch sizes a square base' },
-  { id: 'cuboid', label: 'Cuboid', title: 'Cuboid — two-hand pinch spans a rectangle base' },
-  { id: 'cylinder', label: 'Cylinder', title: 'Cylinder — two-hand pinch sizes a base circle' },
-  { id: 'sphere', label: 'Sphere', title: 'Sphere — pinch-drag a base circle' },
-];
-
 /** Lucide-style stroke icons (currentColor). */
 const ICONS = {
   logo: '<path d="M12 2 2 7l10 5 10-5-10-5Z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>',

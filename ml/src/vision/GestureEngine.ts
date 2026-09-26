@@ -11,6 +11,9 @@
  *     -> listeners (typed `on(...)` + convenience subscriptions)
  *
  * Device space is mirrored X in [-1, 1] with +Y up — ready for CAD viewports.
+ *
+ * Interaction modes (VIEW / SELECT / CREATE) partition gesture routing; switch
+ * at runtime with `setMode()` (see `GestureClassifier.setMode`).
  */
 
 import { buildLandmark } from './coordinates';
@@ -25,6 +28,7 @@ import type {
   GestureSignalEvent,
   GestureState,
   HandFrame,
+  InteractionMode,
   OrbitEvent,
   PinchDragEvent,
   PinchEndEvent,
@@ -43,6 +47,11 @@ export interface GestureEngineOptions {
   handedness?: HandednessStabilizerOptions;
   /** Gesture classification / FSM options (pinch hysteresis, fist, etc.). */
   classifier?: GestureClassifierOptions;
+  /**
+   * Initial interaction mode (VIEW / SELECT / CREATE). Defaults to `'create'`
+   * (the full legacy gesture set); switch at runtime with `setMode()`.
+   */
+  initialMode?: InteractionMode;
 }
 
 export type GestureListener = (event: GestureEvent) => void;
@@ -69,13 +78,31 @@ export class GestureEngine {
     this.tracker = new HandTracker(options.tracker);
     this.handednessStabilizer = new HandednessStabilizer(options.handedness);
     this.smootherBank = new HandSmootherBank(options.smoothing);
-    this.classifier = new GestureClassifier(options.classifier);
+    this.classifier = new GestureClassifier({
+      ...options.classifier,
+      initialMode: options.initialMode ?? options.classifier?.initialMode,
+    });
     this.tracker.onResults((hands, timestamp) => this.handleRawHands(hands, timestamp));
   }
 
   /** Current high-level gesture state. */
   get state(): GestureState {
     return this.classifier.currentState;
+  }
+
+  /** Current interaction mode (VIEW / SELECT / CREATE). */
+  get mode(): InteractionMode {
+    return this.classifier.currentMode;
+  }
+
+  /**
+   * Switch the active interaction mode (VIEW / SELECT / CREATE). Emits the
+   * transition events (synthetic pinch releases, state / mode changes) just
+   * like a processed frame would. Switching to the current mode is a no-op.
+   */
+  setMode(mode: InteractionMode): void {
+    const events = this.classifier.setMode(mode);
+    for (const event of events) this.emit(event);
   }
 
   get isRunning(): boolean {
@@ -183,6 +210,7 @@ export class GestureEngine {
       type: 'frame',
       timestamp: now,
       state: this.classifier.currentState,
+      mode: this.classifier.currentMode,
       hands: result.snapshots,
       metrics: result.metrics,
       fps: this.fpsEma,

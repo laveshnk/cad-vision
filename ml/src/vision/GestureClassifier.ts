@@ -6,10 +6,17 @@
  *      distance (EMA + hysteresis), fist detection (all fingers folded into
  *      the palm + thumb tucked, with enter/hold hysteresis), palm center.
  *   2. Lost-hand finalization (grace frames, then synthetic release events).
- *   3. State machine: IDLE <-> DRAWING_BASE <-> EXTRUDING <-> ORBITING <-> ZOOMING.
- *      One closed fist = ORBITING (camera navigation deltas); two closed
- *      fists = ZOOMING: the steadier fist is the anchor (pivot) and the other
- *      fist's motion relative to it drives zoom (distance) and turn (angle).
+ *   3. State machine: IDLE <-> DRAWING_BASE <-> EXTRUDING <-> ORBITING <-> ZOOMING
+ *      (+ SELECTING in select mode). One closed fist = ORBITING (camera
+ *      navigation deltas); two closed fists = ZOOMING: the steadier fist is
+ *      the anchor (pivot) and the other fist's motion relative to it drives
+ *      zoom (distance) and turn (angle).
+ *
+ * The classifier is mode-partitioned (`setMode`, VIEW / SELECT / CREATE):
+ * VIEW keeps pinches inert (pure navigation), SELECT maps a held pinch to the
+ * SELECTING state (mesh picking, no drawing / extrusion), CREATE keeps the
+ * full build gesture set. Camera gestures (fist orbit / two-fist zoom) stay
+ * live in every mode.
  *
  * The classifier is a pure function of its inputs: `process()` returns the
  * events to emit and never touches the DOM, which keeps it unit-testable.
@@ -34,6 +41,7 @@ import type {
   HandFrame,
   HandSnapshot,
   Handedness,
+  InteractionMode,
   Vec2,
   Vec3,
 } from './types';
@@ -106,6 +114,12 @@ export interface GestureClassifierOptions {
   orbitOpenPalmGraceFrames?: number;
   /** Frames a hand may vanish before its gesture state is finalized. */
   handLossGraceFrames?: number;
+  /**
+   * Initial interaction mode (VIEW / SELECT / CREATE). Defaults to
+   * `'create'` — the full legacy gesture set; switch at runtime with
+   * `setMode()`.
+   */
+  initialMode?: InteractionMode;
 }
 
 /** Per-hand temporal state carried across frames. */
@@ -177,6 +191,8 @@ export class GestureClassifier {
   > & { pinchDistanceSmoothing: number | null };
 
   private state: GestureState = 'IDLE';
+  /** Active interaction mode (VIEW / SELECT / CREATE). */
+  private mode: InteractionMode = 'create';
   /** Straightens the one-fist camera path; `null` = raw deltas. */
   private readonly cameraPath: PathStraightener | null;
   /** Raw cumulative palm path since the one-fist gesture started. */
@@ -235,10 +251,16 @@ export class GestureClassifier {
     };
     this.cameraPath =
       options.cameraPath === null ? null : new PathStraightener(options.cameraPath);
+    this.mode = options.initialMode ?? 'create';
   }
 
   get currentState(): GestureState {
     return this.state;
+  }
+
+  /** Active interaction mode (VIEW / SELECT / CREATE). */
+  get currentMode(): InteractionMode {
+    return this.mode;
   }
 
   reset(): void {
@@ -260,6 +282,57 @@ export class GestureClassifier {
     this.orbitRollTotal = 0;
     this.rollEngaged = false;
     this.resetCameraPath();
+  }
+
+  /**
+   * Switch the interaction mode (VIEW / SELECT / CREATE). Any in-flight pinch
+   * is force-released (synthetic `pinch_end`) and pinch-driven states fall
+   * back to IDLE, so a mode switch never leaves a build gesture running —
+   * camera gestures (orbit / zoom) are unaffected. Switching to the current
+   * mode is a no-op. The mode survives `reset()`.
+   * @returns the events to emit (the caller dispatches them).
+   */
+  setMode(mode: InteractionMode, timestamp: number = performance.now()): GestureSignalEvent[] {
+    if (mode === this.mode) return [];
+    const events: GestureSignalEvent[] = [];
+    this.abortPinches(timestamp, events);
+    if (
+      this.state === 'DRAWING_BASE' ||
+      this.state === 'EXTRUDING' ||
+      this.state === 'SELECTING'
+    ) {
+      if (this.state === 'EXTRUDING') this.clearExtrudeReference();
+      this.setState('IDLE', 'mode switched', timestamp, events);
+    }
+    events.push({ type: 'mode_change', timestamp, from: this.mode, to: mode });
+    this.mode = mode;
+    return events;
+  }
+
+  /**
+   * Force-release every active pinch (mode switches). Synthetic `pinch_end`s
+   * are emitted only when the outgoing mode emitted their `pinch_start`.
+   */
+  private abortPinches(timestamp: number, events: GestureSignalEvent[]): void {
+    for (const track of this.tracks.values()) {
+      if (!track.pinchActive) continue;
+      const startPos = track.pinchStartPos ?? track.lastPinchCenter;
+      if (startPos && this.mode !== 'view') {
+        const endPos = track.lastPinchCenter ?? startPos;
+        events.push({
+          type: 'pinch_end',
+          timestamp,
+          hand: track.handedness,
+          startPos,
+          endPos,
+          delta: subtract3(endPos, startPos),
+        });
+      }
+      track.pinchActive = false;
+      track.pinchConsumed = false;
+      track.pinchStartPos = null;
+      track.lastPinchCenter = null;
+    }
   }
 
   private resetCameraPath(): void {
@@ -370,6 +443,10 @@ export class GestureClassifier {
    * A pinch never engages while the hand is (becoming) a fist or the index
    * finger is folded into the palm — a thumb resting on a closed fist is not
    * a pinch.
+   *
+   * Pinch tracking always runs (metrics / overlay mode buttons need it), but
+   * in VIEW mode no `pinch_start` / `pinch_end` events are emitted — pinches
+   * are inert for pure navigation.
    */
   private updatePinch(
     track: HandTrack,
@@ -396,13 +473,15 @@ export class GestureClassifier {
         track.pinchActive = true;
         track.pinchStartPos = center;
         track.lastPinchCenter = center;
-        events.push({
-          type: 'pinch_start',
-          timestamp,
-          hand: track.handedness,
-          position: center,
-          distance: dist,
-        });
+        if (this.mode !== 'view') {
+          events.push({
+            type: 'pinch_start',
+            timestamp,
+            hand: track.handedness,
+            position: center,
+            distance: dist,
+          });
+        }
       }
     } else {
       track.lastPinchCenter = center;
@@ -411,14 +490,16 @@ export class GestureClassifier {
         track.pinchConsumed = false;
         const startPos = track.pinchStartPos ?? center;
         const endPos = center;
-        events.push({
-          type: 'pinch_end',
-          timestamp,
-          hand: track.handedness,
-          startPos,
-          endPos,
-          delta: subtract3(endPos, startPos),
-        });
+        if (this.mode !== 'view') {
+          events.push({
+            type: 'pinch_end',
+            timestamp,
+            hand: track.handedness,
+            startPos,
+            endPos,
+            delta: subtract3(endPos, startPos),
+          });
+        }
         track.pinchStartPos = null;
         track.lastPinchCenter = null;
       }
@@ -491,7 +572,7 @@ export class GestureClassifier {
   private finalizeTrack(track: HandTrack, timestamp: number, events: GestureSignalEvent[]): void {
     if (track.pinchActive) {
       const startPos = track.pinchStartPos ?? track.lastPinchCenter;
-      if (startPos) {
+      if (startPos && this.mode !== 'view') {
         const endPos = track.lastPinchCenter ?? startPos;
         events.push({
           type: 'pinch_end',
@@ -526,7 +607,12 @@ export class GestureClassifier {
     events: GestureSignalEvent[]
   ): void {
     // Active pinch tracks, including hands absent within the loss-grace window.
-    let activePinches = [...this.tracks.values()].filter((t) => t.pinchActive && !t.pinchConsumed);
+    // VIEW mode: pinches are inert — treated as absent, so navigation never
+    // enters a build state and a pinching hand cannot veto fist gestures.
+    let activePinches =
+      this.mode === 'view'
+        ? []
+        : [...this.tracks.values()].filter((t) => t.pinchActive && !t.pinchConsumed);
 
     // Two-hand build: the lower pinch released while the upper one is still
     // held ends the extrusion as a flat build; the upper pinch is consumed.
@@ -549,7 +635,7 @@ export class GestureClassifier {
       const hand = presentHands.get(this.orbitHand);
       const endReason = !track
         ? 'orbit hand lost'
-        : track.pinchActive
+        : this.mode !== 'view' && track.pinchActive
           ? 'pinch started while orbiting'
           : null;
 
@@ -592,12 +678,28 @@ export class GestureClassifier {
       this.handleZoom(presentHands, timestamp, events);
     }
 
-    // --- Pinch-driven states: DRAWING_BASE / EXTRUDING. ---
-    if (activePinches.length >= 2) {
+    // --- Pinch-driven states, partitioned by the interaction mode. ---
+    if (this.mode === 'select') {
+      // SELECT: pinches pick / drag meshes — a dedicated SELECTING state,
+      // never drawing or extruding. Each active pinch keeps reporting drag
+      // deltas so the app can follow the grabbed mesh.
+      if (activePinches.length >= 1) {
+        if (this.state !== 'SELECTING') {
+          this.setState('SELECTING', 'pinch engaged (select mode)', timestamp, events);
+        }
+        for (const track of activePinches) {
+          if (presentHands.has(track.handedness)) {
+            this.emitPinchDrag(track, timestamp, events);
+          }
+        }
+      } else if (this.state === 'SELECTING') {
+        this.setState('IDLE', 'pinch released', timestamp, events);
+      }
+    } else if (activePinches.length >= 2) {
       this.handleDualHandExtrude(activePinches, presentHands, timestamp, events);
     } else if (activePinches.length === 1) {
       this.handleSinglePinch(activePinches[0], presentHands, timestamp, events);
-    } else if (this.state === 'DRAWING_BASE') {
+    } else if (this.state === 'DRAWING_BASE' || this.state === 'SELECTING') {
       this.setState('IDLE', 'pinch released', timestamp, events);
     } else if (this.state === 'EXTRUDING') {
       events.push({
@@ -674,7 +776,7 @@ export class GestureClassifier {
     events: GestureSignalEvent[]
   ): void {
     const tracks = [...this.tracks.values()];
-    if (tracks.some((t) => t.pinchActive)) {
+    if (this.mode !== 'view' && tracks.some((t) => t.pinchActive)) {
       this.endZoom('pinch started while zooming', timestamp, events);
       return;
     }
@@ -889,19 +991,23 @@ export class GestureClassifier {
     if (this.state !== 'DRAWING_BASE') {
       this.setState('DRAWING_BASE', 'index pinch engaged', timestamp, events);
     }
+    this.emitPinchDrag(track, timestamp, events);
+  }
+
+  /** Emit a `pinch_drag` for an active pinch (drawing or selecting). */
+  private emitPinchDrag(track: HandTrack, timestamp: number, events: GestureSignalEvent[]): void {
     const startPos = track.pinchStartPos ?? track.lastPinchCenter;
     const currentPos = track.lastPinchCenter;
-    if (startPos && currentPos) {
-      events.push({
-        type: 'pinch_drag',
-        timestamp,
-        hand: track.handedness,
-        currentPos,
-        startPos,
-        delta: subtract3(currentPos, startPos),
-        distance: track.pinchDistance,
-      });
-    }
+    if (!startPos || !currentPos) return;
+    events.push({
+      type: 'pinch_drag',
+      timestamp,
+      hand: track.handedness,
+      currentPos,
+      startPos,
+      delta: subtract3(currentPos, startPos),
+      distance: track.pinchDistance,
+    });
   }
 
   private setState(
