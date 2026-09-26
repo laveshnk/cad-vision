@@ -48,6 +48,18 @@ export function ndcToCanvas(
 }
 
 /**
+ * Re-express an NDC x coordinate from one perspective frustum in another that
+ * shares the same camera pose and vertical field of view but has a different
+ * aspect (width / height). With the vertical extent fixed, horizontal NDC
+ * scales by the aspect ratio: `ndcX_to = ndcX_from * fromAspect / toAspect`
+ * (NDC y is unchanged). Used to map the webcam-frame interaction frustum onto
+ * the wider 3D viewport.
+ */
+export function remapNdcX(ndcX: number, fromAspect: number, toAspect: number): number {
+  return toAspect > 0 ? (ndcX * fromAspect) / toAspect : ndcX;
+}
+
+/**
  * Behind-camera cull. After the perspective divide, points behind the camera
  * project to an NDC depth beyond the far bound (`z > 1`); drawing them would
  * smear geometry across the canvas, so such points / segments are skipped.

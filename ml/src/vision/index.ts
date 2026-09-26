@@ -11,7 +11,7 @@ export type { HandTrackerOptions, HandResultHandler } from './HandTracker';
 export { HandednessStabilizer, chiralitySign } from './HandednessStabilizer';
 export type { HandednessStabilizerOptions } from './HandednessStabilizer';
 export { DebugOverlay, STATE_COLORS } from './DebugOverlay';
-export type { DebugOverlayOptions } from './DebugOverlay';
+export type { DebugOverlayOptions, OverlayShape, OverlayShapeIcon } from './DebugOverlay';
 export type {
   ArPoint,
   ArSegment,

@@ -6,8 +6,6 @@
  * `onCameraStop`. UI-only module — no vision or CAD imports.
  */
 
-export type ToolId = 'box' | 'cuboid' | 'cylinder' | 'sphere';
-
 export interface ToolbarCallbacks {
   onClearScene?: () => void;
   onExportStl?: () => void;
@@ -20,12 +18,6 @@ export interface ToolbarCallbacks {
 /** Lucide-style stroke icons (currentColor). */
 const ICONS = {
   logo: '<path d="M12 2 2 7l10 5 10-5-10-5Z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>',
-  box: '<path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/>',
-  cuboid:
-    '<path d="M2 9l5-4h15v10l-5 4H2Z"/><path d="M2 9h15v10"/><path d="M17 9l5-4"/>',
-  cylinder: '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/>',
-  sphere:
-    '<circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/>',
   clear:
     '<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M10 11v6"/><path d="M14 11v6"/>',
   export:

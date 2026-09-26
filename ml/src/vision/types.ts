@@ -280,6 +280,11 @@ export interface HandSnapshot {
   pinchDistance: number;
   pinchActive: boolean;
   fistActive: boolean;
+  /**
+   * Pointing pose (index finger up, the other fingers curled, no pinch;
+   * debounced) — the only pose that presses overlay UI buttons.
+   */
+  pointing: boolean;
   landmarks: Landmark[];
 }
 

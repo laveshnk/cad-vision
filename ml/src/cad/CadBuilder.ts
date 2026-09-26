@@ -40,17 +40,20 @@
  * outlines and adds it to the scene.
  *
  * Selection (SELECT mode):
- *   pickAt(x, y)         → raycast a device-space pinch position against the
+ *   pickAt(x, y, t)      → raycast a device-space pinch position against the
  *                          committed meshes: a hit selects that mesh
- *                          (highlighted) and anchors a ground-plane drag; a
- *                          miss clears the selection.
- *   dragTo(x, y)         → move the selected mesh so the grabbed point
- *                          follows the pinch, constrained by the active
- *                          drag constraint (`setDragConstraint`): 'xz' slides
- *                          across the ground plane with the elevation
- *                          locked at its current height; 'y' maps vertical
- *                          hand travel to a world-Y lift / lower (horizontal
- *                          drift ignored, never below the floor). Switching
+ *                          (highlighted) and arms a drag; a miss clears the
+ *                          selection. A quick pinch (tap) therefore just
+ *                          selects — the selection persists after release.
+ *   dragTo(x, y, t)      → once the pinch has been held for `dragHoldMs`,
+ *                          move the selected mesh so the grabbed point
+ *                          stays exactly under the pinch, constrained by the
+ *                          active drag constraint (`setDragConstraint`):
+ *                          'xz' slides it on a horizontal plane at the grab
+ *                          point's height (elevation locked), 'y' lifts /
+ *                          lowers it along a camera-facing vertical plane
+ *                          through the grab point (horizontal drift ignored,
+ *                          never below the floor). Switching
  *                          the constraint mid-drag re-anchors, so the mesh
  *                          never jerks or resets.
  *   rotateSelection(d)   → secondary-hand open-palm rotation: yaw the selected
@@ -118,6 +121,11 @@ export interface CadBuilderOptions {
   dragElevationScale?: number;
   /** Highest allowed mesh center height while drag-lifting (world units). */
   dragMaxHeight?: number;
+  /**
+   * SELECT mode: a pinch must be held this long (ms) before it starts moving
+   * the picked mesh, so a quick pinch only selects it. Default 300.
+   */
+  dragHoldMs?: number;
   /** Preview wireframe / fill color. */
   previewColor?: number;
   /** Committed mesh body color (dark gray matte). */
@@ -205,7 +213,20 @@ export class CadBuilder {
     maxY: number;
     lastX: number;
     lastY: number;
+    /** Pinch timestamp (ms) at grab time; moving starts `dragHoldMs` later. */
+    grabbedAt: number;
+    /** False while the pinch is still a possible tap (mesh stays put). */
+    moving: boolean;
+    /**
+     * Height of the grabbed surface point above the mesh origin: drags run
+     * on planes through that point, so it stays under the fingertip.
+     */
+    grabHeight: number;
+    /** Lift-plane hit height at the last anchor ('y' constraint), or null. */
+    liftStartY: number | null;
   } | null = null;
+  /** Scratch plane for grab-height / lift raycasts. */
+  private readonly dragPlane = new THREE.Plane();
   /** Active SELECT-mode drag constraint: ground plane ('xz') or Y axis ('y'). */
   private constraint: DragConstraint = 'xz';
   /** Yaw (radians) the open-palm rotation anchored at, or null when idle. */
@@ -232,6 +253,7 @@ export class CadBuilder {
       groundRadius: options.groundRadius ?? 16,
       dragElevationScale: options.dragElevationScale ?? 3,
       dragMaxHeight: options.dragMaxHeight ?? 5,
+      dragHoldMs: options.dragHoldMs ?? 300,
       previewColor: options.previewColor ?? 0x0284c7,
       bodyColor: options.bodyColor ?? 0x3f3f46,
       edgeColor: options.edgeColor ?? 0xc9d2de,
@@ -471,12 +493,15 @@ export class CadBuilder {
 
   /**
    * Raycast a device-space point against the committed meshes (SELECT mode).
-   * A hit selects that mesh and anchors a ground-plane drag at the pinch
-   * position; a miss clears the selection.
+   * A hit selects that mesh and arms a drag anchored at the pinch position
+   * (it starts moving only after `dragHoldMs`, see `dragTo`); a miss clears
+   * the selection.
+   * @param timestamp pinch start time (ms); omit to allow moving immediately.
    * @returns true if a mesh is now selected.
    */
-  pickAt(x: number, y: number): boolean {
-    this.raycaster.setFromCamera(this.ndc.set(x, y), this.scene.camera);
+  pickAt(x: number, y: number, timestamp = -Infinity): boolean {
+    // Hand coords are the webcam frame's device space = interaction-camera NDC.
+    this.raycaster.setFromCamera(this.ndc.set(x, y), this.scene.interactionCamera);
     const hits = this.raycaster.intersectObjects(this.committed, false);
     const mesh = hits.length > 0 ? (hits[0].object as THREE.Mesh) : null;
     if (!mesh) {
@@ -484,21 +509,27 @@ export class CadBuilder {
       return false;
     }
     this.select(mesh);
-    const grab = this.groundPoint(x, y);
-    // Lock the pinch offset relative to the mesh origin, plus the vertical
-    // (lift) anchor: the mesh may never sink below the ground plane.
+    // Lock the pinch offset relative to the mesh origin at the grabbed
+    // surface point's height, plus the vertical (lift) anchor: the mesh may
+    // never sink below the ground plane.
     const bottom = mesh.geometry.boundingBox?.min.y ?? 0;
     const minY = -bottom;
-    this.selectionDrag = {
-      offsetX: mesh.position.x - grab.x,
-      offsetZ: mesh.position.z - grab.z,
+    const drag = {
+      offsetX: 0,
+      offsetZ: 0,
       baseY: mesh.position.y,
       startDeviceY: y,
       minY,
       maxY: Math.max(minY, this.options.dragMaxHeight),
       lastX: x,
       lastY: y,
+      grabbedAt: timestamp,
+      moving: false,
+      grabHeight: hits[0].point.y - mesh.position.y,
+      liftStartY: null,
     };
+    this.selectionDrag = drag;
+    this.reanchorDrag(mesh, drag);
     return true;
   }
 
@@ -512,23 +543,38 @@ export class CadBuilder {
    * - `'y'`: vertical hand travel lifts / lowers the mesh (scaled, clamped
    *   so it never sinks below the ground plane); horizontal drift is
    *   ignored (X / Z untouched).
+   *
+   * Hold-to-move: until the pinch has been held for `dragHoldMs` the mesh
+   * stays put (a quick pinch only selects); then the grabbed point follows
+   * the fingertip exactly (it catches up with any drift during the hold).
+   * @param timestamp current pinch time (ms); omit to skip the hold gate.
    */
-  dragTo(x: number, y: number): void {
+  dragTo(x: number, y: number, timestamp = Infinity): void {
     const mesh = this.selected;
     const drag = this.selectionDrag;
     if (!mesh || !drag) return;
     drag.lastX = x;
     drag.lastY = y;
+    if (!drag.moving) {
+      // Still a possible tap: the mesh stays put. The grab anchor is kept
+      // where the pinch landed, so once moving starts the grabbed point sits
+      // exactly under the fingertip again.
+      if (timestamp - drag.grabbedAt < this.options.dragHoldMs) return;
+      drag.moving = true;
+    }
     if (this.constraint === 'xz') {
-      const target = this.groundPoint(x, y);
+      const target = this.planePoint(x, y, mesh.position.y + drag.grabHeight);
       mesh.position.x = target.x + drag.offsetX;
       mesh.position.z = target.z + drag.offsetZ;
     } else {
-      mesh.position.y = THREE.MathUtils.clamp(
-        drag.baseY + (y - drag.startDeviceY) * this.options.dragElevationScale,
-        drag.minY,
-        drag.maxY
-      );
+      // The grabbed point follows the fingertip's height on the lift plane;
+      // fall back to scaled hand travel if the ray misses the plane.
+      const hitY = this.liftHitY(x, y, mesh, drag);
+      const lift =
+        hitY !== null && drag.liftStartY !== null
+          ? hitY - drag.liftStartY
+          : (y - drag.startDeviceY) * this.options.dragElevationScale;
+      mesh.position.y = THREE.MathUtils.clamp(drag.baseY + lift, drag.minY, drag.maxY);
     }
     if (this.rotating) this.updateRotationRing();
   }
@@ -550,11 +596,49 @@ export class CadBuilder {
     const mesh = this.selected;
     const drag = this.selectionDrag;
     if (!mesh || !drag) return;
-    const grab = this.groundPoint(drag.lastX, drag.lastY);
+    this.reanchorDrag(mesh, drag);
+  }
+
+  /**
+   * Re-anchor the drag offsets at the mesh's live position and the newest
+   * pinch position, so the next `dragTo` continues without a jump.
+   */
+  private reanchorDrag(
+    mesh: THREE.Mesh,
+    drag: NonNullable<CadBuilder['selectionDrag']>
+  ): void {
+    const grab = this.planePoint(drag.lastX, drag.lastY, mesh.position.y + drag.grabHeight);
     drag.offsetX = mesh.position.x - grab.x;
     drag.offsetZ = mesh.position.z - grab.z;
     drag.baseY = mesh.position.y;
     drag.startDeviceY = drag.lastY;
+    drag.liftStartY = this.liftHitY(drag.lastX, drag.lastY, mesh, drag);
+  }
+
+  /**
+   * Height where the pinch ray crosses the lift plane: the vertical plane
+   * through the grabbed point, facing the camera (horizontally). `null`
+   * when the ray runs parallel to it.
+   */
+  private liftHitY(
+    x: number,
+    y: number,
+    mesh: THREE.Mesh,
+    drag: NonNullable<CadBuilder['selectionDrag']>
+  ): number | null {
+    const camera = this.scene.interactionCamera;
+    this.raycaster.setFromCamera(this.ndc.set(x, y), camera);
+    const normal = camera.getWorldDirection(new THREE.Vector3()).setY(0);
+    if (normal.lengthSq() < 1e-8) return null;
+    normal.normalize();
+    const through = new THREE.Vector3(
+      mesh.position.x - drag.offsetX,
+      mesh.position.y + drag.grabHeight,
+      mesh.position.z - drag.offsetZ
+    );
+    this.dragPlane.setFromNormalAndCoplanarPoint(normal, through);
+    const hit = this.raycaster.ray.intersectPlane(this.dragPlane, new THREE.Vector3());
+    return hit ? hit.y : null;
   }
 
   /**
@@ -744,8 +828,37 @@ export class CadBuilder {
    * slightly downward so a ground hit always exists; the result is clamped
    * to the workspace radius.
    */
+  /**
+   * Raycast device coords onto the horizontal plane at `height` (the grabbed
+   * point's height), so a dragged object's grabbed point stays under the
+   * fingertip in depth as well as sideways. Clamped below the camera (a ray
+   * must be able to reach it) and to the workspace radius.
+   */
+  private planePoint(x: number, y: number, height: number): THREE.Vector3 {
+    if (height <= 1e-4) return this.groundPoint(x, y);
+    const camera = this.scene.interactionCamera;
+    this.raycaster.setFromCamera(this.ndc.set(x, y), camera);
+    const ray = this.raycaster.ray;
+    if (ray.direction.y > -0.05) {
+      ray.direction.y = -0.05;
+      ray.direction.normalize();
+    }
+    const planeHeight = Math.min(height, camera.position.y - 0.1);
+    this.dragPlane.set(new THREE.Vector3(0, 1, 0), -planeHeight);
+    const point = new THREE.Vector3();
+    if (!ray.intersectPlane(this.dragPlane, point)) return this.groundPoint(x, y);
+    const radius = Math.hypot(point.x, point.z);
+    const max = this.options.groundRadius;
+    if (radius > max) {
+      point.x = (point.x / radius) * max;
+      point.z = (point.z / radius) * max;
+    }
+    return point;
+  }
+
   private groundPoint(x: number, y: number): THREE.Vector3 {
-    this.raycaster.setFromCamera(this.ndc.set(x, y), this.scene.camera);
+    // Hand coords are the webcam frame's device space = interaction-camera NDC.
+    this.raycaster.setFromCamera(this.ndc.set(x, y), this.scene.interactionCamera);
     const ray = this.raycaster.ray;
     if (ray.direction.y > -0.05) {
       ray.direction.y = -0.05;
