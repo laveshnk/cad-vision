@@ -94,7 +94,7 @@ export class CadScene {
 
   constructor(container: HTMLElement, options: CadSceneOptions = {}) {
     this.options = {
-      background: options.background ?? 0x0b0e14,
+      background: options.background ?? 0xf1f5f9,
       cameraDistance: options.cameraDistance ?? 10,
       cameraAzimuth: options.cameraAzimuth ?? 0,
       cameraPolar: options.cameraPolar ?? 1.05,
@@ -138,7 +138,7 @@ export class CadScene {
 
     // Soft studio lighting: sky/ground hemisphere fill, shadow-casting key and
     // a cool rim light from the opposite side.
-    this.scene.add(new THREE.HemisphereLight(0x9db8dd, 0x0d1220, 0.5));
+    this.scene.add(new THREE.HemisphereLight(0xffffff, 0xd6dee9, 0.55));
     const key = new THREE.DirectionalLight(0xfff4e0, 1.5);
     key.position.set(7, 14, 8);
     key.castShadow = true;
@@ -160,8 +160,8 @@ export class CadScene {
     this.grid = new THREE.GridHelper(
       this.options.gridSize,
       this.options.gridDivisions,
-      0x5b6b85,
-      0x232e3d
+      0x94a3b8,
+      0xd3dbe5
     );
     this.grid.position.y = 0.002;
     const gridMaterial = this.grid.material as THREE.Material;
@@ -172,7 +172,7 @@ export class CadScene {
     // ShadowMaterial floor: invisible except where shadows land on it.
     this.ground = new THREE.Mesh(
       new THREE.PlaneGeometry(this.options.gridSize, this.options.gridSize),
-      new THREE.ShadowMaterial({ opacity: 0.35 })
+      new THREE.ShadowMaterial({ opacity: 0.28 })
     );
     this.ground.rotation.x = -Math.PI / 2;
     this.ground.receiveShadow = true;

@@ -3,7 +3,7 @@
 Self-contained TypeScript application that turns webcam hand tracking into an
 interactive CAD tool. The MediaPipe-based gesture engine emits **normalized CAD
 gesture events** (pinch/draw, extrude, camera move, zoom); a decoupled Three.js module
-(orbit rig, ground-plane building, STL export) and a glassmorphism toolbar
+(orbit rig, ground-plane building, STL export) and a light glass toolbar
 consume them. The camera renders as a floating video-call-style thumbnail
 (landmarks, skeleton, HUD overlay) over the full-bleed 3D viewport.
 
@@ -29,12 +29,12 @@ serving over the network needs HTTPS.
 ```
 src/
 ├── main.ts                    # app orchestrator: vision events → CAD + UI wiring
-├── styles.css                 # full-bleed viewport, floating camera thumbnail, glass toolbar
+├── styles.css                 # light theme; full-bleed viewport, camera thumbnail, glass toolbar
 ├── cad/
 │   ├── CadScene.ts            # Three.js viewport: camera rig, lights, grid, orbit
 │   └── CadBuilder.ts          # gesture-driven primitives + STL export
 ├── ui/
-│   └── Toolbar.ts             # CAD toolbar: camera start/stop, Box/Cylinder/Sphere, Clear, Export STL
+│   └── Toolbar.ts             # CAD toolbar: camera toggle, Clear scene, Export STL
 └── vision/
     ├── types.ts               # shared types + event payloads
     ├── coordinates.ts         # device-space mapping, vec3 math
@@ -67,7 +67,7 @@ the boundary):
 ```
 GestureEngine  --typed events-->  main.ts (orchestrator)
   ├── CadScene / CadBuilder      primitives, extrusion, orbit, STL export
-  └── Toolbar                    tool selection + scene utilities
+  └── Toolbar                    camera toggle + scene utilities
 ```
 
 ### Running mode note
@@ -185,10 +185,11 @@ as a floating thumbnail (top-left, click ⤢ to expand/collapse) over it:
    between `minDistance` and `maxDistance`), or circle it around the anchor
    to turn the scene (`CadScene.onRotate`).
 
-Toolbar (mouse or programmatic): **Start camera / Stop** (webcam + tracking
-lifecycle), **Box / Cylinder / Sphere** tool selection (swaps the in-progress
-preview too), **Clear scene**, and **Export STL** (binary `model.stl` download
-via `three/examples/jsm/exporters/STLExporter`).
+Toolbar (mouse or programmatic): a single **Start camera / Stop** toggle
+(webcam + tracking lifecycle), **Clear scene**, and **Export STL** (binary
+`model.stl` download via `three/examples/jsm/exporters/STLExporter`). New
+builds use the box primitive; cylinder / sphere remain selectable
+programmatically via `CadBuilder.setTool()`.
 
 ## Event API
 
