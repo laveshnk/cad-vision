@@ -8,7 +8,8 @@ consume them. The camera renders as a floating video-call-style thumbnail
 (landmarks, skeleton, HUD overlay) over the full-bleed 3D viewport.
 
 Three interaction modes — **VIEW** (camera navigation only), **SELECT**
-(pick / drag meshes) and **CREATE** (build primitives) — are switched with a
+(pick / drag / recolor meshes) and **CREATE** (build primitives) — are
+switched with a
 button bar on the camera overlay (mouse click, index-finger dwell, or pinch)
 and strictly partition which gestures can act on the scene.
 
@@ -41,7 +42,8 @@ src/
 │   ├── arProjection.ts        # pure NDC→canvas math + 2D convex hull (AR mirror)
 │   └── ArMirror.ts            # plain-data AR projection of grid + meshes for the overlay
 ├── ui/
-│   └── Toolbar.ts             # CAD toolbar: camera toggle, Clear scene, Export STL
+│   ├── Toolbar.ts             # CAD toolbar: camera toggle, Clear scene, Export STL
+│   └── ColorWheel.ts          # floating HSL color wheel (SELECT-mode live repaint)
 └── vision/
     ├── types.ts               # shared types + event payloads
     ├── coordinates.ts         # device-space mapping, vec3 math
@@ -200,7 +202,7 @@ mode is shown inverted with an indicator bar (and in the bottom-left HUD):
    cylinder/sphere: center + radius). It is committed with the default height on the next build or
    camera gesture; pinching the second hand before releasing replaces it
    with a two-hand build.
-4. **Select & move (SELECT mode)** — pinch over a committed mesh to pick it
+4. **Select, move & recolor (SELECT mode)** — pinch over a committed mesh to pick it
    up (highlighted); dragging the pinch moves it under the active
    **constraint toggle** (top-left of the vision overlay): `[ XZ PLANE ]`
    (default) slides it along the ground plane with the grab offset kept and
@@ -216,8 +218,16 @@ mode is shown inverted with an indicator bar (and in the bottom-left HUD):
    with the viewport. Keep the pinch held and show an **open palm** with
    your other hand: tilting it spins the selection around the vertical
    axis, with a compass ring (dashed circle + yaw needle) rendered around
-   the object in both the 3D viewport and the AR mirror. Pinches never draw
-   or extrude in this mode.
+   the object in both the 3D viewport and the AR mirror. A floating
+   **HSL color wheel** appears beside the selected mesh (tracking it
+   through drags and camera moves): keep the selection pinch held and
+   sweep the disc with your other hand's index fingertip — every hue
+   under the fingertip repaints the mesh live (angle = hue, radius =
+   saturation, wheel center = gray). Pinching directly on the wheel
+   confirms the color under the pinch instead of re-picking the scene
+   behind it, and only the grabbing hand's release ends the drag. The
+   wheel hides when the selection is cleared or the mode changes. Pinches
+   never draw or extrude in this mode.
 5. **Orbit the camera** — make a fist and move it: the camera orbits the
    world origin and the scene follows your hand — fist right swings the
    camera left, fist up swings it lower — with damping (`CadScene.onOrbit`);
@@ -339,7 +349,7 @@ The `<canvas id="overlay">` (pure Canvas 2D) mirrors the feed and draws:
 ## Tests
 
 ```bash
-npm test        # vitest — coordinates, filters, handedness stabilizer, path straightener, classifier/FSM unit tests
+npm test        # vitest — coordinates, filters, handedness stabilizer, path straightener, classifier/FSM + color-wheel math unit tests
 npm run build   # tsc --noEmit + vite production build
 ```
 
