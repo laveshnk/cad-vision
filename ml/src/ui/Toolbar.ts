@@ -1,17 +1,14 @@
 /**
- * Toolbar: CAD-styled glass header with camera controls, primitive tool
- * selection and scene utilities. Tools can be selected with the mouse or
- * programmatically via `setActiveTool` (e.g. from gesture shortcuts);
- * selection state is exposed through `onToolSelect`, scene commands through
+ * Toolbar: CAD-styled glass header with camera control and scene utilities.
+ * The camera control is a single toggle ("Start camera" ↔ "Stop") whose state
+ * is driven by `setCameraRunning`; scene commands are exposed through
  * `onClearScene` / `onExportStl`, camera lifecycle through `onCameraStart` /
- * `onCameraStop` (+ `setCameraRunning` to reflect state). UI-only module — no
- * vision or CAD imports.
+ * `onCameraStop`. UI-only module — no vision or CAD imports.
  */
 
 export type ToolId = 'box' | 'cuboid' | 'cylinder' | 'sphere';
 
 export interface ToolbarCallbacks {
-  onToolSelect?: (tool: ToolId) => void;
   onClearScene?: () => void;
   onExportStl?: () => void;
   /** Request webcam + hand tracking to start. */
@@ -60,10 +57,9 @@ function icon(id: keyof typeof ICONS): string {
 }
 
 export class Toolbar {
-  private readonly toolButtons = new Map<ToolId, HTMLButtonElement>();
   private readonly listeners: Array<() => void> = [];
-  private readonly cameraButtons: Array<HTMLButtonElement> = [];
-  private tool: ToolId = 'box';
+  private cameraButton: HTMLButtonElement | null = null;
+  private cameraRunning = false;
 
   constructor(
     private readonly root: HTMLElement,
@@ -72,30 +68,34 @@ export class Toolbar {
     this.mount();
   }
 
-  get activeTool(): ToolId {
-    return this.tool;
-  }
-
   /**
-   * Reflect camera / tracking state: while running, only "Stop" is enabled;
-   * when stopped, only "Start camera" is enabled.
+   * Reflect camera / tracking state: the single camera button flips between
+   * "Start camera" (idle) and "Stop" (running), so the visible action is
+   * always the one currently available.
    */
   setCameraRunning(running: boolean): void {
-    for (const button of this.cameraButtons) {
-      button.disabled = button.dataset.camera === 'stop' ? !running : running;
+    this.cameraRunning = running;
+    const button = this.cameraButton;
+    if (!button) return;
+    if (running) {
+      button.innerHTML = `${icon('stop')}<span>Stop</span>`;
+      button.title = 'Stop tracking and release the camera';
+      button.setAttribute('aria-label', button.title);
+      button.classList.remove('accent');
+      button.classList.add('danger');
+    } else {
+      button.innerHTML = `${icon('camera')}<span>Start camera</span>`;
+      button.title = 'Start webcam + hand tracking';
+      button.setAttribute('aria-label', button.title);
+      button.classList.remove('danger');
+      button.classList.add('accent');
     }
-  }
-
-  /** Programmatically select a tool (mirrors button state). */
-  setActiveTool(tool: ToolId): void {
-    if (this.tool === tool) return;
-    this.select(tool);
   }
 
   private mount(): void {
     this.root.classList.add('toolbar');
     this.root.setAttribute('role', 'toolbar');
-    this.root.setAttribute('aria-label', 'CAD tools');
+    this.root.setAttribute('aria-label', 'CAD controls');
 
     const brand = document.createElement('span');
     brand.className = 'toolbar-brand';
@@ -106,68 +106,56 @@ export class Toolbar {
     cameraGroup.className = 'toolbar-group';
     cameraGroup.setAttribute('role', 'group');
     cameraGroup.setAttribute('aria-label', 'Camera');
-    cameraGroup.appendChild(
-      this.createCameraButton('camera', 'Start camera', this.callbacks.onCameraStart, 'accent')
-    );
-    cameraGroup.appendChild(
-      this.createCameraButton('stop', 'Stop', this.callbacks.onCameraStop, 'danger')
-    );
+    cameraGroup.appendChild(this.createCameraToggle());
     this.root.appendChild(cameraGroup);
 
-    this.root.appendChild(this.createSeparator());
-
-    const toolGroup = document.createElement('div');
-    toolGroup.className = 'toolbar-group';
-    toolGroup.setAttribute('role', 'group');
-    toolGroup.setAttribute('aria-label', 'Primitive tools');
-    for (const spec of TOOLS) {
-      toolGroup.appendChild(this.createToolButton(spec));
-    }
-    this.root.appendChild(toolGroup);
-
-    this.root.appendChild(this.createSeparator());
+    const spacer = document.createElement('span');
+    spacer.className = 'toolbar-spacer';
+    this.root.appendChild(spacer);
 
     const utilityGroup = document.createElement('div');
     utilityGroup.className = 'toolbar-group';
     utilityGroup.setAttribute('role', 'group');
     utilityGroup.setAttribute('aria-label', 'Scene utilities');
     utilityGroup.appendChild(
-      this.createUtilityButton('clear', 'Clear scene', this.callbacks.onClearScene, 'danger')
+      this.createButton('clear', 'Clear scene', 'Clear scene', this.callbacks.onClearScene, 'danger')
     );
     utilityGroup.appendChild(
-      this.createUtilityButton('export', 'Export STL', this.callbacks.onExportStl, 'accent')
+      this.createButton('export', 'Export STL', 'Export STL', this.callbacks.onExportStl, 'accent')
     );
     this.root.appendChild(utilityGroup);
 
-    this.select('box', false);
     this.setCameraRunning(false);
   }
 
-  private createToolButton(spec: ToolSpec): HTMLButtonElement {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'toolbar-button tool-button';
-    button.dataset.tool = spec.id;
-    button.title = spec.title;
-    button.innerHTML = `${icon(spec.id)}<span>${spec.label}</span>`;
-    button.setAttribute('aria-pressed', 'false');
-    const onClick = () => this.select(spec.id);
-    button.addEventListener('click', onClick);
-    this.listeners.push(() => button.removeEventListener('click', onClick));
-    this.toolButtons.set(spec.id, button);
+  /** Camera toggle: dispatches start / stop according to the current state. */
+  private createCameraToggle(): HTMLButtonElement {
+    const button = this.createButton(
+      'camera',
+      'Start camera',
+      'Start webcam + hand tracking',
+      () => {
+        if (this.cameraRunning) this.callbacks.onCameraStop?.();
+        else this.callbacks.onCameraStart?.();
+      },
+      'accent'
+    );
+    this.cameraButton = button;
     return button;
   }
 
-  private createUtilityButton(
-    iconId: 'clear' | 'export',
+  private createButton(
+    iconId: keyof typeof ICONS,
     label: string,
+    title: string,
     handler: (() => void) | undefined,
     variant: 'danger' | 'accent'
   ): HTMLButtonElement {
     const button = document.createElement('button');
     button.type = 'button';
     button.className = `toolbar-button utility-button ${variant}`;
-    button.title = label;
+    button.title = title;
+    button.setAttribute('aria-label', title);
     button.innerHTML = `${icon(iconId)}<span>${label}</span>`;
     if (handler) {
       const onClick = () => handler();
@@ -175,52 +163,13 @@ export class Toolbar {
       this.listeners.push(() => button.removeEventListener('click', onClick));
     }
     return button;
-  }
-
-  private createCameraButton(
-    iconId: 'camera' | 'stop',
-    label: string,
-    handler: (() => void) | undefined,
-    variant: 'danger' | 'accent'
-  ): HTMLButtonElement {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = `toolbar-button utility-button ${variant}`;
-    button.dataset.camera = iconId;
-    button.title = label;
-    button.innerHTML = `${icon(iconId)}<span>${label}</span>`;
-    if (handler) {
-      const onClick = () => handler();
-      button.addEventListener('click', onClick);
-      this.listeners.push(() => button.removeEventListener('click', onClick));
-    }
-    this.cameraButtons.push(button);
-    return button;
-  }
-
-  private createSeparator(): HTMLElement {
-    const separator = document.createElement('span');
-    separator.className = 'toolbar-separator';
-    return separator;
-  }
-
-  /** Apply selection state and notify `onToolSelect` (unless silent). */
-  private select(tool: ToolId, notify = true): void {
-    this.tool = tool;
-    for (const [id, button] of this.toolButtons) {
-      const active = id === tool;
-      button.setAttribute('aria-pressed', String(active));
-      button.classList.toggle('active', active);
-    }
-    if (notify) this.callbacks.onToolSelect?.(tool);
   }
 
   /** Unmount all children and detach listeners. */
   dispose(): void {
     for (const detach of this.listeners) detach();
     this.listeners.length = 0;
-    this.toolButtons.clear();
-    this.cameraButtons.length = 0;
+    this.cameraButton = null;
     this.root.classList.remove('toolbar');
     this.root.removeAttribute('role');
     this.root.removeAttribute('aria-label');

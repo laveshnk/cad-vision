@@ -49,10 +49,10 @@ Dead variables/params and unused imports will fail the build.
 
 ```
 main.ts          app orchestrator: wires vision events → CAD + UI
-styles.css       full-bleed 3D viewport, floating camera thumbnail, glass toolbar
+styles.css       light theme; full-bleed 3D viewport, camera thumbnail, glass toolbar
 cad/CadScene.ts  Three.js viewport: camera rig, lights, grid, damped orbit
 cad/CadBuilder.ts gesture-driven primitives (box/cylinder/sphere), STL export
-ui/Toolbar.ts    glass toolbar: camera start/stop, tools, clear, export STL
+ui/Toolbar.ts    glass toolbar: camera toggle, clear, export STL
 vision/          self-contained tracking/gesture engine (own barrel: index.ts)
 ```
 
