@@ -233,9 +233,9 @@ build:
    To **move** it, pinch and *hold* (the mesh starts following after
    `dragHoldMs`, 300 ms, so a quick pinch never nudges it), drag, and
    release to drop it. Dragging moves it under the active
-   **constraint toggle** (top-left of the vision overlay): `[ XZ PLANE ]`
+   **constraint toggle** (camera view, directly below `[ EDIT ]`): `[ XZ PLANE ]`
    (default) slides it on a horizontal plane at the height of the point you
-   grabbed, with its elevation locked, while `[ Y AXIS (ELEVATE) ]` ignores
+   grabbed, with its elevation locked, while `[ Y AXIS ]` ignores
    horizontal drift and lifts / lowers it along a camera-facing vertical
    plane through the grab point (clamped so it never sinks below the floor).
    Either way the exact point you grabbed stays under your fingertip — in
@@ -283,7 +283,8 @@ build:
    and frees its geometry / material / edge overlays; Cancel leaves
    everything untouched. While the dialog is open the scene is frozen —
    gestures only answer the dialog. The same dialog guards the in-vision
-   **trash bin** (top-left of the camera view, directly below `[ VIEW ]`),
+   **trash bin** (VIEW mode: top-left of the camera view, directly below
+   `[ VIEW ]`),
    which clears the whole scene on Confirm: point your index fingertip at
    the bin and hold it there for 600 ms, or click it — then point at
    `[ CONFIRM ]` or `[ CANCEL ]` and hold. Pinches never fire the bin or
@@ -294,7 +295,7 @@ build:
    **translucent amber clash indicator** fills the overlap volume and the
    armed Boolean button glows amber (ready to fire). The two mutually
    exclusive tool toggles sit in the left stack below the drag-constraint
-   toggles: `[ SUBTRACT (Cut Hole) ]` and `[ UNION (Merge) ]` — point at
+   toggles: `[ SUBTRACT ]` and `[ UNION ]` — point at
    one and hold (or click) to arm it; if a clash is already live the
    operation fires immediately. To fire while dragging (one hand holds the
    mesh), show an **X cross** with your free hand — index and pinky
@@ -307,8 +308,12 @@ build:
      from the scene. The cutter is grown 0.1 % first: solids all rest on
      the floor, so the operands' bottom faces are coplanar, which makes
      BSP CSG leave slivers and stray fragments. Result edges come from
-     `creaseEdges` (skips the T-junction seams CSG leaves inside flat
-     faces), keep the base's edge color and the evaluator's normals, and
+     `creaseEdges` — it skips the T-junction seams CSG leaves inside flat
+     faces (collinear partner edges matched with a float-tolerant 1e-4 ×
+     size) and ignores degenerate triangles (collapsed edges / zero area,
+     whose normals are noise) so smooth or flat seams never show as fake
+     creases; tests audit several cuts (through-hole, sphere corner, side
+     bite, repeated cuts) for zero stray edges — and keep the base's edge color and the evaluator's normals, and
      the result renders double-sided so T-junction pixel cracks never show
      the floor through the solid.
    - **Union** fuses both solids into **one continuous body**
@@ -445,12 +450,15 @@ The `<canvas id="overlay">` (pure Canvas 2D) mirrors the feed and draws:
   (landmark 8) on the button for 500 ms (ring cursor + progress bar), via
   `DebugOverlay`'s `onModeRequest` callback. Pinches never press buttons,
   so an object drag sweeping across the bar never switches modes;
-- in **EDIT mode**, a stack of two **drag-constraint toggles** below the
-  mode bar in the top-left corner: `[ XZ PLANE ]` (default) and
-  `[ Y AXIS (ELEVATE) ]` — same boxy style and pointing activation
+- each mode's options sit under its own button: the VIEW-mode trash bin
+  under `[ VIEW ]`, the EDIT-mode stack under `[ EDIT ]`, the CREATE-mode
+  shape icons down the right edge under `[ CREATE ]`;
+- in **EDIT mode**, a stack of two **drag-constraint toggles** directly
+  below `[ EDIT ]`: `[ XZ PLANE ]` (default) and
+  `[ Y AXIS ]` — same boxy style and pointing activation
   (`onDragConstraintRequest`);
-- in **EDIT mode**, the two **CSG Boolean tool toggles** continue the left
-  stack: `[ SUBTRACT (Cut Hole) ]` and `[ UNION (Merge) ]` — mutually
+- in **EDIT mode**, the two **CSG Boolean tool toggles** continue the
+  same stack: `[ SUBTRACT ]` and `[ UNION ]` — mutually
   exclusive, re-press disarms (`onBooleanToolRequest` → arm, and fire when
   a clash is already live). While a tool is armed and the selection
   intersects another mesh (live `booleanState` provider), the armed button
@@ -479,8 +487,8 @@ The `<canvas id="overlay">` (pure Canvas 2D) mirrors the feed and draws:
   (orange for EXTRUDING),
 - thumb↔index pinch line with live distance, dual-hand extrusion link with
   `D` and scale factor,
-- the **trash bin** (top-left, directly below `[ VIEW ]`; the EDIT-mode
-  toggle stack sits beside it): a boxy recycle-bin icon button that clears
+- the **trash bin** (VIEW mode only, top-left, directly below `[ VIEW ]`):
+  a boxy recycle-bin icon button that clears
   the scene through the spatial confirmation (`onTrashRequest`) — activated
   only by a pointing index-tip dwell of 600 ms (`trashDwellMs`, progress
   bar fills along its bottom edge) or a mouse click; pinches never fire

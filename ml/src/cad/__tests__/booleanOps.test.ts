@@ -217,3 +217,88 @@ describe('creaseEdges', () => {
     }
   });
 });
+
+/**
+ * Stray-edge audit: a drawn edge is stray when every triangle touching its
+ * midpoint is coplanar (within the 12° crease threshold) — i.e. a line lying
+ * flat inside a face instead of on a real crease.
+ */
+function strayEdges(mesh: THREE.Mesh): number {
+  const geometry = mesh.geometry;
+  const position = geometry.getAttribute('position');
+  const index = geometry.getIndex();
+  const count = (index ? index.count : position.count) / 3;
+  const corner = (i: number) => {
+    const k = index ? index.getX(i) : i;
+    return new THREE.Vector3(position.getX(k), position.getY(k), position.getZ(k));
+  };
+  const triangles: { triangle: THREE.Triangle; normal: THREE.Vector3 }[] = [];
+  for (let t = 0; t < count; t++) {
+    const triangle = new THREE.Triangle(corner(3 * t), corner(3 * t + 1), corner(3 * t + 2));
+    if (triangle.getArea() < 1e-10) continue;
+    triangles.push({ triangle, normal: triangle.getNormal(new THREE.Vector3()) });
+  }
+  const lines = (mesh.children[0] as THREE.LineSegments).geometry.getAttribute('position');
+  const cosThreshold = Math.cos(THREE.MathUtils.degToRad(12));
+  let stray = 0;
+  for (let i = 0; i < lines.count; i += 2) {
+    const mid = new THREE.Vector3(
+      (lines.getX(i) + lines.getX(i + 1)) / 2,
+      (lines.getY(i) + lines.getY(i + 1)) / 2,
+      (lines.getZ(i) + lines.getZ(i + 1)) / 2
+    );
+    const touching = triangles.filter(
+      (t) => t.triangle.closestPointToPoint(mid, new THREE.Vector3()).distanceTo(mid) < 1e-3
+    );
+    if (touching.length === 0) continue;
+    const creased = touching.some((t) => t.normal.dot(touching[0].normal) < cosThreshold);
+    if (!creased) stray++;
+  }
+  return stray;
+}
+
+/** A primitive mesh resting on the floor (y = 0), like a committed build. */
+function solid(geometry: THREE.BufferGeometry, x: number, z: number): THREE.Mesh {
+  geometry.computeBoundingBox();
+  const mesh = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial());
+  const bottom = geometry.boundingBox?.min.y ?? 0;
+  mesh.position.set(x, -bottom, z);
+  mesh.updateMatrixWorld(true);
+  return mesh;
+}
+
+describe('evaluateBoolean — no stray edges on cut faces', () => {
+  const cut = (base: THREE.Mesh, cutter: THREE.Mesh) => {
+    const result = evaluateBoolean(base, cutter, 'subtract', new THREE.MeshStandardMaterial());
+    expect(result).not.toBeNull();
+    result?.updateMatrixWorld(true);
+    return result as THREE.Mesh;
+  };
+
+  it('cylinder through a box resting on the floor', () => {
+    const base = solid(new THREE.BoxGeometry(3, 2, 3), 0, 0);
+    const result = cut(base, solid(new THREE.CylinderGeometry(0.6, 0.6, 3, 48), 0.8, 0));
+    expect(strayEdges(result)).toBe(0);
+  });
+
+  it('sphere biting a box corner', () => {
+    const base = solid(new THREE.BoxGeometry(3, 2, 3), 0, 0);
+    const sphere = new THREE.Mesh(new THREE.SphereGeometry(0.8, 48, 24));
+    sphere.position.set(1.4, 1.9, 1.4);
+    sphere.updateMatrixWorld(true);
+    expect(strayEdges(cut(base, sphere))).toBe(0);
+  });
+
+  it('two successive cuts (cutting a CSG result again)', () => {
+    const base = solid(new THREE.BoxGeometry(3, 2, 3), 0, 0);
+    const once = cut(base, solid(new THREE.CylinderGeometry(0.5, 0.5, 3, 48), 0.8, 0));
+    const twice = cut(once, solid(new THREE.CylinderGeometry(0.4, 0.4, 3, 48), -0.7, 0.5));
+    expect(strayEdges(twice)).toBe(0);
+  });
+
+  it('cylinder biting into a side face', () => {
+    const base = solid(new THREE.BoxGeometry(3, 2, 3), 0, 0);
+    const result = cut(base, solid(new THREE.CylinderGeometry(0.5, 0.5, 1.2, 48), 1.5, 0));
+    expect(strayEdges(result)).toBe(0);
+  });
+});

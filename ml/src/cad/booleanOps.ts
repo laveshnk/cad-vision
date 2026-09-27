@@ -36,6 +36,12 @@ import { ADDITION, Brush, Evaluator, SUBTRACTION } from 'three-bvh-csg';
 /** Supported CSG operations (structurally mirrored by the vision overlay). */
 export type BooleanOperation = 'subtract' | 'union';
 
+/**
+ * `creaseEdges` degeneracy cutoff: triangles flatter than this (area over
+ * the longest edge squared; ~0.43 equilateral) have no usable normal.
+ */
+const DEGENERATE_QUALITY = 1e-6;
+
 /** EdgesGeometry crease threshold for CSG results (degrees, crisp seams). */
 const CSG_EDGE_THRESHOLD = 12;
 
@@ -193,6 +199,11 @@ export function creaseEdges(geometry: THREE.BufferGeometry, thresholdDeg = 12): 
   // Drawn pieces shorter than this are float-noise gaps between partner
   // spans (they would render as specks on flat faces), not real creases.
   const minPiece = Math.max(size, 1e-6) * 2e-3;
+  // Collinearity tolerance for T-junction partners: CSG intersection points
+  // carry float error well above `eps`, so partners are matched looser.
+  const lineTolerance = Math.max(size, 1e-6) * 1e-4;
+  // An edge this short marks a collapsed (degenerate) triangle.
+  const degenerateEdge = Math.max(size, 1e-6) * 1e-4;
   const quantum = eps * 10;
 
   const vertex = (i: number): THREE.Vector3 => {
@@ -214,7 +225,24 @@ export function creaseEdges(geometry: THREE.BufferGeometry, thresholdDeg = 12): 
     const corners = [vertex(t * 3), vertex(t * 3 + 1), vertex(t * 3 + 2)];
     triangle.set(corners[0], corners[1], corners[2]);
     normals.push(triangle.getNormal(new THREE.Vector3()));
-    if (triangle.getArea() <= eps * eps) continue; // degenerate sliver
+    // Skip degenerate triangles: CSG leaves some along cut lines with two
+    // (near-)coincident corners, whose normals are numerically meaningless —
+    // letting them vote would turn smooth / flat seams into fake creases.
+    // Thin-but-valid triangles (all edges real) are kept: dropping them
+    // would leave their neighbors' edges looking like open boundaries.
+    const lengths = [
+      corners[0].distanceToSquared(corners[1]),
+      corners[1].distanceToSquared(corners[2]),
+      corners[2].distanceToSquared(corners[0]),
+    ];
+    const shortest = Math.min(...lengths);
+    const longest = Math.max(...lengths);
+    if (
+      shortest <= degenerateEdge * degenerateEdge ||
+      triangle.getArea() / longest < DEGENERATE_QUALITY
+    ) {
+      continue;
+    }
     const keys = corners.map(keyOf);
     for (let e = 0; e < 3; e++) {
       const ka = keys[e];
@@ -259,7 +287,7 @@ export function creaseEdges(geometry: THREE.BufferGeometry, thresholdDeg = 12): 
       if (other === edge) continue;
       const pa = lineDistance(edge, other.a, length);
       const pb = lineDistance(edge, other.b, length);
-      if (pa.off > eps || pb.off > eps) continue; // not collinear
+      if (pa.off > lineTolerance || pb.off > lineTolerance) continue; // not collinear
       const lo = Math.max(0, Math.min(pa.along, pb.along));
       const hi = Math.min(1, Math.max(pa.along, pb.along));
       if (hi - lo <= eps / length) continue; // no overlapping span

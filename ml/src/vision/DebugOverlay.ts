@@ -5,23 +5,24 @@
  * and pinch indicators. Pure Canvas 2D — no WebGL.
  *
  * Along the top edge it renders the interaction-mode switcher ([ VIEW ],
- * [ SELECT ], [ CREATE ]): boxy, mutually exclusive toggle buttons reported
- * through the `onModeRequest` callback. In SELECT mode a second stack of
- * mutually exclusive toggles, [ XZ PLANE ] (default) and
- * [ Y AXIS (ELEVATE) ], sits vertically below the mode bar in the top-left
- * corner (`onDragConstraintRequest`), followed by the CSG Boolean tool
- * toggles `[ SUBTRACT (Cut Hole) ]` / `[ UNION (Merge) ]`
- * (`onBooleanToolRequest`); in CREATE mode a column of shape icon buttons
- * (cube / cuboid / cylinder / sphere, from the `shapes` option) is stacked
- * vertically down the right edge instead (`onShapeRequest`).
+ * [ EDIT ], [ CREATE ] — the `select` mode is labeled EDIT): boxy, mutually
+ * exclusive toggle buttons reported through the `onModeRequest` callback.
+ * Each mode's options sit under its own button. In VIEW mode the trash bin
+ * sits below [ VIEW ] (`onTrashRequest`). In EDIT mode a stack of mutually
+ * exclusive toggles, [ XZ PLANE ] (default) and [ Y AXIS ], sits vertically
+ * below [ EDIT ] (`onDragConstraintRequest`), followed by the CSG Boolean
+ * tool toggles `[ SUBTRACT ]` / `[ UNION ]` (`onBooleanToolRequest`). In
+ * CREATE mode a column of shape icon buttons (cube / cuboid / cylinder /
+ * sphere, from the `shapes` option) is stacked down the right edge, under
+ * [ CREATE ] (`onShapeRequest`).
  *
  * Every button responds to a mouse click or to a **pointing** hand (index
  * finger up, other fingers curled — `HandSnapshot.pointing`) holding its
  * index tip over the button for `dwellMs`; a ring marks a pointing
  * fingertip. Pinches, fists and open palms never press a toggle button, so
  * moving, editing or building objects can't switch modes / shapes by
- * accident — including the trash bin icon below [ VIEW ] (`onTrashRequest`),
- * which clears the scene through the confirmation dialog below.
+ * accident — including the VIEW-mode trash bin (`onTrashRequest`), which
+ * clears the scene through the confirmation dialog below.
  *
  * Destructive actions never open browser popups or DOM modals: the trash bin
  * (a scene clear) and the selection's Delete button open an in-vision
@@ -144,8 +145,8 @@ export type OverlayBooleanTool = 'subtract' | 'union';
 
 /** Labels for the SELECT-mode Boolean tool toggles, top to bottom. */
 const BOOLEAN_LABELS: Record<OverlayBooleanTool, string> = {
-  subtract: '[ SUBTRACT (Cut Hole) ]',
-  union: '[ UNION (Merge) ]',
+  subtract: '[ SUBTRACT ]',
+  union: '[ UNION ]',
 };
 
 /** The Boolean tool toggles, top to bottom (below the constraint stack). */
@@ -492,13 +493,13 @@ export const MODE_LABELS: Record<InteractionMode, string> = {
 /** Mode buttons, left to right, along the top edge of the overlay. */
 const MODE_BUTTONS: readonly InteractionMode[] = ['view', 'select', 'create'];
 
-/** SELECT-mode drag-constraint toggles, top to bottom (top-left corner). */
+/** SELECT-mode drag-constraint toggles, top to bottom (below [ EDIT ]). */
 const CONSTRAINT_BUTTONS: readonly DragConstraint[] = ['xz', 'y'];
 
 /** Constraint button labels, in CONSTRAINT_BUTTONS order. */
 const CONSTRAINT_LABELS: Record<DragConstraint, string> = {
   xz: '[ XZ PLANE ]',
-  y: '[ Y AXIS (ELEVATE) ]',
+  y: '[ Y AXIS ]',
 };
 
 export class DebugOverlay<S extends string = string> {
@@ -753,8 +754,9 @@ export class DebugOverlay<S extends string = string> {
     }
     if (frame.mode === 'create' && !dialogOpen) this.drawShapeButtons(cssWidth);
     else this.shapeRects = [];
-    // The trash bin hides while the dialog is open (one question at a time).
-    if (!dialogOpen) this.drawTrashButton(cssWidth);
+    // The trash bin is a VIEW-mode control; it also hides while the dialog
+    // is open (one question at a time).
+    if (frame.mode === 'view' && !dialogOpen) this.drawTrashButton(cssWidth);
     else this.trashRect = null;
     const dt = this.frameDt(frame);
     if (dialogOpen) {
@@ -1378,7 +1380,7 @@ export class DebugOverlay<S extends string = string> {
   }
 
   /* ------------------------------------------------------------------ */
-  /* Drag-constraint toggles (SELECT mode, top-left corner)             */
+  /* Drag-constraint toggles (EDIT mode, below [ EDIT ])                 */
   /* ------------------------------------------------------------------ */
 
   /** CSS-pixel hit test against the last rendered constraint buttons. */
@@ -1431,11 +1433,12 @@ export class DebugOverlay<S extends string = string> {
   }
 
   /**
-   * Shared layout of the top-left vertical stacks (drag constraints, then the
-   * CSG Boolean tools below them): margin / gap / button size + the top of
-   * the first stack (just under the mode bar).
+   * Shared layout of the EDIT-mode vertical stack (drag constraints, then the
+   * CSG Boolean tools below them), in the column directly under [ EDIT ]:
+   * left edge (`margin`) / gap / button size + the top of the first stack
+   * (just under the mode bar).
    */
-  private leftStackMetrics(cssWidth: number): {
+  private editStackMetrics(cssWidth: number): {
     margin: number;
     gap: number;
     height: number;
@@ -1444,13 +1447,15 @@ export class DebugOverlay<S extends string = string> {
   } {
     const scale = this.fontScale(cssWidth);
     const { margin, gap, height: barHeight } = this.barMetrics(cssWidth);
-    // The trash bin owns the column below VIEW; the stack sits beside it.
-    const left = margin + this.trashSize(cssWidth) + gap;
+    // Each mode's options sit under its own button: the EDIT stack takes
+    // the column directly below [ EDIT ] (the middle mode button).
+    const columnWidth = (cssWidth - margin * 2 - gap * (MODE_BUTTONS.length - 1)) / MODE_BUTTONS.length;
+    const editIndex = MODE_BUTTONS.indexOf('select');
     return {
-      margin: left,
+      margin: margin + editIndex * (columnWidth + gap),
       gap,
       height: Math.max(20, Math.round(26 * scale)),
-      width: Math.min(Math.round((cssWidth - left - margin) * 0.62), 190),
+      width: columnWidth,
       top: margin + barHeight + gap,
     };
   }
@@ -1461,16 +1466,16 @@ export class DebugOverlay<S extends string = string> {
   }
 
   /**
-   * SELECT-mode drag-constraint toggles, stacked vertically in the top-left
-   * corner below the mode bar: `[ XZ PLANE ]` (default active) and
-   * `[ Y AXIS (ELEVATE) ]` — mutually exclusive, boxy industrial style
+   * EDIT-mode drag-constraint toggles, stacked vertically directly below
+   * [ EDIT ]: `[ XZ PLANE ]` (default active) and `[ Y AXIS ]` — mutually
+   * exclusive, boxy industrial style
    * (crisp border, monospace, inverted background when active) with the
    * same dwell progress bar as the mode buttons.
    */
   private drawConstraintButtons(cssWidth: number): void {
     const ctx = this.ctx;
     const scale = this.fontScale(cssWidth);
-    const { margin, gap, height, width, top } = this.leftStackMetrics(cssWidth);
+    const { margin, gap, height, width, top } = this.editStackMetrics(cssWidth);
 
     this.constraintRects = [];
     ctx.textAlign = 'center';
@@ -1593,7 +1598,7 @@ export class DebugOverlay<S extends string = string> {
 
   /**
    * SELECT-mode CSG Boolean tool toggles, stacked below the drag-constraint
-   * toggles: `[ SUBTRACT (Cut Hole) ]` and `[ UNION (Merge) ]` — mutually
+   * toggles: `[ SUBTRACT ]` and `[ UNION ]` — mutually
    * exclusive, boxy, re-press disarms. While a tool is armed *and* the
    * selection intersects another mesh (live `booleanState` provider), the
    * armed button glows amber: the operation is ready to fire.
@@ -1601,7 +1606,7 @@ export class DebugOverlay<S extends string = string> {
   private drawBooleanButtons(cssWidth: number): void {
     const ctx = this.ctx;
     const scale = this.fontScale(cssWidth);
-    const { margin, gap, height, width, top } = this.leftStackMetrics(cssWidth);
+    const { margin, gap, height, width, top } = this.editStackMetrics(cssWidth);
     const booleanTop = top + CONSTRAINT_BUTTONS.length * (height + gap);
     const state = this.booleanState?.() ?? null;
 
@@ -1697,8 +1702,8 @@ export class DebugOverlay<S extends string = string> {
   }
 
   /**
-   * In-vision trash bin: a boxy recycle-bin icon button in the top-left
-   * corner, directly below the [ VIEW ] mode button (danger-tinted, matching
+   * In-vision trash bin (VIEW mode only): a boxy recycle-bin icon button in
+   * the top-left corner, directly below the [ VIEW ] mode button (danger-tinted, matching
    * the Delete HUD). Only a pointing index fingertip held on it (or a mouse
    * click) activates it — a pointing dwell fills a progress bar along its
    * bottom edge; pinches never fire it. Hidden while the confirmation dialog
