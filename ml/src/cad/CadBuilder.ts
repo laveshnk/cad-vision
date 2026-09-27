@@ -71,13 +71,38 @@
  *                          material / edge overlays (the host gates this
  *                          behind a confirmation dialog).
  *   endDrag() / deselect() → finish the drag / clear the selection.
+ *
+ * CSG Booleans (SELECT mode, see booleanOps.ts):
+ *   setBooleanTool(op)   → arm / disarm the Boolean tool ('subtract' |
+ *                          'union'), mirrored on the vision overlay's
+ *                          toggles; arming alone never mutates the scene.
+ *   (clash tracking)     → as the selection moves (drag / rotate), the
+ *                          builder tests its world AABB against every other
+ *                          committed mesh (`box3.intersectsBox`) and keeps a
+ *                          translucent amber clash indicator on the overlap
+ *                          region while two solids intersect.
+ *   applyBoolean([op])    → execute the armed (or explicit) operation on the
+ *                          live clash: subtract carves the selected cutter
+ *                          out of the intersected base (the base is replaced
+ *                          by the CSG result with fresh EdgesGeometry, the
+ *                          cutter is removed); union fuses both solids into
+ *                          one continuous body. The result stays selected.
  */
 
 import * as THREE from 'three';
 import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js';
 import type { CadScene } from './CadScene';
+import { boxesClash, evaluateBoolean, overlapBox, worldBounds, type BooleanOperation } from './booleanOps';
 
 export type CadTool = 'box' | 'cuboid' | 'cylinder' | 'sphere';
+
+/**
+ * SELECT-mode CSG Boolean operation, structurally compatible with the
+ * vision overlay's `OverlayBooleanTool` (the orchestrator bridges the two
+ * without a shared import): `'subtract'` carves the selected cutter out of
+ * the intersected base mesh, `'union'` merges both solids into one.
+ */
+export type { BooleanOperation };
 
 /**
  * SELECT-mode drag constraint: `'xz'` (default) slides the grabbed mesh
@@ -258,6 +283,19 @@ export class CadBuilder {
    * only its geometry / transform are refreshed.
    */
   private selectionOutline: THREE.Mesh | null = null;
+  /**
+   * CSG Boolean tooling: the armed operation (`setBooleanTool`), the
+   * committed mesh the selection currently clashes with (world-AABB
+   * intersection, recomputed as the selection moves), and the translucent
+   * amber clash indicator volume (the overlap region of the two AABBs —
+   * lazily built, hidden when no clash).
+   */
+  private booleanTool: BooleanOperation | null = null;
+  private clashTarget: THREE.Mesh | null = null;
+  private clashBox: THREE.Group | null = null;
+  /** Scratch boxes for clash detection (reused every frame). */
+  private readonly scratchBoxA = new THREE.Box3();
+  private readonly scratchBoxB = new THREE.Box3();
 
   constructor(scene: CadScene, options: CadBuilderOptions = {}) {
     this.scene = scene;
@@ -467,6 +505,8 @@ export class CadBuilder {
     this.selectionDrag = null;
     this.hideSelectionOutline();
     this.endRotateSelection();
+    this.clashTarget = null;
+    this.syncClashIndicator(null); // no meshes left to clash
   }
 
   /** Download all committed meshes as a binary `model.stl`. */
@@ -509,6 +549,16 @@ export class CadBuilder {
       });
       this.rotationRing = null;
       this.rotationNeedle = null;
+    }
+    if (this.clashBox) {
+      this.scene.scene.remove(this.clashBox);
+      this.clashBox.traverse((obj) => {
+        if (obj instanceof THREE.Mesh || obj instanceof THREE.LineSegments) {
+          obj.geometry.dispose();
+          (obj.material as THREE.Material).dispose();
+        }
+      });
+      this.clashBox = null;
     }
   }
 
@@ -603,6 +653,7 @@ export class CadBuilder {
     }
     this.syncSelectionOutline(); // the outline follows the dragged mesh exactly
     if (this.rotating) this.updateRotationRing();
+    this.updateClash(); // the clash indicator tracks the dragged mesh live
   }
 
   /** The active SELECT-mode drag constraint ('xz' | 'y'). */
@@ -697,6 +748,7 @@ export class CadBuilder {
     mesh.rotation.y = anchor + deltaRotation;
     this.syncSelectionOutline(); // the outline follows the spun mesh exactly
     if (this.rotating) this.updateRotationRing();
+    this.updateClash(); // a spun mesh may swing into (or out of) a clash
   }
 
   /** End the open-palm rotation (hides the compass ring; the yaw persists). */
@@ -709,6 +761,159 @@ export class CadBuilder {
   /** Whether an open-palm rotation gesture is currently running. */
   get isRotating(): boolean {
     return this.rotating;
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* CSG Boolean operations (SELECT mode)                               */
+  /* ------------------------------------------------------------------ */
+
+  /** The armed Boolean operation, or null when none is active. */
+  get armedBooleanTool(): BooleanOperation | null {
+    return this.booleanTool;
+  }
+
+  /**
+   * Live Boolean state for the vision overlay (plain data): the armed tool
+   * and whether the selection currently clashes with another committed
+   * mesh — the armed overlay button glows amber while a clash is live.
+   */
+  get booleanState(): { tool: BooleanOperation | null; clash: boolean } {
+    return { tool: this.booleanTool, clash: this.clashTarget !== null };
+  }
+
+  /**
+   * Arm / disarm the CSG Boolean tool (mutually exclusive; null disarms).
+   * Arming alone never mutates the scene — `applyBoolean` executes.
+   */
+  setBooleanTool(tool: BooleanOperation | null): void {
+    this.booleanTool = tool;
+  }
+
+  /**
+   * Recompute the selection's clash: the first committed mesh whose
+   * world-space AABB strictly overlaps the selection's (the spec's
+   * `box3.intersectsBox` test, with a drawable overlap volume). Refreshed
+   * as the selection moves (drag / rotate) or the selection changes; the
+   * translucent amber indicator tracks the overlap region while a clash
+   * is live and hides otherwise.
+   */
+  private updateClash(): void {
+    const selection = this.selected;
+    if (!selection) {
+      this.clashTarget = null;
+      this.syncClashIndicator(null);
+      return;
+    }
+    selection.updateMatrixWorld(true);
+    worldBounds(selection, this.scratchBoxA);
+    for (const mesh of this.committed) {
+      if (mesh === selection) continue;
+      mesh.updateMatrixWorld(true);
+      worldBounds(mesh, this.scratchBoxB);
+      if (boxesClash(this.scratchBoxA, this.scratchBoxB)) {
+        this.clashTarget = mesh;
+        this.syncClashIndicator(overlapBox(this.scratchBoxA, this.scratchBoxB));
+        return;
+      }
+    }
+    this.clashTarget = null;
+    this.syncClashIndicator(null);
+  }
+
+  /**
+   * Place / hide the clash indicator: a translucent amber box (+ crisp
+   * outline) filling the two solids' world-AABB overlap. Lazily built and
+   * reused — only its transform is refreshed per frame.
+   */
+  private syncClashIndicator(overlap: THREE.Box3 | null): void {
+    const group = this.clashBox ?? this.createClashBox();
+    if (!overlap) {
+      group.visible = false;
+      return;
+    }
+    const size = overlap.getSize(new THREE.Vector3());
+    const center = overlap.getCenter(new THREE.Vector3());
+    group.visible = true;
+    group.position.copy(center);
+    group.scale.set(Math.max(size.x, 1e-4), Math.max(size.y, 1e-4), Math.max(size.z, 1e-4));
+  }
+
+  /** Build the clash indicator: unit box + edge outline, hidden by default. */
+  private createClashBox(): THREE.Group {
+    const fill = new THREE.Mesh(
+      new THREE.BoxGeometry(1, 1, 1),
+      new THREE.MeshBasicMaterial({
+        color: 0xf59e0b, // amber clash
+        transparent: true,
+        opacity: 0.3,
+        depthWrite: false,
+      })
+    );
+    const outline = new THREE.LineSegments(
+      new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1)),
+      new THREE.LineBasicMaterial({ color: 0xfbbf24, transparent: true, opacity: 0.9 })
+    );
+    const group = new THREE.Group();
+    group.name = 'cad-clash-indicator';
+    group.add(fill, outline);
+    group.visible = false;
+    this.clashBox = group;
+    this.scene.scene.add(group);
+    return group;
+  }
+
+  /**
+   * Execute the armed (or explicit) Boolean operation on the current clash:
+   *
+   * - **subtract**: the *selected* mesh is the cutter — it is subtracted
+   *   from the intersected base (`Evaluator.evaluate(base, cutter,
+   *   SUBTRACTION)`), carving the cavity; the base is replaced by the result
+   *   (fresh geometry + crisp `EdgesGeometry`) and the cutter is removed;
+   * - **union**: both solids fuse (`ADDITION`) into one continuous body
+   *   wearing the *selected* mesh's color; both are replaced by the result.
+   *
+   * The result keeps the base's geometry frame + transform (a drop-in
+   * replacement in the committed scene graph), stays selected, and the
+   * clash indicator refreshes. A no-op (false) without a clash, without a
+   * selection, or when the CSG fails — the scene is never half-edited.
+   *
+   * @param operation override for the armed tool (the overlay's X-cross
+   *        trigger always subtracts); defaults to the armed tool.
+   * @returns true when an operation ran.
+   */
+  applyBoolean(operation?: BooleanOperation): boolean {
+    const op = operation ?? this.booleanTool;
+    if (!op) return false;
+    const selection = this.selected;
+    const target = this.clashTarget;
+    if (!selection || !target || selection === target) {
+      this.updateClash();
+      return false;
+    }
+    // subtract: base = the intersected mesh, cutter = the selection.
+    // union: base = the selection (its material survives), tool = the other.
+    const base = op === 'subtract' ? target : selection;
+    const tool = op === 'subtract' ? selection : target;
+    const material = (base.material as THREE.Material).clone();
+    this.endDrag(); // the drag anchor died with the old meshes
+    const result = evaluateBoolean(base, tool, op, material);
+    if (!result) return false;
+
+    // Swap the result in at the base's scene-graph slot; both operands go.
+    const slot = this.committed.indexOf(base);
+    this.root.remove(base, tool);
+    const toolIndex = this.committed.indexOf(tool);
+    if (toolIndex >= 0) this.committed.splice(toolIndex, 1);
+    if (slot >= 0) this.committed[slot] = result;
+    else this.committed.push(result);
+    this.root.add(result);
+    disposeMesh(base);
+    disposeMesh(tool);
+
+    // The result is the new selection (outline + clash refresh in select()).
+    this.selected = null;
+    this.select(result);
+    return true;
   }
 
   /**
@@ -789,6 +994,7 @@ export class CadBuilder {
     this.selected = null;
     this.selectionDrag = null;
     this.endRotateSelection();
+    this.updateClash(); // no selection: any clash indicator goes with it
   }
 
   private select(mesh: THREE.Mesh): void {
@@ -796,6 +1002,7 @@ export class CadBuilder {
     this.deselect();
     this.selected = mesh;
     this.showSelectionOutline(mesh);
+    this.updateClash(); // a freshly picked mesh may already intersect
   }
 
   /**

@@ -1,13 +1,14 @@
 /**
  * Toolbar: CAD-styled glass header with camera control and scene utilities.
  * The camera control is a single toggle ("Start camera" ↔ "Stop") whose state
- * is driven by `setCameraRunning`; scene commands are exposed through
- * `onClearScene` / `onExportStl`, camera lifecycle through `onCameraStart` /
- * `onCameraStop`. UI-only module — no vision or CAD imports.
+ * is driven by `setCameraRunning`; STL export is exposed through
+ * `onExportStl`, camera lifecycle through `onCameraStart` / `onCameraStop`.
+ * Scene clearing lives in-vision (the overlay's trash bin + spatial
+ * confirmation), so no mouse-only destructive button is mounted here.
+ * UI-only module — no vision or CAD imports.
  */
 
 export interface ToolbarCallbacks {
-  onClearScene?: () => void;
   onExportStl?: () => void;
   /** Request webcam + hand tracking to start. */
   onCameraStart?: () => void;
@@ -18,8 +19,6 @@ export interface ToolbarCallbacks {
 /** Lucide-style stroke icons (currentColor). */
 const ICONS = {
   logo: '<path d="M12 2 2 7l10 5 10-5-10-5Z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>',
-  clear:
-    '<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M10 11v6"/><path d="M14 11v6"/>',
   export:
     '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/>',
   camera:
@@ -96,9 +95,6 @@ export class Toolbar {
     utilityGroup.className = 'toolbar-group';
     utilityGroup.setAttribute('role', 'group');
     utilityGroup.setAttribute('aria-label', 'Scene utilities');
-    utilityGroup.appendChild(
-      this.createButton('clear', 'Clear scene', 'Clear scene', this.callbacks.onClearScene, 'danger')
-    );
     utilityGroup.appendChild(
       this.createButton('export', 'Export STL', 'Export STL', this.callbacks.onExportStl, 'accent')
     );

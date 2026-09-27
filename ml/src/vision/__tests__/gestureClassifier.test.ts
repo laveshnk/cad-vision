@@ -593,6 +593,59 @@ describe('GestureClassifier — pointing pose (presses overlay buttons)', () => 
   });
 });
 
+describe('GestureClassifier — snapshot poses (open palm / OK / X cross)', () => {
+  /** Run one frame and return the given hand's snapshot. */
+  function snapshotOf(
+    classifier: GestureClassifier,
+    spec: HandSpec,
+    handedness: 'Left' | 'Right' = 'Right'
+  ) {
+    return classifier.process([makeHand(handedness, spec)], 100).snapshots[0];
+  }
+
+  it('open palm: all fingers extended + thumb out', () => {
+    const classifier = new GestureClassifier(TEST_OPTIONS);
+    expect(snapshotOf(classifier, {}).openPalm).toBe(true);
+  });
+
+  it('open palm is not a fist, a pinch or the OK gesture', () => {
+    const classifier = new GestureClassifier(TEST_OPTIONS);
+    for (const spec of [{ fist: true }, { pinchDist: 0.03 }, POINT]) {
+      expect(snapshotOf(classifier, spec).openPalm, JSON.stringify(spec)).toBe(false);
+    }
+  });
+
+  it('OK gesture: thumb + index loop with the other three fingers extended', () => {
+    const classifier = new GestureClassifier(TEST_OPTIONS);
+    const snapshot = snapshotOf(classifier, { pinchDist: 0.03 });
+    expect(snapshot.okGesture).toBe(true);
+    expect(snapshot.pinchActive).toBe(true); // the loop is pinch-shaped
+  });
+
+  it('OK gesture rejects an open palm (thumb far from the index)', () => {
+    const classifier = new GestureClassifier(TEST_OPTIONS);
+    expect(snapshotOf(classifier, {}).okGesture).toBe(false);
+  });
+
+  it('OK gesture rejects pointing and a fist (other fingers curled)', () => {
+    const classifier = new GestureClassifier(TEST_OPTIONS);
+    expect(snapshotOf(classifier, POINT).okGesture).toBe(false);
+    expect(snapshotOf(classifier, { fist: true }).okGesture).toBe(false);
+  });
+
+  it('X cross: index + pinky extended, middle + ring folded', () => {
+    const classifier = new GestureClassifier(TEST_OPTIONS);
+    expect(snapshotOf(classifier, { fist: true, extend: [5, 17] }).xCross).toBe(true);
+  });
+
+  it('X cross rejects an open palm, pointing and a fist', () => {
+    const classifier = new GestureClassifier(TEST_OPTIONS);
+    expect(snapshotOf(classifier, {}).xCross).toBe(false); // middle extended
+    expect(snapshotOf(classifier, POINT).xCross).toBe(false); // pinky folded
+    expect(snapshotOf(classifier, { fist: true }).xCross).toBe(false); // index folded
+  });
+});
+
 describe('GestureClassifier — robust fist detection', () => {
   it('detects a real fist: all fingertips folded into the palm, thumb wrapped', () => {
     const classifier = new GestureClassifier(TEST_OPTIONS);

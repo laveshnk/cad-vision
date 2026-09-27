@@ -18,11 +18,14 @@
         </section>
 
         <!-- Floating camera thumbnail (video-call style PiP):
-             webcam feed + 2D gesture debug overlay, expandable on click -->
+             webcam feed + 2D gesture debug overlay, expandable on click.
+             The card's outer frame (header + metrics bar) is the drag
+             handle; the resize grip sits on the card's bottom-right corner,
+             outside the video stage. -->
         <aside id="vision-thumb" class="vision-thumb">
           <div id="stage" class="stage">
             <video id="video" playsinline muted autoplay></video>
-            <!-- 2D canvas overlay: landmarks, skeleton + HUD. No WebGL. -->
+            <!-- 2D canvas overlay: landmarks, skeleton + in-vision UI. No WebGL. -->
             <canvas id="overlay"></canvas>
           </div>
           <div class="vision-thumb-header">
@@ -36,26 +39,11 @@
               ⤢
             </button>
           </div>
+          <!-- Live stats bar (mode / state / FPS / hands), mounted by
+               src/ui/MetricsBar.ts directly underneath the camera view. -->
+          <div id="metrics" class="metrics-bar"></div>
         </aside>
       </main>
-
-      <footer class="footer">
-        <p>
-          Switch modes with the buttons along the top of the camera overlay — click them, or
-          point (index finger up, other fingers curled) and hold your fingertip on a button
-          for half a second. <strong>VIEW</strong>: camera navigation only.
-          <strong>SELECT</strong>: a quick pinch selects a mesh (pinch empty ground to
-          deselect); point at the floating color wheel to repaint it — hold your fingertip
-          on one hue for 1.2 seconds to lock it in; pinch and hold to move it, release to
-          drop it; delete it with the floating Delete button (click it, pinch it, or point at it) or the Delete/Backspace key,
-          then confirm. <strong>CREATE</strong>: pick a shape, pinch with both hands and
-          pull apart to size the base, relax the upper pinch and drag the lower hand to set the
-          height. A closed fist orbits the camera — roll your wrist to rotate. With two fists,
-          move both: apart to zoom in, together to zoom out, or turn them like a steering wheel
-          to turn the scene (moving only one fist just moves the camera). The camera thumbnail expands with its corner button and resizes by dragging the grip in its bottom-right corner. Committed meshes export as
-          <code>model.stl</code>; gesture events are logged to the console as JSON.
-        </p>
-      </footer>
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>

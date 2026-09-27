@@ -15,7 +15,9 @@
   },
   "dependencies": {
     "@mediapipe/tasks-vision": "^0.10.14",
-    "three": "^0.186.1"
+    "three": "^0.186.1",
+    "three-bvh-csg": "^0.0.18",
+    "three-mesh-bvh": "^0.9.15"
   },
   "devDependencies": {
     "@types/three": "^0.186.0",

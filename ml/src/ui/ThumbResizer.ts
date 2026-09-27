@@ -1,13 +1,15 @@
 /**
  * ThumbResizer: mouse-drag resizing for the floating camera thumbnail.
  *
- * Appends a corner grip (`.thumb-resize`, bottom-right of the video stage)
- * and turns pointer drags on it into width changes on the thumbnail: the
- * drag delta is clamped between `minWidth` and `maxWidth` (itself clamped to
- * the window so the card never runs off-screen), and applied as an inline
- * `style.width` — the 4:3 stage keeps the height following automatically, and
- * the vision overlay re-measures its canvas every frame, so no resize
- * listeners are needed downstream.
+ * Appends a corner grip (`.thumb-resize`) on the **card's outer frame**
+ * (bottom-right of the thumbnail card, over the metrics bar — never inside
+ * the video stage, so gestures and clicks in the camera view never start a
+ * resize) and turns pointer drags on it into width changes on the
+ * thumbnail: the drag delta is clamped between `minWidth` and `maxWidth`
+ * (itself clamped to the window so the card never runs off-screen), and
+ * applied as an inline `style.width` — the 4:3 stage keeps the height
+ * following automatically, and the vision overlay re-measures its canvas
+ * every frame, so no resize listeners are needed downstream.
  *
  * An inline width beats the CSS presets (`.vision-thumb` / `.expanded`), so
  * the host should clear it (`` thumb.style.width = '' ``) when the user
@@ -69,10 +71,11 @@ export class ThumbResizer {
     this.handle.setAttribute('role', 'separator');
     this.handle.setAttribute('aria-label', 'Drag to resize the camera thumbnail');
     this.handle.addEventListener('pointerdown', this.onPointerDown);
-    // The grip sits inside the video stage (bottom-right corner), above the
-    // overlay canvas; fallback: the thumbnail itself hosts it.
-    const stage = thumb.querySelector('.stage');
-    (stage instanceof HTMLElement ? stage : thumb).appendChild(this.handle);
+    // The grip belongs to the card's outer frame (bottom-right corner of
+    // the whole card — over the metrics bar), NOT the video stage: gestures
+    // inside the camera view (overlay buttons, trash bin) must never start a
+    // resize by accident.
+    thumb.appendChild(this.handle);
   }
 
   /** Unmount the grip and drop its listeners. */

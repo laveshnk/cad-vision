@@ -285,6 +285,22 @@ export interface HandSnapshot {
    * debounced) — the only pose that presses overlay UI buttons.
    */
   pointing: boolean;
+  /**
+   * Open palm: every fingertip extended past its own PIP joint plus the
+   * thumb held out — the deliberate "show palm" pose (drives the SELECT-mode
+   * rotation gesture and answers spatial dialogs).
+   */
+  openPalm: boolean;
+  /**
+   * "OK" gesture: thumb and index tips touching while middle / ring / pinky
+   * stay extended — holding it answers an in-vision confirmation dialog.
+   */
+  okGesture: boolean;
+  /**
+   * "X" cross pose: index and pinky extended, middle and ring folded —
+   * the secondary-hand trigger for CSG boolean operations.
+   */
+  xCross: boolean;
   landmarks: Landmark[];
 }
 

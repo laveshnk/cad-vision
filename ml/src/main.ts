@@ -4,7 +4,7 @@
  * Strictly decoupled module wiring:
  *
  *   Vision (GestureEngine)  --typed events-->  App (this file)
- *        --> CAD (CadScene + CadBuilder)  +  UI (Toolbar)
+ *        --> CAD (CadScene + CadBuilder)  +  UI (Toolbar / MetricsBar / …)
  *
  * The vision layer emits device-space coordinates (x / y in [-1, 1], +Y up),
  * deltas and state events; the CAD layer consumes only those — nothing in
@@ -14,10 +14,23 @@
  * overlay's button bar and gate the gesture routing below: pinches are inert
  * in VIEW, pick / drag / recolor / delete meshes in SELECT (a floating color
  * wheel + Delete HUD follow the selection; a pointing fingertip sweeps the
- * wheel and a 1.2 s hover locks the color; the Delete button answers to
- * mouse, pinch, keyboard and a pointing dwell — deletion is
- * confirmation-gated), and build primitives in CREATE. Camera gestures
- * (fist orbit / two-fist zoom) stay live in every mode.
+ * wheel and a 1.2 s hover locks the color; deletion is confirmation-gated),
+ * and build primitives in CREATE. SELECT also carries the CSG Boolean tools
+ * (`[ SUBTRACT ]` / `[ UNION ]` overlay toggles + the secondary-hand X-cross
+ * trigger; a live world-AABB clash indicator marks intersecting solids).
+ * Camera gestures (fist orbit / two-fist zoom) stay live in every mode.
+ *
+ * Destructive actions are confirmed in-vision only: the overlay's trash bin
+ * (scene clear) and every delete trigger open a spatial confirmation dialog
+ * drawn on the camera canvas — `[ CONFIRM (Pinch) ]` / `[ CANCEL (Open
+ * Palm) ]` — answered by a pinch on the target, a held OK gesture, an open
+ * palm or moving the hands away. No window.confirm(), no DOM modals. While
+ * it is open (`overlay.confirmActive`) every scene gesture is frozen.
+ *
+ * The live stats (mode / state / FPS / hands) render in the DOM metrics bar
+ * mounted directly underneath the camera view (`MetricsBar`); the camera
+ * card itself is repositioned by dragging its outer frame (`ThumbDragger`)
+ * and resized via its corner grip (`ThumbResizer`).
  */
 
 import { GestureEngine } from './vision/GestureEngine';
@@ -28,6 +41,7 @@ import type {
   Handedness,
 } from './vision/types';
 import type {
+  OverlayConfirmIntent,
   OverlayHudDisc,
   OverlayHudRect,
   OverlaySelectionHud,
@@ -38,7 +52,8 @@ import { buildArSceneFrame } from './cad/ArMirror';
 import { Toolbar } from './ui/Toolbar';
 import { ColorWheel } from './ui/ColorWheel';
 import { SelectionMenu } from './ui/SelectionMenu';
-import { ConfirmDialog } from './ui/ConfirmDialog';
+import { MetricsBar } from './ui/MetricsBar';
+import { ThumbDragger } from './ui/ThumbDragger';
 import { ThumbResizer } from './ui/ThumbResizer';
 
 const video = document.querySelector<HTMLVideoElement>('#video');
@@ -48,6 +63,7 @@ const toolbarRoot = document.querySelector<HTMLElement>('#toolbar');
 const viewport = document.querySelector<HTMLElement>('#viewport');
 const visionThumb = document.querySelector<HTMLElement>('#vision-thumb');
 const thumbExpand = document.querySelector<HTMLButtonElement>('#thumb-expand');
+const metricsRoot = document.querySelector<HTMLElement>('#metrics');
 
 if (
   !video ||
@@ -56,7 +72,8 @@ if (
   !toolbarRoot ||
   !viewport ||
   !visionThumb ||
-  !thumbExpand
+  !thumbExpand ||
+  !metricsRoot
 ) {
   throw new Error('cad-vision: required DOM elements are missing');
 }
@@ -119,6 +136,28 @@ const overlay = new DebugOverlay<CadTool>(canvas, {
   // vision overlay: the request routes straight into the builder, which
   // enforces it inside dragTo (the overlay renders the active state).
   onDragConstraintRequest: (constraint) => builder.setDragConstraint(constraint),
+  // In-vision trash bin (bottom-right of the camera view): pointing dwell,
+  // a fresh pinch over the icon or a mouse click opens the spatial
+  // confirmation dialog — the scene only clears on Confirm.
+  onTrashRequest: () => requestSceneClear(),
+  // Spatial confirmation dialog: every destructive action (scene clear,
+  // object deletion) is answered in-vision — no browser popups, no DOM
+  // modals. The overlay reports the gesture / mouse answer back here.
+  onConfirmRequest: (intent) => confirmDestructive(intent),
+  onCancelRequest: () => cancelDestructive(),
+  // SELECT-mode CSG Boolean tool toggles ([ SUBTRACT ] / [ UNION ]): the
+  // request arms the builder's tool; when meshes already intersect, the
+  // operation fires immediately (arm + run).
+  onBooleanToolRequest: (tool) => {
+    builder.setBooleanTool(tool);
+    if (tool !== null) builder.applyBoolean();
+  },
+  // Secondary-hand "X" cross (index + pinky up, middle + ring folded) held
+  // briefly: fire a SUBTRACT on the live clash.
+  onBooleanTrigger: () => builder.applyBoolean('subtract'),
+  // Live Boolean state (armed tool + clash availability) feeds the overlay's
+  // ready-to-run glow on the armed toggle.
+  booleanState: () => builder.booleanState,
   // SELECT-mode AR mirror: the ground grid + every committed mesh are
   // projected through the shared 3D camera onto the vision canvas, turning
   // it into a translucent live spatial mirror of the 3D viewport — in
@@ -134,11 +173,6 @@ const overlay = new DebugOverlay<CadTool>(canvas, {
 
 /* ---- UI ---- */
 const toolbar = new Toolbar(toolbarRoot, {
-  onClearScene: () => {
-    builder.clear();
-    colorWheel.hide(); // no selection left to anchor the wheel
-    selectionMenu.hide(); // …nor the Delete HUD
-  },
   onExportStl: () => builder.exportStl(),
   onCameraStart: () => startCamera(),
   onCameraStop: () => stopCamera(),
@@ -151,21 +185,24 @@ const colorWheel = new ColorWheel(viewport);
 
 // Floating selection HUD (SELECT mode): a Delete action anchored below the
 // selection's screen projection. Deletion is destructive, so every trigger
-// routes through the confirmation dialog below before the mesh is removed.
+// routes through the in-vision spatial confirmation dialog below before
+// the mesh is removed.
 const selectionMenu = new SelectionMenu(viewport, {
   onDeleteRequest: () => requestDeleteSelection(),
 });
 
-// Modal safety confirmation ("Are you sure you want to delete this object?
-// [Confirm] [Cancel]") — nothing is deleted until it is answered.
-const confirmDialog = new ConfirmDialog(viewport, {
-  onConfirm: () => confirmDeleteSelection(),
-  onCancel: () => cancelDeleteSelection(),
-});
+// Live stats bar, mounted directly underneath the camera view (inside the
+// floating thumbnail card): mode / state / FPS / hands per processed frame.
+const metricsBar = new MetricsBar(metricsRoot);
 
-// Mouse-drag resizing of the floating camera thumbnail: a corner grip inside
-// the video stage scales the card (the overlay re-measures its canvas every
-// frame, so nothing else needs a resize listener).
+// Camera-window dragging: the card's outer frame (header + metrics bar)
+// repositions the thumbnail; the video stage never drags it.
+const thumbDragger = new ThumbDragger(visionThumb);
+
+// Mouse-drag resizing of the floating camera thumbnail: a corner grip on
+// the card's outer frame (bottom-right, outside the video stage) scales
+// the card (the overlay re-measures its canvas every frame, so nothing
+// else needs a resize listener).
 const thumbResizer = new ThumbResizer(visionThumb);
 
 function setStatus(text: string): void {
@@ -221,14 +258,15 @@ function deviceToViewport(x: number, y: number): { x: number; y: number } {
 // by a pinch, so pinches always act on the scene.
 // - CREATE: draw a footprint (pinch start/drag raycast onto the ground plane).
 engine.onPinchStart((e) => {
+  // The spatial confirmation dialog is modal: while it is open, a pinch may
+  // only answer it — and the overlay handles pinch-on-target itself — so
+  // the scene below stays frozen.
+  if (overlay.confirmActive) return;
+  // A pinch that closes over an overlay button (mode / constraint / Boolean
+  // toggles, the trash bin, a dialog target) belongs to the UI, never the
+  // scene: it neither picks / builds nor arms a drag.
+  if (overlay.isUiAtDevice(e.position.x, e.position.y)) return;
   const point = deviceToViewport(e.position.x, e.position.y);
-  if (confirmDialog.isOpen) {
-    // Modal: while the delete confirmation is open, a pinch may only answer
-    // it — the scene below stays frozen.
-    if (confirmDialog.hitConfirm(point.x, point.y)) confirmDeleteSelection();
-    else if (confirmDialog.hitCancel(point.x, point.y)) cancelDeleteSelection();
-    return;
-  }
   if (engine.mode === 'select') {
     if (colorWheel.pickColorAt(point.x, point.y) !== null) return;
     if (selectionMenu.hitDelete(point.x, point.y)) {
@@ -243,7 +281,7 @@ engine.onPinchStart((e) => {
   }
 });
 engine.onPinchDrag((e) => {
-  if (confirmDialog.isOpen) return; // modal: the scene is frozen while confirming
+  if (overlay.confirmActive) return; // modal: the scene is frozen while confirming
   if (engine.mode === 'select') {
     // Only the grabbing hand drags the mesh; hand 2 hovering (or confirming
     // a color on the wheel) never fights the drag.
@@ -339,13 +377,21 @@ engine.on('mode_change', (event) => {
 // selection's live screen projection, with the pointing index fingertip
 // driving the timed hover color lock. The selection UI updates *before* the
 // overlay renders so the thumbnail HUD (wheel outline + Delete mirror) is
-// drawn from the same frame's geometry, never a frame stale.
+// drawn from the same frame's geometry, never a frame stale. The stats bar
+// below the camera view tracks the same frame (mode / state / FPS / hands).
 engine.on('frame', (event) => {
   if (event.type !== 'frame') return;
   // Hand coords live in the webcam frame: keep the scene's interaction
   // camera at the webcam aspect (true AR proportions, aligned picking).
   if (event.video.height > 0) cadScene.setInteractionAspect(event.video.width / event.video.height);
   updateSelectionUi(event);
+  metricsBar.update({
+    mode: event.mode.toUpperCase(),
+    state: event.state,
+    fps: event.fps,
+    hands: event.hands.length,
+    handedness: event.hands.map((hand) => hand.handedness).join(','),
+  });
   overlay.render(event);
 });
 
@@ -356,31 +402,59 @@ engine.setMode('view');
 /**
  * Delete flow (SELECT mode): every trigger — the selection HUD's Delete
  * button (mouse or pinch), or the Delete / Backspace keys — routes through
- * this confirmation gate; the mesh is only removed on Confirm.
+ * the in-vision spatial confirmation dialog; the mesh is only removed when
+ * the dialog is answered with Confirm (pinch on the target, OK-gesture
+ * hold, mouse click or Enter).
  */
 function requestDeleteSelection(): void {
-  if (confirmDialog.isOpen) return;
+  if (overlay.confirmActive) return;
   if (engine.mode !== 'select' || !builder.selectedMesh) return;
-  confirmDialog.open();
+  overlay.openConfirm('delete-selection');
 }
 
-/** Confirmation answered with Confirm: remove the selected object. */
-function confirmDeleteSelection(): void {
-  if (!confirmDialog.isOpen) return;
-  confirmDialog.close();
-  builder.deleteSelectedMesh();
-  selectHand = null; // the drag died with the object
+/**
+ * Scene-clear flow: the in-vision trash bin (pointing dwell, fresh pinch or
+ * mouse click) opens the same spatial confirmation dialog; the scene only
+ * clears on Confirm. Nothing to ask when the scene is already empty.
+ */
+function requestSceneClear(): void {
+  if (overlay.confirmActive) return;
+  if (builder.committedMeshes.length === 0) {
+    setStatus('Nothing to clear'); // no meshes: nothing to confirm
+    return;
+  }
+  overlay.openConfirm('clear-scene');
+}
+
+/**
+ * The spatial dialog was answered with Confirm: run the destructive intent
+ * (the overlay has already closed itself). No browser popups, no DOM
+ * modals — the answer arrived as a gesture (or mouse / keyboard).
+ */
+function confirmDestructive(intent: OverlayConfirmIntent): void {
+  if (intent === 'delete-selection') {
+    if (engine.mode !== 'select' || !builder.selectedMesh) return;
+    builder.deleteSelectedMesh();
+    selectHand = null; // the drag died with the object
+    colorPicked = false;
+    lastSelectionStamp = null;
+    colorWheel.hide();
+    selectionMenu.hide();
+    setStatus('Object deleted');
+    return;
+  }
+  builder.clear();
+  selectHand = null;
   colorPicked = false;
   lastSelectionStamp = null;
-  colorWheel.hide();
-  selectionMenu.hide();
-  setStatus('Object deleted');
+  colorWheel.hide(); // no selection left to anchor the wheel
+  selectionMenu.hide(); // …nor the Delete HUD
+  setStatus('Scene cleared');
 }
 
-/** Confirmation answered with Cancel: the object stays, nothing changes. */
-function cancelDeleteSelection(): void {
-  if (!confirmDialog.isOpen) return;
-  confirmDialog.close();
+/** The spatial dialog was dismissed (open palm / hand away / Escape). */
+function cancelDestructive(): void {
+  setStatus('Canceled');
 }
 
 /**
@@ -401,7 +475,7 @@ function updateSelectionUi(frame: FrameEvent): void {
     lastSelectionStamp === null ? 0 : Math.max(0, frame.timestamp - lastSelectionStamp);
   lastSelectionStamp = frame.timestamp;
   const anchor =
-    !confirmDialog.isOpen && engine.mode === 'select'
+    !overlay.confirmActive && engine.mode === 'select'
       ? builder.selectedProjection(viewportElement.clientWidth, viewportElement.clientHeight)
       : null;
   if (!anchor) {
@@ -455,7 +529,7 @@ function updateSelectionUi(frame: FrameEvent): void {
  * dialog freezes the scene).
  */
 function selectionHudFrame(): OverlaySelectionHud | null {
-  if (engine.mode !== 'select' || !builder.selectedMesh || confirmDialog.isOpen) return null;
+  if (engine.mode !== 'select' || !builder.selectedMesh || overlay.confirmActive) return null;
   const width = viewportElement.clientWidth;
   const height = viewportElement.clientHeight;
   if (width <= 0 || height <= 0) return null;
@@ -524,6 +598,7 @@ function stopCamera(): void {
   lastSelectionStamp = null;
   colorWheel.hide(); // tracking stopped: the floating wheel must not linger
   selectionMenu.hide(); // …nor the selection HUD
+  overlay.closeConfirm(); // …nor a half-asked destructive question
   toolbar.setCameraRunning(false);
   statusOutput.dataset.state = 'IDLE';
   statusOutput.title = '';
@@ -545,22 +620,35 @@ thumbExpand.addEventListener('click', () => {
 
 // Expose for experimentation from the browser console.
 Object.assign(window, {
-  cadVision: { engine, overlay, cadScene, builder, toolbar, colorWheel, selectionMenu, confirmDialog, thumbResizer },
+  cadVision: {
+    engine,
+    overlay,
+    cadScene,
+    builder,
+    toolbar,
+    colorWheel,
+    selectionMenu,
+    metricsBar,
+    thumbDragger,
+    thumbResizer,
+  },
 });
 
 // Keyboard shortcuts: Delete / Backspace delete the selected object through
-// the same confirmation gate as the HUD button; while the confirmation is
-// open, Enter (or Delete again) confirms and Escape cancels.
+// the same spatial confirmation gate as the HUD button; while the
+// confirmation is open, Enter (or Delete again) confirms and Escape cancels.
 document.addEventListener('keydown', (event) => {
   if (event.repeat) return; // a held key never double-answers
   const key = event.key;
-  if (confirmDialog.isOpen) {
+  if (overlay.confirmActive) {
     if (key === 'Escape') {
       event.preventDefault();
-      cancelDeleteSelection();
+      overlay.closeConfirm(); // keyboard dismiss = the safe answer
+      cancelDestructive();
     } else if (key === 'Enter' || key === 'Delete' || key === 'Backspace') {
       event.preventDefault();
-      confirmDeleteSelection();
+      const intent = overlay.confirmIntent;
+      if (intent !== null) confirmDestructive(intent);
     }
     return;
   }

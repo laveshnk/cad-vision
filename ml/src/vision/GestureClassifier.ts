@@ -1250,6 +1250,39 @@ export class GestureClassifier {
     );
   }
 
+  /**
+   * "OK" gesture: thumb and index tips touching (a pinch-shaped loop) while
+   * middle / ring / pinky stay extended past their own PIP joints — the
+   * deliberate "hold to confirm" pose for in-vision dialogs.
+   */
+  private isOkGesture(shape: HandShape): boolean {
+    const [, middle, ring, pinky] = shape.extensionRatios;
+    return (
+      shape.thumbIndexDistance < this.options.pinchReleaseThreshold &&
+      middle > this.options.openPalmExtensionRatio &&
+      ring > this.options.openPalmExtensionRatio &&
+      pinky > this.options.openPalmExtensionRatio
+    );
+  }
+
+  /**
+   * "X" cross pose: index and pinky extended past their own PIP joints while
+   * middle and ring are folded into the palm (a closed-fist fold test) —
+   * the secondary-hand trigger for CSG boolean operations. A pointing hand
+   * (only the index up) or an open palm fails at least one test.
+   */
+  private isXCross(shape: HandShape): boolean {
+    const [indexExt, , , pinkyExt] = shape.extensionRatios;
+    const [, middleFold, ringFold] = shape.foldRatios;
+    const foldLimit = this.options.fistFoldRatio;
+    return (
+      indexExt > this.options.openPalmExtensionRatio &&
+      pinkyExt > this.options.openPalmExtensionRatio &&
+      middleFold < foldLimit &&
+      ringFold < foldLimit
+    );
+  }
+
   private setState(
     to: GestureState,
     reason: string,
@@ -1280,6 +1313,9 @@ export class GestureClassifier {
     const snapshots: HandSnapshot[] = [];
     for (const [handedness, hand] of presentHands) {
       const track = this.tracks.get(handedness);
+      // Stateless per-frame poses (dialog answers + boolean trigger): all
+      // ratio tests, so they are size / distance / rotation invariant.
+      const shape = measureHandShape(hand);
       snapshots.push({
         handedness,
         score: hand.score,
@@ -1287,6 +1323,9 @@ export class GestureClassifier {
         pinchActive: track?.pinchActive ?? false,
         fistActive: track?.fistActive ?? false,
         pointing: track?.pointingActive ?? false,
+        openPalm: this.isOpenPalm(hand),
+        okGesture: this.isOkGesture(shape),
+        xCross: this.isXCross(shape),
         landmarks: hand.landmarks,
       });
     }

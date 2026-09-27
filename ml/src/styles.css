@@ -196,10 +196,12 @@ button:disabled {
   border-radius: 6px;
 }
 
-/* Mouse-resize grip for the camera thumbnail (bottom-right corner of the
-   video stage): diagonal hatch clipped to a corner triangle. The overlay
-   canvas beneath keeps pointer events for its own buttons — the grip sits on
-   top and owns the drag (pointer capture keeps it even outside the card). */
+/* Mouse-resize grip for the camera thumbnail, attached to the *card's outer
+   frame* (bottom-right corner, over the metrics bar — never inside the
+   video stage, so in-vision gestures can't start a resize): diagonal hatch
+   clipped to a corner triangle. The overlay canvas beneath keeps pointer
+   events for its own buttons — the grip sits on top and owns the drag
+   (pointer capture keeps it even outside the card). */
 .thumb-resize {
   position: absolute;
   right: 0;
@@ -228,6 +230,20 @@ button:disabled {
 /* While dragging: the card tracks the cursor 1:1 (no width transition). */
 .vision-thumb--resizing {
   transition: none;
+}
+
+/* Camera-window drag handle: the card's outer frame (header + metrics bar)
+   repositions the thumbnail. The video stage / overlay canvas is NOT a
+   handle — gestures inside the camera view never drag the window. */
+.vision-thumb-header,
+.metrics-bar {
+  cursor: grab;
+  touch-action: none; /* pointer drag, not a scroll */
+}
+
+.vision-thumb--dragging .vision-thumb-header,
+.vision-thumb--dragging .metrics-bar {
+  cursor: grabbing;
 }
 
 /* ---- Vision stage (webcam + 2D overlay) ---- */
@@ -454,81 +470,41 @@ button:disabled {
   color: #dc2626;
 }
 
-/* ---- Modal confirm dialog (destructive action safety) ---- */
-.confirm-dialog {
-  position: absolute;
-  inset: 0;
-  /* Above the camera thumbnail (z-index 30): a modal confirmation outranks
-     every floating surface. */
-  z-index: 40;
+/* ---- Live stats bar (directly underneath the camera view) ---- */
+.metrics-bar {
   display: flex;
   align-items: center;
-  justify-content: center;
-  visibility: hidden;
-  pointer-events: none;
-}
-
-.confirm-dialog--open {
-  visibility: visible;
-  pointer-events: auto;
-}
-
-.confirm-dialog-backdrop {
-  position: absolute;
-  inset: 0;
-  background: rgba(15, 23, 42, 0.32);
-  backdrop-filter: blur(2px);
-  -webkit-backdrop-filter: blur(2px);
-}
-
-.confirm-dialog-card {
-  position: relative;
-  max-width: 340px;
-  margin: 16px;
-  padding: 18px 20px;
-  background: rgba(255, 255, 255, 0.92);
-  backdrop-filter: blur(12px) saturate(140%);
-  -webkit-backdrop-filter: blur(12px) saturate(140%);
-  border: 1px solid rgba(15, 23, 42, 0.1);
-  border-radius: 12px;
-  box-shadow: 0 12px 40px rgba(15, 23, 42, 0.28);
-}
-
-.confirm-dialog-message {
-  margin: 0 0 14px;
-  font-size: 13px;
-  line-height: 1.5;
-  color: var(--text);
-}
-
-.confirm-dialog-actions {
-  display: flex;
-  justify-content: flex-end;
+  justify-content: space-between;
   gap: 8px;
-}
-
-.confirm-dialog-confirm {
-  color: #b91c1c;
-  border-color: rgba(185, 28, 28, 0.45);
-}
-
-.confirm-dialog-confirm:hover {
-  color: #dc2626;
-  background: #fef2f2;
-  border-color: #b91c1c;
-}
-
-/* ---- Footer ---- */
-.footer p {
-  font-size: 11.5px;
-  color: var(--text-dim);
-  margin: 0;
-  padding: 10px 18px;
+  padding: 5px 10px;
   border-top: 1px solid rgba(15, 23, 42, 0.06);
-  line-height: 1.6;
+  font-size: 9.5px;
+  font-weight: 500;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
 }
 
-.footer code {
+.metrics-bar__cell {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  min-width: 0;
+}
+
+.metrics-bar__label {
+  color: rgba(100, 116, 139, 0.75);
+}
+
+.metrics-bar__value {
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* The FPS cell gets a subtle accent so the live heartbeat reads. */
+.metrics-bar__value--fps {
   color: var(--accent);
 }
 

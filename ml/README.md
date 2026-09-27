@@ -3,9 +3,12 @@
 Self-contained TypeScript application that turns webcam hand tracking into an
 interactive CAD tool. The MediaPipe-based gesture engine emits **normalized CAD
 gesture events** (pinch/draw, extrude, camera move, zoom); a decoupled Three.js module
-(orbit rig, ground-plane building, STL export) and a light glass toolbar
+(orbit rig, ground-plane building, **CSG Boolean operations** via
+`three-bvh-csg`, STL export) and a light glass toolbar
 consume them. The camera renders as a floating video-call-style thumbnail
-(landmarks, skeleton, HUD overlay) over the full-bleed 3D viewport.
+(landmarks, skeleton and the in-vision UI drawn on its Canvas 2D overlay) over
+the full-bleed 3D viewport, with a live stats bar mounted directly underneath
+the camera view.
 
 Three interaction modes — **VIEW** (camera navigation only), **SELECT**
 (pick / drag / recolor meshes) and **CREATE** (build primitives) — are
@@ -39,16 +42,18 @@ src/
 ├── styles.css                 # light theme; full-bleed viewport, camera thumbnail, glass toolbar
 ├── cad/
 │   ├── CadScene.ts            # Three.js viewport: camera rig, lights, grid, orbit
-│   ├── CadBuilder.ts          # gesture-driven primitives + STL export
+│   ├── CadBuilder.ts          # gesture-driven primitives, selection, CSG booleans, STL export
+│   ├── booleanOps.ts          # three-bvh-csg wrapper: subtract / union + AABB clash helpers
 │   ├── arProjection.ts        # pure NDC→canvas math + 2D convex hull (AR mirror)
 │   └── ArMirror.ts            # plain-data AR projection of grid + meshes for the overlay
 ├── ui/
-│   ├── Toolbar.ts             # CAD toolbar: camera toggle, Clear scene, Export STL
+│   ├── Toolbar.ts             # CAD toolbar: camera toggle, Export STL
 │   ├── ColorWheel.ts          # floating HSL color wheel + timed hover lock (dwell tracker)
 │   ├── SelectionMenu.ts       # floating selection HUD (Delete action, SELECT mode)
-│   ├── ConfirmDialog.ts       # modal confirmation for destructive actions
+│   ├── MetricsBar.ts          # boxy monospace stats bar under the camera view
 │   ├── hitTest.ts             # root-local DOM hit-tests for the floating overlays
-│   └── ThumbResizer.ts        # mouse-drag resize grip for the camera thumbnail
+│   ├── ThumbDragger.ts        # camera-window drag handle (outer frame only)
+│   └── ThumbResizer.ts        # corner resize grip on the camera card's frame
 └── vision/
     ├── types.ts               # shared types + event payloads
     ├── coordinates.ts         # device-space mapping, vec3 math
@@ -59,7 +64,7 @@ src/
     ├── PathStraightener.ts    # straight-segment filter for camera moves
     ├── GestureClassifier.ts   # pinch/fist/orbit/zoom detection + finite state machine
     ├── GestureEngine.ts       # facade: pipeline + event emitter
-    ├── DebugOverlay.ts        # 2D canvas renderer (landmarks, skeleton, HUD)
+    ├── DebugOverlay.ts        # 2D canvas renderer (landmarks, skeleton, in-vision UI)
     └── index.ts               # public API barrel
 ```
 
@@ -81,8 +86,8 @@ the boundary):
 
 ```
 GestureEngine  --typed events-->  main.ts (orchestrator)
-  ├── CadScene / CadBuilder      primitives, extrusion, selection, orbit, STL export
-  └── Toolbar                    camera toggle + scene utilities
+  ├── CadScene / CadBuilder      primitives, extrusion, selection, CSG booleans, orbit, STL export
+  └── Toolbar / MetricsBar       camera toggle + scene utilities, live stats
 ```
 
 ### Running mode note
@@ -121,7 +126,7 @@ starts in `'view'`):
 | Mode | Pinches | Camera gestures (fist orbit / two-fist zoom) |
 | ---- | ------- | -------------------------------------------- |
 | **VIEW** | inert — no `pinch_*` / `extrude_*` events, never a build state, cannot veto orbit / zoom | live |
-| **SELECT** | `pinch_start` raycasts against committed meshes (pick + highlight, empty ground deselects); `pinch_drag` drags the selected mesh under the active constraint toggle — `[ XZ PLANE ]` slides it across the ground (elevation locked) and `[ Y AXIS ]` maps vertical hand travel to a lift / lower; with the pinch held, an **open palm** on the other hand emits `select_rotate` yaw deltas (compass ring around the object); the vision overlay mirrors the 3D scene as a translucent AR layer; FSM state `SELECTING` | live |
+| **SELECT** | `pinch_start` raycasts against committed meshes (pick + highlight, empty ground deselects); `pinch_drag` drags the selected mesh under the active constraint toggle — `[ XZ PLANE ]` slides it across the ground (elevation locked) and `[ Y AXIS ]` maps vertical hand travel to a lift / lower; with the pinch held, an **open palm** on the other hand emits `select_rotate` yaw deltas (compass ring around the object); dragging one mesh into another shows the **clash indicator** and the `[ SUBTRACT ]` / `[ UNION ]` Boolean tools can cut a hole or merge the solids; the vision overlay mirrors the 3D scene as a translucent AR layer; FSM state `SELECTING` | live |
 | **CREATE** | full build gesture set (below) | live |
 
 A mode switch force-releases in-flight pinches (synthetic `pinch_end`) and
@@ -180,15 +185,20 @@ and hands absent > 10 frames re-seed from fresh evidence. Configurable via
 
 The full-bleed viewport is a Three.js scene (floor grid, fog, damped orbit
 camera, starting straight on so the grid is square to the screen) driven entirely by the gesture events above, with the camera rendered
-as a floating thumbnail (top-left, click ⤢ to expand/collapse, drag its
-bottom-right corner to resize) over it.
+as a floating thumbnail (top-left, click ⤢ to expand/collapse, drag the card's
+**outer frame** — header bar or stats bar — to reposition it, drag the grip on
+its bottom-right corner — outside the video — to resize it) over it. A boxy
+monospace **stats bar** (mode / state / FPS / hands) is mounted directly
+underneath the camera view inside the card.
 Interaction modes are switched with the button bar along the top of the
 camera overlay — mouse click, or **point** (index finger up, other fingers
 curled) and hold the fingertip on a button for 500 ms (a ring marks the
 pointing fingertip, a progress bar fills). Pinches, fists and open palms
-never press buttons, so moving, editing or building can't switch modes or
-shapes by accident. The app starts in **VIEW** and the active
-mode is shown inverted with an indicator bar (and in the bottom-left HUD).
+never press toggle buttons, so moving, editing or building can't switch modes or
+shapes by accident (the trash bin and the confirmation dialog's targets are
+the two pinch-activated surfaces). The app starts in **VIEW** and the active
+mode is shown inverted with an indicator bar (and in the stats bar under the
+camera).
 In **CREATE** mode a column of shape icon buttons appears down the right edge
 of the camera view — **cube** (default), **cuboid**, **cylinder**, **sphere** —
 picked the same way (point-and-hold / click); it sets the shape for the next
@@ -260,14 +270,40 @@ build:
    release ends the drag. Pinches never draw or extrude in this mode.
    **Delete**: the selection HUD below the object carries a **Delete**
    button — click it, pinch it, point at it (index-tip dwell of ~0.8 s with a progress
-    fill), or press `Delete` / `Backspace`. Every
-   trigger opens a modal confirmation ("Are you sure you want to delete
-   this object? [Confirm] [Cancel]"): only Confirm (button, pinch, or
-   `Enter`) removes the mesh from the scene and frees its geometry /
-   material / edge overlays, while Cancel (button, pinch, `Escape`, or
-   clicking the backdrop) leaves everything untouched. While the dialog
-   is open the scene is frozen — pinches only answer the dialog.
-5. **Orbit the camera** — make a fist and move it: the camera orbits the
+    fill), or press `Delete` / `Backspace`. Every trigger opens the
+   in-vision **spatial confirmation dialog** (see below) — never a browser
+   popup or a DOM modal. Only **Confirm** removes the mesh from the scene
+   and frees its geometry / material / edge overlays; Cancel leaves
+   everything untouched. While the dialog is open the scene is frozen —
+   gestures only answer the dialog. The same dialog guards the in-vision
+   **trash bin** (bottom-right of the camera view), which clears the whole
+   scene on Confirm: point your index fingertip at the bin and hold it
+   there for 600 ms, pinch directly over the icon, or click it.
+5. **CSG Booleans — cut a hole or merge (SELECT mode)** — with two committed
+   meshes overlapping, drag the selected one into the other: while their
+   world-space bounding boxes intersect (`box3.intersectsBox`), a
+   **translucent amber clash indicator** fills the overlap volume and the
+   armed Boolean button glows amber (ready to fire). The two mutually
+   exclusive tool toggles sit in the left stack below the drag-constraint
+   toggles: `[ SUBTRACT (Cut Hole) ]` and `[ UNION (Merge) ]` — point at
+   one and hold (or click) to arm it; if a clash is already live the
+   operation fires immediately. To fire while dragging (one hand holds the
+   mesh), show an **X cross** with your free hand — index and pinky
+   extended, middle and ring folded — and hold it briefly (~0.2 s).
+   - **Subtract** carves the *selected* cutter out of the intersected
+     base (`Evaluator.evaluate(base, cutter, SUBTRACTION)` from
+     `three-bvh-csg`): the base is replaced by the result mesh (fresh
+     geometry with crisp regenerated `EdgesGeometry` edge lines, the
+     base's frame and transform), and the cutter is removed
+     from the scene.
+   - **Union** fuses both solids into **one continuous body**
+     (`ADDITION`), wearing the selected mesh's color, with unified edge
+     lines replacing the two separate entities in the scene hierarchy.
+   The result stays selected, so you can keep dragging it into more
+   shapes; the clash indicator refreshes live. A failed / empty CSG is a
+   safe no-op (the scene is never half-edited). Committed results export
+   with the rest of the scene as `model.stl`.
+6. **Orbit the camera** — make a fist and move it: the camera orbits the
    world origin and the scene follows your hand — fist right swings the
    camera left, fist up swings it lower — with damping (`CadScene.onOrbit`);
    open palm stops. The camera focus is **locked to `(0, 0, 0)`**: the view
@@ -277,16 +313,33 @@ build:
    doorknob): the scene turns around the vertical axis with your twist
    (`CadScene.onRotate`, `rotateSpeed` 1.5×). Open and re-close the fist to
    ratchet further.
-6. **Zoom / turn** — make fists with both hands and move **both**: pull them
+7. **Zoom / turn** — make fists with both hands and move **both**: pull them
    apart to zoom in, bring them together to zoom out (`CadScene.onZoom`,
    clamped between `minDistance` and `maxDistance`), or turn them around
    each other like a steering wheel to turn the scene (`CadScene.onRotate`).
    If only one fist moves (the other held still), it just moves the camera
    like a single fist — it never zooms.
 
+**Spatial confirmation dialog (no mouse popups).** Every destructive action
+— deleting the selected object (Delete button, keyboard) or clearing the
+whole scene (in-vision trash bin) — is confirmed *in vision*: a translucent
+scrim + centered card drawn on the camera canvas with two spatial targets,
+`[ CONFIRM (Pinch) ]` (danger red) and `[ CANCEL (Open Palm) ]` (calm blue).
+Confirm by pinching so the pinch *closes* over the confirm target, by
+clicking it, by pressing `Enter`, or by holding the **OK gesture** — thumb
+and index tips touching, middle / ring / pinky extended — anywhere in view
+for 1 second (an amber progress bar fills the target). Cancel by holding an
+**open palm** briefly, by moving every hand out of view, by `Escape`, or by
+clicking the cancel target. The pinch that triggered the dialog stays
+"engaged", so releasing it into an open hand can never instantly cancel —
+and while the dialog is open the scene below is frozen. There is no
+`window.confirm()` and no DOM modal anywhere in the delete / clear flows.
+
 Toolbar (mouse or programmatic): a single **Start camera / Stop** toggle
-(webcam + tracking lifecycle), **Clear scene**, and **Export STL** (binary
-`model.stl` download via `three/examples/jsm/exporters/STLExporter`). New
+(webcam + tracking lifecycle) and **Export STL** (binary
+`model.stl` download via `three/examples/jsm/exporters/STLExporter`) —
+scene clearing lives in vision (the trash bin + spatial confirmation), so
+no mouse-only destructive button is mounted in the header. New
 builds use the cube by default; the shape is picked with the CREATE-mode
 icon buttons on the camera view (or programmatically via
 `CadBuilder.setTool()`).
@@ -353,7 +406,11 @@ on-screen view), +Y up — ready to map into a CAD viewport.
   `openPalmMinExtendedFingers` 4, `openPalmThumbTuckRatio` 0.6), and the
   pointing pose that presses overlay buttons (`pointingIndexRatio` 1.5,
   `pointingCurlRatio` 1.2, `pointingHoldSlack` 0.15,
-  `pointingDebounceFrames` 2).
+  `pointingDebounceFrames` 2). The per-frame hand snapshots additionally
+  report three stateless poses (reusing those thresholds — no new options):
+  `openPalm` (dialog cancel), `okGesture` (thumb + index loop, other
+  fingers extended — confirm hold) and `xCross` (index + pinky up,
+  middle + ring folded — the Boolean trigger).
 - `initialMode` — `InteractionMode`: starting interaction mode. Defaults to
   `'create'` (full legacy gesture set); the app itself starts in `'view'`
   and switches via `setMode()` at runtime.
@@ -374,6 +431,14 @@ The `<canvas id="overlay">` (pure Canvas 2D) mirrors the feed and draws:
   mode bar in the top-left corner: `[ XZ PLANE ]` (default) and
   `[ Y AXIS (ELEVATE) ]` — same boxy style and pointing activation
   (`onDragConstraintRequest`);
+- in **SELECT mode**, the two **CSG Boolean tool toggles** continue the left
+  stack: `[ SUBTRACT (Cut Hole) ]` and `[ UNION (Merge) ]` — mutually
+  exclusive, re-press disarms (`onBooleanToolRequest` → arm, and fire when
+  a clash is already live). While a tool is armed and the selection
+  intersects another mesh (live `booleanState` provider), the armed button
+  glows amber — ready to fire. The secondary-hand **X cross** (index +
+  pinky extended, middle / ring folded, held ~0.2 s) fires SUBTRACT
+  without touching the buttons (`onBooleanTrigger`);
 - in **CREATE mode**, a column of square **shape icon buttons** down the
   right edge (cube (default), cuboid, cylinder, sphere — from the `shapes`
   option, each with an `icon`; picks reported through `onShapeRequest` →
@@ -396,13 +461,27 @@ The `<canvas id="overlay">` (pure Canvas 2D) mirrors the feed and draws:
   (orange for EXTRUDING),
 - thumb↔index pinch line with live distance, dual-hand extrusion link with
   `D` and scale factor,
-- HUD (bottom-left): interaction mode, FPS, hand count + handedness, gesture
-  state, live pinch/extrude/orbit metrics.
+- the **trash bin** (bottom-right corner): a boxy recycle-bin icon button
+  that clears the scene through the spatial confirmation
+  (`onTrashRequest`) — activated by a pointing index-tip dwell of 600 ms
+  (`trashDwellMs`, progress bar fills along its bottom edge), by a
+  *fresh* pinch that closes over the icon (a drag sweeping across never
+  triggers it), or by a mouse click. Hidden while the confirmation
+  dialog is open;
+- the **spatial confirmation dialog**: scrim + centered card with the
+  `[ CONFIRM (Pinch) ]` / `[ CANCEL (Open Palm) ]` targets (see the
+  workflow section). While it is open (`overlay.confirmActive` /
+  `confirmIntent`), every other overlay interaction freezes; the host
+  receives the answer through `onConfirmRequest` / `onCancelRequest`
+  (`openConfirm('clear-scene' | 'delete-selection')` / `closeConfirm()`);
+- the live stats (mode / state / FPS / hands) are **not** drawn on the
+  canvas — they render in the DOM **metrics bar** (`src/ui/MetricsBar.ts`)
+  mounted directly underneath the camera view inside the thumbnail card.
 
 ## Tests
 
 ```bash
-npm test        # vitest — coordinates, filters, handedness stabilizer, path straightener, classifier/FSM + color-wheel math / dwell tracker unit tests
+npm test        # vitest — coordinates, filters, handedness stabilizer, path straightener, classifier/FSM (+ pose snapshots), CSG booleanOps, color-wheel math / dwell tracker unit tests
 npm run build   # tsc --noEmit + vite production build
 ```
 
