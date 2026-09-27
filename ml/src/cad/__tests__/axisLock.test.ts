@@ -21,12 +21,41 @@ describe('AxisLock', () => {
     expect(lock.update(-0.02, -0.005)).toEqual({ deltaX: 0, deltaY: -0.005 });
   });
 
-  it('stays on the locked axis even when the hand later drifts the other way', () => {
-    const lock = new AxisLock({ decideDistance: 0.03 });
+  it('ignores brief wobble onto the other axis (no switch)', () => {
+    const lock = new AxisLock({ decideDistance: 0.03, switchDistance: 0.03 });
     lock.update(0.04, 0);
     expect(lock.lockedAxis).toBe('y');
-    for (let i = 0; i < 5; i++) expect(lock.update(0.001 * i, 0.02).deltaY).toBe(0);
+    // Alternating: a vertical-dominated frame, then a horizontal one — the
+    // pending switch resets each time the locked axis dominates again.
+    for (let i = 0; i < 6; i++) {
+      const out = i % 2 ? lock.update(0.02, 0.005) : lock.update(0.004, 0.02);
+      expect(out.deltaY).toBe(0);
+    }
     expect(lock.lockedAxis).toBe('y');
+  });
+
+  it('switches axis mid-gesture: right for a while, then up', () => {
+    const lock = new AxisLock({ decideDistance: 0.03, switchDistance: 0.03 });
+    let yaw = 0;
+    let pitch = 0;
+    for (let i = 0; i < 5; i++) {
+      const out = lock.update(0.02, 0.001); // moving right
+      yaw += out.deltaX;
+      pitch += out.deltaY;
+    }
+    expect(lock.lockedAxis).toBe('y');
+    expect(yaw).toBeCloseTo(0.1);
+    expect(pitch).toBe(0);
+    for (let i = 0; i < 5; i++) {
+      const out = lock.update(0.001, 0.02); // now moving up, fist still closed
+      yaw += out.deltaX;
+      pitch += out.deltaY;
+    }
+    expect(lock.lockedAxis).toBe('x');
+    // All the upward travel arrives as pitch (released on the switch).
+    expect(pitch).toBeCloseTo(0.1);
+    // Only the tiny horizontal drift before the switch leaked into yaw.
+    expect(yaw).toBeCloseTo(0.1 + 0.001, 3);
   });
 
   it('releases the lock after the fist holds still, so a new axis can be chosen', () => {

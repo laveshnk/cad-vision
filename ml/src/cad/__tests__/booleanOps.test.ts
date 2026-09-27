@@ -123,8 +123,9 @@ describe('evaluateBoolean — union (merge)', () => {
     expect(bounds?.max.x).toBeCloseTo(2, 3);
     expect(bounds?.min.y).toBeCloseTo(-1, 3);
     expect(bounds?.max.y).toBeCloseTo(1, 3);
-    // One single mesh replaces both entities (no groups / material arrays).
-    expect(Array.isArray(result?.material)).toBe(false);
+    // One mesh replaces both entities, each keeping its own material.
+    expect(Array.isArray(result?.material)).toBe(true);
+    expect((result?.material as THREE.Material[]).length).toBe(2);
   });
 });
 
@@ -300,5 +301,45 @@ describe('evaluateBoolean — no stray edges on cut faces', () => {
     const base = solid(new THREE.BoxGeometry(3, 2, 3), 0, 0);
     const result = cut(base, solid(new THREE.CylinderGeometry(0.5, 0.5, 1.2, 48), 1.5, 0));
     expect(strayEdges(result)).toBe(0);
+  });
+});
+
+describe('evaluateBoolean — union keeps each part\'s own color', () => {
+  const colored = (hex: number, position: [number, number, number]) => {
+    const mesh = cube(2, position);
+    (mesh.material as THREE.MeshStandardMaterial).color.setHex(hex);
+    return mesh;
+  };
+
+  it('returns one material per operand (grouped geometry), colors preserved', () => {
+    const red = colored(0xff0000, [0, 0, 0]);
+    const blue = colored(0x0000ff, [1, 0, 0]);
+    const result = evaluateBoolean(red, blue, 'union');
+    expect(result).not.toBeNull();
+    const materials = result?.material as THREE.MeshStandardMaterial[];
+    expect(Array.isArray(materials)).toBe(true);
+    const hexes = materials.map((m) => m.color.getHex()).sort((x, y) => x - y);
+    expect(hexes).toEqual([0x0000ff, 0xff0000]);
+    // Every triangle range is assigned to one of those materials.
+    const groups = result?.geometry.groups ?? [];
+    expect(groups.length).toBeGreaterThanOrEqual(2);
+    for (const group of groups) expect(materials[group.materialIndex ?? 0]).toBeDefined();
+  });
+
+  it('leaves the operands\' own materials untouched (clones)', () => {
+    const red = colored(0xff0000, [0, 0, 0]);
+    const blue = colored(0x0000ff, [1, 0, 0]);
+    const result = evaluateBoolean(red, blue, 'union');
+    const materials = result?.material as THREE.Material[];
+    expect(materials).not.toContain(red.material);
+    expect(materials).not.toContain(blue.material);
+  });
+
+  it('subtract still yields a single material (the cut takes the base look)', () => {
+    const red = colored(0xff0000, [0, 0, 0]);
+    const blue = colored(0x0000ff, [1, 0, 0]);
+    const result = evaluateBoolean(red, blue, 'subtract', (red.material as THREE.Material).clone());
+    expect(Array.isArray(result?.material)).toBe(false);
+    expect(result?.geometry.groups.length ?? 0).toBeLessThanOrEqual(1);
   });
 });
