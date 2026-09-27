@@ -137,6 +137,9 @@ export function wheelColorAt(
   return hslToHex(wheel.hue, wheel.saturation, lightness);
 }
 
+/** Zoom a freshly shown wheel starts from before easing up (pop-in). */
+const APPEAR_ZOOM = 0.3;
+
 /** Hue sector width (degrees) — the tolerance band of one "color slice". */
 const SLICE_DEGREES = 15;
 /** Saturation below this the wheel reads as the neutral (gray) center slice. */
@@ -240,6 +243,8 @@ export class ColorWheel {
   private shown = false;
   /** Radius multiplier (e.g. enlarged while a fingertip hovers the disc). */
   private zoom = 1;
+  /** Zoom the disc is easing toward (`animateZoomTo`). */
+  private zoomTarget = 1;
 
   constructor(root: HTMLElement, options: ColorWheelOptions = {}) {
     this.root = root;
@@ -314,6 +319,21 @@ export class ColorWheel {
 
   setZoom(factor: number): void {
     this.zoom = Number.isFinite(factor) && factor > 0 ? factor : 1;
+    this.zoomTarget = this.zoom;
+  }
+
+  /**
+   * Ease the zoom toward `target` over one frame of `dtMs` (exponential
+   * approach, time constant `timeConstantMs`): smooth, interruptible grow /
+   * shrink animations — e.g. hover enlarge and release. Picking and
+   * `radius` follow the animated value, so a host-drawn disc stays exact.
+   */
+  animateZoomTo(target: number, dtMs: number, timeConstantMs = 80): void {
+    if (!Number.isFinite(target) || target <= 0) return;
+    this.zoomTarget = target;
+    const blend = dtMs > 0 ? 1 - Math.exp(-dtMs / Math.max(1, timeConstantMs)) : 0;
+    this.zoom += (this.zoomTarget - this.zoom) * blend;
+    if (Math.abs(this.zoomTarget - this.zoom) < 0.002) this.zoom = this.zoomTarget;
   }
 
   /** Timed hover lock completion [0, 1] (the countdown ring's fill ratio). */
@@ -347,6 +367,9 @@ export class ColorWheel {
    * stays fully inside the root — for a fixed placement such as a corner.
    */
   showAt(centerX: number, centerY: number): void {
+    // Pop-in: a freshly shown wheel starts small and eases up to its zoom
+    // (via `animateZoomTo`) instead of snapping into view.
+    if (!this.shown) this.zoom = Math.min(this.zoom, APPEAR_ZOOM);
     this.shown = true;
     const radius = this.radius;
     const width = Math.max(this.root.clientWidth, radius * 2);

@@ -58,8 +58,8 @@ const CUTTER_GROWTH = 1e-3;
 
 /** Shared, reuse-safe evaluator (single-threaded per-frame usage). */
 const evaluator = new Evaluator();
-// One material for the whole result (no per-source groups): committed
-// meshes stay single-material — repaint / dispose keep working.
+// Groups are toggled per operation in evaluateBoolean: off for subtract
+// (one material), on for union (each operand keeps its own material).
 evaluator.useGroups = false;
 
 /**
@@ -107,7 +107,11 @@ export function boxesClash(a: THREE.Box3, b: THREE.Box3): boolean {
  * @param tool   the other solid — for subtract, the cutter whose footprint
  *               is removed; for union, the merged-away partner.
  * @param operation `'subtract'` or `'union'`.
- * @param material the surviving material for the result mesh.
+ * @param material subtract: the surviving material for the result mesh
+ *               (one material — the cut takes the base's look). Union
+ *               ignores it: the result keeps **each operand's own
+ *               material** (geometry groups + a material array, cloned from
+ *               the operands), so merged parts keep their colors.
  * @returns a fresh mesh (new geometry + crisp `EdgesGeometry` overlay,
  *          base's transform, cast/receive shadows) — never added to a scene;
  *          `null` when the operation fails or produces an empty solid.
@@ -116,14 +120,18 @@ export function evaluateBoolean(
   base: THREE.Mesh,
   tool: THREE.Mesh,
   operation: BooleanOperation,
-  material: THREE.Material
+  material?: THREE.Material
 ): THREE.Mesh | null {
   // Detached brushes carrying the committed meshes' geometry + transform:
-  // the evaluator reads `matrixWorld`, so update it after copying.
-  const brushA = meshToBrush(base);
-  const brushB = meshToBrush(tool, operation === 'subtract' ? 1 + CUTTER_GROWTH : 1);
+  // the evaluator reads `matrixWorld`, so update it after copying. A union
+  // carries cloned operand materials so the result keeps both looks.
+  const union = operation === 'union';
+  const brushA = meshToBrush(base, 1, union);
+  const brushB = meshToBrush(tool, union ? 1 : 1 + CUTTER_GROWTH, union);
   try {
-    const op = operation === 'subtract' ? SUBTRACTION : ADDITION;
+    const op = union ? ADDITION : SUBTRACTION;
+    // Groups (per-operand material ranges) only for a union.
+    evaluator.useGroups = union;
     const result = evaluator.evaluate(brushA, brushB, op);
     const geometry = result.geometry;
     const position = geometry.getAttribute('position');
@@ -135,9 +143,13 @@ export function evaluateBoolean(
     // CSG output has T-junctions, which rasterize with pixel-wide cracks;
     // drawing back faces too makes a crack show the solid's own dark
     // interior instead of the bright floor behind it (no sparkles).
-    material.side = THREE.DoubleSide;
-    material.shadowSide = THREE.BackSide; // keep the usual acne-free shadows
-    const mesh = new THREE.Mesh(geometry, material);
+    const materials: THREE.Material | THREE.Material[] =
+      union || !material ? result.material : material;
+    for (const m of Array.isArray(materials) ? materials : [materials]) {
+      m.side = THREE.DoubleSide;
+      m.shadowSide = THREE.BackSide; // keep the usual acne-free shadows
+    }
+    const mesh = new THREE.Mesh(geometry, materials);
     mesh.position.copy(base.position);
     mesh.quaternion.copy(base.quaternion);
     mesh.scale.copy(base.scale);
@@ -164,10 +176,18 @@ export function evaluateBoolean(
 
 /**
  * A detached `Brush` mirroring a committed mesh's geometry + transform,
- * optionally grown uniformly about the mesh origin by `growth`.
+ * optionally grown uniformly about the mesh origin by `growth`. With
+ * `cloneMaterials` the brush wears clones of the mesh's material(s), so the
+ * CSG result owns its own materials (the operands' stay untouched).
  */
-function meshToBrush(mesh: THREE.Mesh, growth = 1): Brush {
-  const brush = new Brush(mesh.geometry, mesh.material as THREE.Material);
+function meshToBrush(mesh: THREE.Mesh, growth = 1, cloneMaterials = false): Brush {
+  const source = mesh.material;
+  const material = cloneMaterials
+    ? Array.isArray(source)
+      ? source.map((m) => m.clone())
+      : source.clone()
+    : source;
+  const brush = new Brush(mesh.geometry, material);
   brush.position.copy(mesh.position);
   brush.quaternion.copy(mesh.quaternion);
   brush.scale.copy(mesh.scale).multiplyScalar(growth);

@@ -174,7 +174,12 @@ const overlay = new DebugOverlay<CadTool>(canvas, {
   onBooleanTrigger: () => builder.applyBoolean('subtract'),
   // Live Boolean state (armed tool + clash availability) feeds the overlay's
   // ready-to-run glow on the armed toggle.
-  booleanState: () => builder.booleanState,
+  booleanState: () => ({ ...builder.booleanState, canUngroup: builder.canUngroup }),
+  // EDIT-mode UNGROUP: split the selected union back into its parts (each
+  // with its own colors, placed where the union has moved / turned to).
+  onUngroupRequest: () => {
+    if (builder.ungroupSelection()) setStatus('Ungrouped');
+  },
   // SELECT-mode AR mirror: the ground grid + every committed mesh are
   // projected through the shared 3D camera onto the vision canvas, turning
   // it into a translucent live spatial mirror of the 3D viewport — in
@@ -551,16 +556,18 @@ function updateSelectionUi(frame: FrameEvent): void {
   }
   showColorWheelAtSide();
   selectionMenu.show(anchor.x, anchor.y);
-  // Enlarge the (camera-view) wheel while the fingertip hovers it: picking
-  // follows the zoomed disc, and the center stays put (room is reserved),
-  // so the hue under the finger doesn't jump. Hysteresis comes for free —
-  // once enlarged, the finger has the bigger disc to stay inside.
+  // Enlarge the (camera-view) wheel while the fingertip hovers it, easing
+  // in and out: picking follows the animated disc, and the center stays put
+  // (room is reserved), so the hue under the finger doesn't jump.
+  // Hysteresis comes for free — once enlarged, the finger has the bigger
+  // disc to stay inside.
   const center = colorWheel.center;
   const hovering =
     point !== null &&
     center !== null &&
     Math.hypot(point.x - center.x, point.y - center.y) <= colorWheel.radius;
-  colorWheel.setZoom(hovering ? WHEEL_HOVER_ZOOM : 1);
+  // Smooth, interruptible grow / shrink (and pop-in on first show).
+  colorWheel.animateZoomTo(hovering ? WHEEL_HOVER_ZOOM : 1, dtMs);
   if (!point) {
     colorWheel.advanceDwell(null, dtMs); // hover lost: the dwell clock resets
     return;

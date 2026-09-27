@@ -936,13 +936,26 @@ export class CadBuilder {
       return false;
     }
     // subtract: base = the intersected mesh, cutter = the selection.
-    // union: base = the selection (its material survives), tool = the other.
+    // union: base = the selection, tool = the other (each keeps its colors).
     const base = op === 'subtract' ? target : selection;
     const tool = op === 'subtract' ? selection : target;
-    const material = (base.material as THREE.Material).clone();
+    const material = op === 'subtract' ? firstMaterial(base).clone() : undefined;
     this.endDrag(); // the drag anchor died with the old meshes
     const result = evaluateBoolean(base, tool, op, material);
     if (!result) return false;
+    if (op === 'union') {
+      // Remember the operands (and where they sit relative to the union) so
+      // the union can be ungrouped later — wherever it has moved / turned.
+      result.updateMatrixWorld(true);
+      base.updateMatrixWorld(true);
+      tool.updateMatrixWorld(true);
+      const toUnion = result.matrixWorld.clone().invert();
+      const parts: UnionPart[] = [base, tool].map((mesh) => ({
+        mesh,
+        local: toUnion.clone().multiply(mesh.matrixWorld),
+      }));
+      result.userData.parts = parts;
+    }
 
     // Swap the result in at the base's slot; both operands go. (Replace the
     // base first, then drop the tool — splicing first would shift the base's
@@ -955,12 +968,49 @@ export class CadBuilder {
     const toolIndex = this.committed.indexOf(tool);
     if (toolIndex >= 0) this.committed.splice(toolIndex, 1);
     this.root.add(result);
-    disposeMesh(base);
-    disposeMesh(tool);
+    if (op === 'subtract') {
+      disposeMesh(base);
+      disposeMesh(tool);
+    } // a union keeps its operands alive (detached) for ungrouping
 
     // The result is the new selection (outline + clash refresh in select()).
     this.selected = null;
     this.select(result);
+    return true;
+  }
+
+  /** Whether the selection is a union that can be split back into its parts. */
+  get canUngroup(): boolean {
+    return partsOf(this.selected).length > 0;
+  }
+
+  /**
+   * Ungroup the selected union: its original parts come back — each with
+   * its own geometry and colors — placed where they now belong after any
+   * move / rotation of the union (stored part-in-union transforms), and
+   * the union mesh is removed. Nested unions split one level per call. The
+   * first part becomes the selection.
+   * @returns true when a union was ungrouped.
+   */
+  ungroupSelection(): boolean {
+    const group = this.selected;
+    const parts = partsOf(group);
+    if (!group || parts.length === 0) return false;
+    group.updateMatrixWorld(true);
+    this.deselect();
+    const restored = parts.map(({ mesh, local }) => {
+      group.matrixWorld.clone().multiply(local).decompose(mesh.position, mesh.quaternion, mesh.scale);
+      mesh.updateMatrixWorld(true);
+      this.root.add(mesh);
+      return mesh;
+    });
+    this.root.remove(group);
+    const slot = this.committed.indexOf(group);
+    if (slot >= 0) this.committed.splice(slot, 1, ...restored);
+    else this.committed.push(...restored);
+    group.userData.parts = []; // the parts live on — dispose only the union
+    disposeMesh(group);
+    this.select(restored[0]);
     return true;
   }
 
@@ -989,7 +1039,7 @@ export class CadBuilder {
     const mesh = this.selected;
     const hex = parseHexColor(hexColor);
     if (!mesh || hex === null) return false;
-    (mesh.material as THREE.MeshStandardMaterial).color.setHex(hex);
+    paintMesh(mesh, hex);
     return true;
   }
 
@@ -1521,13 +1571,48 @@ export class CadBuilder {
 /** Dispose a committed mesh's geometry, material and edge overlays. */
 function disposeMesh(mesh: THREE.Mesh): void {
   mesh.geometry.dispose();
-  (mesh.material as THREE.Material).dispose();
+  for (const material of materialsOf(mesh)) material.dispose();
+  // A union's detached operands go with it.
+  for (const part of partsOf(mesh)) disposeMesh(part.mesh);
   for (const child of mesh.children) {
     if (child instanceof THREE.LineSegments) {
       child.geometry.dispose();
       (child.material as THREE.Material).dispose();
     }
   }
+}
+
+/** A union's operand, with its transform relative to the union mesh. */
+interface UnionPart {
+  mesh: THREE.Mesh;
+  local: THREE.Matrix4;
+}
+
+/** The stored operands of a union mesh (empty for any other mesh). */
+function partsOf(mesh: THREE.Mesh | null): UnionPart[] {
+  const parts = mesh?.userData.parts as UnionPart[] | undefined;
+  return Array.isArray(parts) ? parts : [];
+}
+
+/** A mesh's material(s) as a list (unions carry one per operand). */
+function materialsOf(mesh: THREE.Mesh): THREE.Material[] {
+  return Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+}
+
+/** The first (or only) material of a mesh. */
+function firstMaterial(mesh: THREE.Mesh): THREE.Material {
+  return materialsOf(mesh)[0];
+}
+
+/**
+ * Repaint every material of a mesh — and, for a union, its stored parts
+ * too, so a later ungroup gives the parts the color the whole was painted.
+ */
+function paintMesh(mesh: THREE.Mesh, hex: number): void {
+  for (const material of materialsOf(mesh)) {
+    (material as THREE.MeshStandardMaterial).color?.setHex(hex);
+  }
+  for (const part of partsOf(mesh)) paintMesh(part.mesh, hex);
 }
 
 /**

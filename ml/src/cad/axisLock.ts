@@ -8,10 +8,16 @@
  *     the vertical axis), mostly vertical → `'x'` (tip about the horizontal
  *     axis) — and the accumulated travel along it is released at once, so
  *     no motion is lost;
- *   - while locked, only that axis's component passes; the other is dropped;
+ *   - while locked, only that axis's component passes; the other is dropped
+ *     — unless the fist clearly turns: frames whose motion is dominated by
+ *     the *other* axis accumulate, and once that sustained travel reaches
+ *     `switchDistance` the lock switches over (releasing the travel), so
+ *     "right for a while, then up" spins about Y and then tips about X
+ *     without opening the fist. A frame dominated by the locked axis again
+ *     discards the pending switch (brief wobble never flips the axis);
  *   - the lock clears when the fist stays still for `stillFrames` frames
  *     (below `stillDistance` per frame) or the host calls `reset()` (the
- *     fist gesture ended), so the next motion can choose again.
+ *     fist gesture ended), so the next motion can choose afresh.
  *
  * Pure math on device-space deltas — no Three.js, unit-testable.
  */
@@ -25,13 +31,21 @@ export interface AxisLockOptions {
   stillDistance?: number;
   /** Consecutive still frames that release the lock. Default 8 (~0.25 s). */
   stillFrames?: number;
+  /**
+   * Sustained travel (device units) along the other axis — in frames that
+   * move mostly that way — that switches a held lock over. Default 0.03.
+   */
+  switchDistance?: number;
 }
 
 export class AxisLock {
   private readonly decideDistance: number;
   private readonly stillDistance: number;
   private readonly stillFrames: number;
+  private readonly switchDistance: number;
   private axis: RotationAxis | null = null;
+  /** Signed travel along the other axis while it dominates (pending switch). */
+  private switchTravel = 0;
   private pendingX = 0;
   private pendingY = 0;
   private still = 0;
@@ -40,6 +54,7 @@ export class AxisLock {
     this.decideDistance = options.decideDistance ?? 0.03;
     this.stillDistance = options.stillDistance ?? 0.002;
     this.stillFrames = options.stillFrames ?? 8;
+    this.switchDistance = options.switchDistance ?? 0.03;
   }
 
   /** The locked axis, or null while undecided. */
@@ -76,7 +91,23 @@ export class AxisLock {
       this.pendingY = 0;
       return released;
     }
-    return this.axis === 'y' ? { deltaX, deltaY: 0 } : { deltaX: 0, deltaY };
+
+    // Locked: watch for a sustained turn onto the other axis.
+    const frameAxis: RotationAxis = Math.abs(deltaX) >= Math.abs(deltaY) ? 'y' : 'x';
+    if (frameAxis === this.axis) {
+      this.switchTravel = 0; // back on the locked axis: wobble, not a turn
+      return this.axis === 'y' ? { deltaX, deltaY: 0 } : { deltaX: 0, deltaY };
+    }
+    this.switchTravel += this.axis === 'y' ? deltaY : deltaX;
+    if (Math.abs(this.switchTravel) < this.switchDistance) {
+      // Undecided turn: keep feeding only the locked axis.
+      return this.axis === 'y' ? { deltaX, deltaY: 0 } : { deltaX: 0, deltaY };
+    }
+    // Switch over and release the travel gathered along the new axis.
+    const released = this.switchTravel;
+    this.switchTravel = 0;
+    this.axis = frameAxis;
+    return this.axis === 'y' ? { deltaX: released, deltaY: 0 } : { deltaX: 0, deltaY: released };
   }
 
   /** Clear the lock (e.g. the fist opened / the gesture ended). */
@@ -84,6 +115,7 @@ export class AxisLock {
     this.axis = null;
     this.pendingX = 0;
     this.pendingY = 0;
+    this.switchTravel = 0;
     this.still = 0;
   }
 }

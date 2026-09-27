@@ -156,6 +156,8 @@ export interface OverlayBooleanState {
   tool: OverlayBooleanTool | null;
   /** Whether the selected mesh intersects another committed mesh. */
   clash: boolean;
+  /** Whether the selection is a union that can be ungrouped. */
+  canUngroup?: boolean;
 }
 
 /**
@@ -464,6 +466,12 @@ export interface DebugOverlayOptions<S extends string = string> {
    * supplied by the orchestrator per frame; null skips the highlight.
    */
   booleanState?: () => OverlayBooleanState | null;
+  /**
+   * Called when the EDIT-mode UNGROUP button is activated (pointing dwell or
+   * mouse click) while `booleanState().canUngroup` is true — the host splits
+   * the selected union back into its parts.
+   */
+  onUngroupRequest?: () => void;
 }
 
 /** A hit-testable rectangle in CSS pixels. */
@@ -563,6 +571,11 @@ export class DebugOverlay<S extends string = string> {
   private readonly onBooleanToolRequest: ((tool: OverlayBooleanTool | null) => void) | null;
   private readonly onBooleanTrigger: (() => void) | null;
   private readonly booleanState: (() => OverlayBooleanState | null) | null;
+  /** EDIT-mode UNGROUP action button (one-shot; below the Boolean toggles). */
+  private ungroupRect: ButtonRect | null = null;
+  private ungroupDwelling = false;
+  private ungroupDwellElapsed = 0;
+  private readonly onUngroupRequest: (() => void) | null;
   /** Last rendered mirrored cover transform (device-space UI hit tests). */
   private lastView: ViewTransform | null = null;
 
@@ -591,6 +604,7 @@ export class DebugOverlay<S extends string = string> {
     this.onBooleanTrigger = options.onBooleanTrigger ?? null;
     this.booleanTriggerFrames = options.booleanTriggerFrames ?? 6;
     this.booleanState = options.booleanState ?? null;
+    this.onUngroupRequest = options.onUngroupRequest ?? null;
     canvas.addEventListener('click', this.onCanvasClick);
     canvas.addEventListener('mousemove', this.onCanvasMouseMove);
   }
@@ -679,6 +693,11 @@ export class DebugOverlay<S extends string = string> {
       this.requestBoolean(boolean);
       return;
     }
+    const ungroup = this.ungroupRect;
+    if (ungroup && this.inRect(ungroup, event.offsetX, event.offsetY)) {
+      this.requestUngroup();
+      return;
+    }
     const shape = this.hitShapeButton(event.offsetX, event.offsetY);
     if (shape >= 0) {
       this.requestShape(shape);
@@ -708,6 +727,8 @@ export class DebugOverlay<S extends string = string> {
     const hovering =
       (trash !== null && this.inRect(trash, event.offsetX, event.offsetY)) ||
       this.hitBooleanButton(event.offsetX, event.offsetY) >= 0 ||
+      (this.ungroupRect !== null && this.canUngroupNow() &&
+        this.inRect(this.ungroupRect, event.offsetX, event.offsetY)) ||
       this.hitButton(event.offsetX, event.offsetY) >= 0 ||
       this.hitConstraintButton(event.offsetX, event.offsetY) >= 0 ||
       this.hitShapeButton(event.offsetX, event.offsetY) >= 0;
@@ -736,9 +757,11 @@ export class DebugOverlay<S extends string = string> {
     if (frame.mode === 'select' && !dialogOpen) {
       this.drawConstraintButtons(cssWidth);
       this.drawBooleanButtons(cssWidth);
+      this.drawUngroupButton(cssWidth);
     } else {
       this.constraintRects = [];
       this.booleanRects = [];
+      this.ungroupRect = null;
     }
     if (frame.mode === 'create' && !dialogOpen) this.drawShapeButtons(cssWidth);
     else this.shapeRects = [];
@@ -755,6 +778,7 @@ export class DebugOverlay<S extends string = string> {
       this.updateConstraintInteraction(frame, view, dt);
       this.updateShapeInteraction(frame, view, dt);
       this.updateBooleanInteraction(frame, view, dt);
+      this.updateUngroupInteraction(frame, view, dt);
       this.updateTrashInteraction(frame, view, dt);
     }
     this.drawPointerCursors(frame, view);
@@ -838,6 +862,7 @@ export class DebugOverlay<S extends string = string> {
       this.hitConstraintButton(px, py) >= 0 ||
       this.hitShapeButton(px, py) >= 0 ||
       this.hitBooleanButton(px, py) >= 0 ||
+      (this.ungroupRect !== null && this.inRect(this.ungroupRect, px, py)) ||
       (trash !== null && this.inRect(trash, px, py)) ||
       (rects !== null &&
         (this.inRect(rects.confirm, px, py) || this.inRect(rects.cancel, px, py)))
@@ -1649,10 +1674,12 @@ export class DebugOverlay<S extends string = string> {
    * - `y` — lift / lower: a double-headed vertical arrow over the floor;
    * - `subtract` — cut a hole: a square, a dashed circle biting its corner,
    *   and a minus sign;
-   * - `union` — merge: an overlapping square + circle and a plus sign.
+   * - `union` — merge: an overlapping square + circle and a plus sign;
+   * - `ungroup` — split: a square and a circle pulled apart, with arrows
+   *   pointing away from each other.
    */
   private drawEditIcon(
-    icon: DragConstraint | OverlayBooleanTool,
+    icon: DragConstraint | OverlayBooleanTool | 'ungroup',
     cx: number,
     cy: number,
     r: number,
@@ -1690,6 +1717,17 @@ export class DebugOverlay<S extends string = string> {
       arrowHead(cx - r * 0.55, cy, -1, 0);
       arrowHead(cx + r * 0.12, cy - r * 0.3, 0.37, -0.93);
       arrowHead(cx - r * 0.12, cy + r * 0.3, -0.37, 0.93);
+    } else if (icon === 'ungroup') {
+      // Two parts pulled apart + outward arrows.
+      ctx.rect(cx - r, cy - r * 0.2, r * 0.8, r * 0.8);
+      ctx.moveTo(cx + r * 0.95, cy + r * 0.2);
+      ctx.arc(cx + r * 0.55, cy + r * 0.2, r * 0.4, 0, Math.PI * 2);
+      ctx.moveTo(cx - r * 0.15, cy - r * 0.7);
+      ctx.lineTo(cx - r * 0.85, cy - r * 0.7);
+      arrowHead(cx - r * 0.85, cy - r * 0.7, -1, 0);
+      ctx.moveTo(cx + r * 0.15, cy - r * 0.7);
+      ctx.lineTo(cx + r * 0.85, cy - r * 0.7);
+      arrowHead(cx + r * 0.85, cy - r * 0.7, 1, 0);
     } else if (icon === 'y') {
       // Floor line + vertical double arrow.
       ctx.moveTo(cx - r * 0.8, cy + r);
@@ -1721,6 +1759,75 @@ export class DebugOverlay<S extends string = string> {
     }
     ctx.stroke();
     ctx.restore();
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* UNGROUP action (EDIT mode, below the Boolean toggles)              */
+  /* ------------------------------------------------------------------ */
+
+  /** Whether the host reports an ungroupable (union) selection. */
+  private canUngroupNow(): boolean {
+    return this.booleanState?.()?.canUngroup === true;
+  }
+
+  private requestUngroup(): void {
+    this.ungroupDwelling = false;
+    this.ungroupDwellElapsed = 0;
+    if (this.canUngroupNow()) this.onUngroupRequest?.();
+  }
+
+  /** Pointing dwell on UNGROUP (only while the selection is a union). */
+  private updateUngroupInteraction(frame: FrameEvent, view: ViewTransform, dt: number): void {
+    const rect = this.ungroupRect;
+    let hovering = false;
+    if (rect && this.canUngroupNow()) {
+      for (const hand of frame.hands) {
+        if (!hand.pointing) continue;
+        const tip = this.toCanvas(hand, INDEX_TIP, view);
+        if (this.inRect(rect, tip.x, tip.y)) {
+          hovering = true;
+          break;
+        }
+      }
+    }
+    if (hovering !== this.ungroupDwelling) {
+      this.ungroupDwelling = hovering;
+      this.ungroupDwellElapsed = 0;
+    } else if (hovering && dt > 0) {
+      this.ungroupDwellElapsed += dt;
+    }
+    if (hovering && this.ungroupDwellElapsed >= this.dwellMs) this.requestUngroup();
+  }
+
+  /**
+   * UNGROUP: a one-shot icon button (two parts pulled apart) at the bottom
+   * of the EDIT tool column. Dimmed and inert unless the selection is a
+   * union; a pointing dwell fills its progress bar.
+   */
+  private drawUngroupButton(cssWidth: number): void {
+    const ctx = this.ctx;
+    const { margin, gap, height, width, top } = this.editStackMetrics(cssWidth);
+    const x = margin;
+    const y = top + (CONSTRAINT_BUTTONS.length + BOOLEAN_BUTTONS.length) * (height + gap);
+    this.ungroupRect = { x, y, width, height };
+    const enabled = this.canUngroupNow();
+    const dwelling = enabled && this.ungroupDwelling;
+    ctx.fillStyle = dwelling ? 'rgba(15, 23, 42, 0.85)' : 'rgba(15, 23, 42, 0.6)';
+    ctx.fillRect(x, y, width, height);
+    ctx.lineWidth = dwelling ? 2 : 1;
+    ctx.strokeStyle = dwelling
+      ? '#e2e8f0'
+      : enabled
+        ? 'rgba(148, 163, 184, 0.55)'
+        : 'rgba(148, 163, 184, 0.2)';
+    ctx.strokeRect(x + 1, y + 1, width - 2, height - 2);
+    if (dwelling && this.dwellMs > 0) {
+      const progress = Math.min(1, this.ungroupDwellElapsed / this.dwellMs);
+      ctx.fillStyle = '#38bdf8';
+      ctx.fillRect(x + 2, y + height - 5, (width - 4) * progress, 3);
+    }
+    const ink = dwelling ? '#f8fafc' : enabled ? '#cbd5e1' : 'rgba(148, 163, 184, 0.35)';
+    this.drawEditIcon('ungroup', x + width / 2, y + height / 2 - 1, width * 0.3, ink);
   }
 
   /* ------------------------------------------------------------------ */

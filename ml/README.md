@@ -233,8 +233,11 @@ build:
    A quick pinch on the **already-selected** object deselects it again
    (toggle). To **rotate** the selected object, make a **fist** with one
    hand and move it, like turning it in your hand — **one axis at a time**
-   (`AxisLock`): each fist gesture picks its axis from its dominant
-   direction and sticks to it, so hand wobble never tumbles the object.
+   (`AxisLock`): the fist's dominant direction picks the axis and brief
+   wobble never tumbles the object — but a sustained turn switches it
+   mid-gesture (0.03 device units of motion mostly along the other axis),
+   so moving right for a while and then up, without opening the fist,
+   spins about Y first and then tips about X.
    Mostly left / right spins it about the vertical axis (the side facing
    you follows the fist); mostly up / down tips it about the camera's
    horizontal axis (the side facing you tips with the fist — from any
@@ -274,9 +277,12 @@ build:
    camera view shows (a 16:9 webcam loses its sides in the 4:3 view —
    `DebugOverlay.visibleDeviceRect`). Mid-height matters: a fingertip low
    in the frame pulls the wrist and palm out of view and the tracker loses
-   the hand. The disc is small and **doubles in size while a pointing
-   fingertip hovers it** (centered in place, so the hue under the finger
-   doesn't jump; picking follows the enlarged disc) — hue by angle,
+   the hand. The disc is small, pops in with an ease-in when a selection
+   appears, and **smoothly grows to twice its size while a pointing
+   fingertip hovers it** — and smoothly shrinks back when it leaves
+   (`ColorWheel.animateZoomTo`, ~0.3 s exponential ease, interruptible;
+   centered in place, so the hue under the finger doesn't jump; picking
+   follows the animated disc) — hue by angle,
    saturation by radius:
    **point** at the disc (index finger
    up) — every hue under the fingertip repaints the mesh live (angle =
@@ -338,8 +344,16 @@ build:
      the result renders double-sided so T-junction pixel cracks never show
      the floor through the solid.
    - **Union** fuses both solids into **one continuous body**
-     (`ADDITION`), wearing the selected mesh's color, with unified edge
-     lines replacing the two separate entities in the scene hierarchy.
+     (`ADDITION`) in which **each part keeps its own color** (geometry
+     groups + one cloned material per operand), with unified edge lines
+     replacing the two separate entities in the scene hierarchy. Painting
+     a union recolors the whole (and its remembered parts).
+   - **Ungroup** splits a union back into its parts: the UNGROUP icon
+     (two shapes pulled apart, bottom of the EDIT tool column — dimmed
+     unless the selection is a union; pointing hold or click). Each part
+     returns with its own geometry and colors, placed where the union has
+     since been moved / turned to (part-in-union transforms are stored at
+     union time); nested unions split one level per ungroup.
    The result stays selected, so you can keep dragging it into more
    shapes; the clash indicator refreshes live. A failed / empty CSG is a
    safe no-op (the scene is never half-edited). Committed results export
@@ -477,7 +491,8 @@ The `<canvas id="overlay">` (pure Canvas 2D) mirrors the feed and draws:
   and trash icons). EDIT tools are square **icon**
   buttons: floor plane with a 4-way arrow (XZ PLANE), vertical double arrow
   (Y AXIS), square with a dashed bite and "−" (SUBTRACT), square + circle
-  with "+" (UNION);
+  with "+" (UNION), two shapes pulled apart (UNGROUP — one-shot, enabled
+  only for a union selection, `onUngroupRequest`);
 - in **EDIT mode**, two **drag-constraint toggles** at the top of that
   column: `[ XZ PLANE ]` (default) and
   `[ Y AXIS ]` — same boxy style and pointing activation
