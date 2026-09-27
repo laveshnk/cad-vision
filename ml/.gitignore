@@ -3,6 +3,9 @@ dist/
 *.local
 .DS_Store
 
+# API keys for the voice backend (see .env.example)
+.env
+
 # Reproducible via `npm run setup:assets` (postinstall)
 public/models/
 public/mediapipe/

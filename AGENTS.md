@@ -4,11 +4,16 @@ Guidance for AI coding agents working in this repository.
 
 ## What this is
 
-`cad-vision` is a gesture-driven CAD workbench. All application code lives in
+`cad-vision` is a hands-and-voice 3D playground. All application code lives in
 the **`ml/`** subdirectory — a self-contained TypeScript + Vite app that turns
 webcam hand tracking (MediaPipe HandLandmarker) into typed gesture events,
-consumed by a Three.js CAD viewport. Everything at the repo root except `ml/`
+consumed by a Three.js viewport, plus a voice agent that builds the same
+shapes when asked out loud. Everything at the repo root except `ml/`
 (`emissions.csv`, `.codecarbon-tracker.pid`) is tooling output — do not edit.
+
+The tone is playful, not professional CAD: prefer "box / tube / ball / taller"
+over "primitive / extrude / mesh" in anything a user reads or hears. STL export
+is an option at the end, not the purpose.
 
 ## Commands
 
@@ -18,26 +23,38 @@ Run everything from `ml/` (the only package):
 cd ml
 npm install        # also runs scripts/fetch-assets.mjs (MediaPipe WASM + model)
 npm run dev        # Vite dev server → http://localhost:5173
+npm run dev:server # voice backend on :8787 (needs ml/.env — see .env.example)
 npm test           # vitest run (single pass)
 npm run test:watch # vitest watch mode
-npm run build      # tsc --noEmit && vite build → dist/
+npm run typecheck  # tsc for the browser AND the server config
+npm run build      # typecheck && vite build → dist/
 npm run setup:assets  # re-fetch MediaPipe WASM runtime + hand_landmarker.task
 ```
+
+The voice features need both processes: `npm run dev` and `npm run dev:server`
+in separate terminals. Vite proxies `/api` and `/ws` to port 8787. Without
+`ml/.env` the app still runs — voice just reports itself unavailable.
 
 **Validation checklist before declaring a task done** (all three must pass):
 
 ```bash
-cd ml && npx tsc --noEmit   # type gate — strict mode, zero errors allowed
+cd ml && npm run typecheck  # both tsconfigs, strict, zero errors allowed
 cd ml && npx vitest run     # full suite, all tests green
 cd ml && npm run build      # production build succeeds
 ```
 
-Camera access requires a secure context (`localhost` is fine; LAN needs HTTPS).
+Camera and microphone access require a secure context (`localhost` is fine;
+LAN needs HTTPS).
 
 ## Tech stack — do not add to it
 
 Vanilla TypeScript + DOM (no React/Vue/etc.), Three.js, `@mediapipe/tasks-vision`,
-Vite, Vitest. No ESLint/Prettier configs exist — match the existing code style:
+Vite, Vitest. The voice backend adds `@google/genai` (agent), `@elevenlabs/client`
++ `@elevenlabs/elevenlabs-js` (speech in/out), `ws` and `jpeg-js`, plus the
+optional `@smartspectra/node-sdk` (Presage). No framework on the server either —
+it is `node:http` and one WebSocket route.
+
+No ESLint/Prettier configs exist — match the existing code style:
 2-space indent, single quotes, semicolons, trailing commas, named exports,
 JSDoc header comments on files/classes, `type`-only imports for types.
 
@@ -48,26 +65,47 @@ Dead variables/params and unused imports will fail the build.
 ## Architecture (ml/src)
 
 ```
-main.ts          app orchestrator: wires vision events → CAD + UI
+main.ts          app orchestrator: wires vision + voice events → CAD + UI
 styles.css       light theme; full-bleed 3D viewport, camera thumbnail, glass toolbar
-cad/CadScene.ts  Three.js viewport: camera rig, lights, grid, damped orbit
-cad/CadBuilder.ts gesture-driven primitives (box/cylinder/sphere), STL export
-ui/Toolbar.ts    glass toolbar: camera toggle, clear, export STL
+cad/CadScene.ts  Three.js viewport: camera rig, lights, grid, damped orbit, snapshotJpeg()
+cad/CadBuilder.ts primitives from hands (onExtrude/commit) AND from the agent
+                 (addPrimitive/removeLast/setColor/describe), STL export
+ui/Toolbar.ts    glass toolbar: camera + voice toggles, clear, export for printing
+ui/VoiceHud.ts   voice state badge + caption strip (mirrors VoiceState, never imports it)
 vision/          self-contained tracking/gesture engine (own barrel: index.ts)
+voice/           hands-free voice agent (own barrel: index.ts)
+```
+
+Outside `ml/src`:
+
+```
+shared/agentTools.ts  tool vocabulary + validators, imported by browser AND server
+server/               Node voice backend (Gemini, ElevenLabs, Presage)
 ```
 
 ### Hard rules
 
 1. **Decoupling is strict:** `src/cad/**` and `src/ui/**` must import **nothing**
-   from `src/vision/**`. Only `main.ts` bridges them. Cross-boundary payloads are
-   plain data (device-space coords, deltas, state events) defined in
-   `vision/types.ts`.
+   from `src/vision/**` or `src/voice/**`. Only `main.ts` bridges them.
+   Cross-boundary payloads are plain data (device-space coords, deltas, state
+   events) defined in `vision/types.ts`, or validated `CadCommand`s from
+   `shared/agentTools.ts`.
 2. **The vision engine is framework-free and DOM-light** (only `HandTracker`
    touches `getUserMedia`; only `DebugOverlay` touches a canvas). Keep it usable
    standalone via `new GestureEngine(...)`.
 3. Don't edit `public/mediapipe/` or `public/models/` by hand — they are
    generated by `scripts/fetch-assets.mjs` (runtime falls back to CDN URLs).
    Don't commit `dist/`.
+4. **API keys live only in `ml/server/`.** The browser gets short-lived tokens
+   from `/api/voice/token`; never put a key in `src/**` or a `VITE_` variable.
+5. `src/voice/**` reaches the scene only through the injected `ToolExecutor` /
+   `getScene` callbacks from `shared/agentTools.ts` — it imports no CAD, UI or
+   vision modules.
+6. `shared/**` is imported by both runtimes, so it stays dependency-free: no
+   DOM, no Node built-ins, no SDK types.
+7. Server files are run directly by Node 24's type stripping, so they must use
+   erasable syntax only (no `enum`, no parameter properties), explicit `.ts`
+   extensions on relative imports, and `import type` for types.
 
 ### Vision pipeline (order matters)
 
@@ -86,6 +124,25 @@ HandTracker            webcam + MediaPipe HandLandmarker (running mode VIDEO)
 
 New engine stages go through `GestureEngine` (facade) options, get an options
 type + defaults with `??`, and are exported from `vision/index.ts`.
+
+### Voice pipeline (order matters)
+
+```
+PresageFrames    JPEG stills from the same <video> → POST to /ws/presage →
+                 SmartSpectra face.talking (Presage has no browser SDK)
+  → TalkGate     hysteresis: open after 150ms talking, close after 700ms
+                 silence; while the agent speaks it raises `barge_in` instead
+  → Transcriber  ElevenLabs Scribe realtime; one long-lived socket that the
+                 gate mutes/unmutes, MANUAL commit sealed on gate close
+  → /api/agent/turn  Gemini + function calling, sees a scene summary and a
+                 viewport snapshot; history is kept server-side per session
+  → ToolExecutor validated CadCommands run in the browser, outcomes posted
+                 back (max 3 rounds), then the reply is spoken via Speaker
+```
+
+The gate is driven by the **face**, not the microphone, so the agent's own
+voice can never re-trigger it. When Presage is unavailable the same gate is
+driven by `toggleListening()` instead, and `needsManualTrigger` goes true.
 
 ### Coordinate spaces
 
@@ -126,8 +183,10 @@ thumbnail sizes — it re-measures per frame, no resize listeners.
 
 ## Testing conventions
 
-- Vitest, colocated in `src/vision/__tests__/*.test.ts`. Pure logic only —
-  no DOM, no camera, no Three.js in tests.
+- Vitest, colocated in `src/vision/__tests__/`, `src/voice/__tests__/` and
+  `shared/__tests__/`. Pure logic only — no DOM, no camera, no Three.js, no
+  network in tests. (`tsconfig.server.json` excludes `__tests__`, which is why
+  test files can keep extensionless imports.)
 - Vision stages are tested with synthetic landmark arrays (MediaPipe's 21
   landmarks: wrist = 0, thumb tip = 4, index MCP = 5, index tip = 8,
   pinky MCP = 17).
@@ -149,6 +208,26 @@ thumbnail sizes — it re-measures per frame, no resize listeners.
   though Vite alone might succeed.
 - Vite `base: './'` — keep relative asset paths so `dist/` works from any
   subdirectory.
+- ElevenLabs free accounts can only use **premade** voices; a Voice Library ID
+  in `ELEVENLABS_VOICE_ID` fails with `402 paid_plan_required`.
+- The Presage SDK's pipeline is **process-global**. Never construct a second
+  `SmartSpectraSDK` until the previous one has finished `destroy()`. Custom
+  input stays in `kStarting` until the first `sendFrame`; a frame after
+  `kError` throws "not in a valid state" forever. A 401 from `POST /device/pair`
+  means `PRESAGE_API_KEY` was rejected — that is what knocks the pipeline into
+  `kError`, and no amount of frame retrying recovers it.
+- `CadScene` does not set `preserveDrawingBuffer`, so `snapshotJpeg()` must
+  re-render immediately before `toDataURL` or it reads an empty buffer.
+- Console gesture logging and `window.cadVision` are behind `?debug`; don't
+  add unconditional logging back to `main.ts`.
+- Scribe's `mute()` / `unmute()` **throw** until the SDK attaches the
+  microphone `MediaStreamTrack`, which happens a moment after the socket
+  opens. Never swallow that error: `Transcriber` retries until it takes, and
+  the transcript handlers also check the gate, because an un-muted connection
+  transcribes the whole room and never commits anything.
+- Anything that leaves the user unable to open the mic is a bug, not a state.
+  Presage being `connecting` strands them exactly like `unavailable`, so the
+  manual Talk button shows whenever the status is not `ready`.
 - `ml/README.md` is the user-facing doc; update it when you change pipeline
   order, public options, gestures, or UI layout.
 

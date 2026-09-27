@@ -1,40 +1,16 @@
 /**
- * CadBuilder: gesture-driven primitive construction for the CAD viewport.
+ * CadBuilder: builds and owns the solids in the playground.
  *
- * The builder consumes only device-space coordinates (x / y in [-1, 1],
- * +Y up), pinch lifecycle callbacks and extrusion deltas — it has no
- * dependency on the vision layer (src/vision) or MediaPipe. The app
- * orchestrator (src/main.ts) is the single place where gesture events are
- * translated into the calls below.
+ * Two ways in, and they meet in the same scene:
  *
- * Two-hand construction (primary flow):
- *   onExtrude(dual-hand) → both hands pinch: spawn a preview centered on the
- *                          world origin (0, 0, 0) and size its base from the
- *                          two pinches: box → square (side = pinch gap);
- *                          cylinder → circle (diameter = pinch gap); cuboid →
- *                          rectangle (horizontal gap → width, vertical gap →
- *                          depth); sphere → diameter. Any drawn single-hand
- *                          footprint is replaced (committed if it was already
- *                          released, discarded otherwise).
- *   onExtrude(single-hand) → one pinch released (the upper hand): the base
- *                          freezes and the still-pinched hand's vertical
- *                          travel drives the height (box / cylinder) or
- *                          radius (sphere). Re-pinching the second hand
- *                          returns to base sizing, keeping the height.
- *   commit({ flat })     → the orchestrator calls this when the last pinch
- *                          releases (or on fist / zoom transitions). `flat`
- *                          (both pinches released together, or the lower one
- *                          first) commits a flat plate of `flatHeight`.
+ *   Hands   pinch with both hands to size a shape at the origin, release the
+ *           upper pinch and drag the lower one to set its height.
+ *   Voice   the agent calls `addPrimitive` / `removeLast` / `setColor` /
+ *           `clear` with already-validated numbers.
  *
- * Single-hand footprint drawing (legacy flow):
- *   onPinchStart(x1, y1) → raycast Point A onto the ground plane (y = 0)
- *                          and spawn a wireframe preview for the active tool.
- *   onPinchDrag(x2, y2)  → raycast Point B and update the footprint / base
- *                          dimensions of the preview (box: square, cuboid:
- *                          corner-to-corner rectangle; cylinder / sphere:
- *                          center + radius).
- *   onPinchEnd()         → freeze the footprint; it is committed with the
- *                          default height on the next build / camera gesture.
+ * The builder consumes only plain data — device-space deltas from the gesture
+ * layer, plain numbers from the agent — so it depends on neither `src/vision`
+ * nor `src/voice`. `src/main.ts` is the only place the two are joined.
  *
  * commit() replaces the wireframe with a solid matte mesh + EdgesGeometry
  * outlines and adds it to the scene.
@@ -75,9 +51,11 @@
 
 import * as THREE from 'three';
 import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js';
+import type { SceneObjectSummary, ShapeId } from '../../shared/agentTools';
 import type { CadScene } from './CadScene';
 
-export type CadTool = 'box' | 'cuboid' | 'cylinder' | 'sphere';
+/** Same four primitives the voice agent knows about. */
+export type CadTool = ShapeId;
 
 /**
  * SELECT-mode drag constraint: `'xz'` (default) slides the grabbed mesh
@@ -102,6 +80,17 @@ export interface CadExtrudeInput {
   spanY?: number;
   /** Cumulative vertical travel in device units (single-hand, +Y up). */
   cumulativeHeight?: number;
+}
+
+/** A shape the agent asked for, in world units. */
+export interface CadPrimitiveSpec {
+  shape: CadTool;
+  width: number;
+  depth: number;
+  height: number;
+  x: number;
+  z: number;
+  color?: string | null;
 }
 
 export interface CadBuilderOptions {
@@ -132,54 +121,48 @@ export interface CadBuilderOptions {
   dragHoldMs?: number;
   /** Preview wireframe / fill color. */
   previewColor?: number;
-  /** Committed mesh body color (dark gray matte). */
-  bodyColor?: number;
+  /** Default body color for hand-built solids. */
+  bodyColor?: string;
   /** Committed mesh edge-line color. */
   edgeColor?: number;
 }
 
-/**
- * footprint / awaiting-height: single-hand drawing. base: two-hand base
- * sizing. height: one pinch released, the other drives the height.
- */
-type BuildPhase = 'footprint' | 'awaiting-height' | 'base' | 'height';
+/** base: two-hand base sizing. height: one pinch released, the other drives height. */
+type BuildPhase = 'base' | 'height';
 
-/** Wireframe preview handles (fill + wireframe + Point-A marker). */
+/** Wireframe preview handles (translucent fill + wireframe). */
 interface Preview {
   group: THREE.Group;
   fill: THREE.Mesh;
   wire: THREE.Mesh;
-  marker: THREE.Mesh;
 }
 
 interface Build {
   tool: CadTool;
-  /** Point A (pinch start) on the ground plane. */
-  origin: THREE.Vector3;
-  /** Latest Point B (pinch drag) on the ground plane. */
-  point: THREE.Vector3;
-  /** Footprint extents (box: corner-to-corner). */
+  /** Ground-plane position the shape is centered on. */
+  position: THREE.Vector3;
   width: number;
   depth: number;
-  /** Base radius (cylinder / sphere: center-to-edge). */
+  /** Base radius (cylinder / sphere). */
   radius: number;
-  /** Current height (box / cylinder). */
   height: number;
   phase: BuildPhase;
   preview: Preview;
-  /** Two-hand build: centered on the world origin, sized by the pinch gap. */
-  centered: boolean;
   /** Extrusion rebase snapshots for continuity across mode switches. */
   extrudeMode: 'dual-hand' | 'single-hand' | null;
   baseHeight: number;
   baseRadius: number;
 }
 
+/** A solid that is finished and in the scene. */
+interface CommittedObject extends SceneObjectSummary {
+  mesh: THREE.Mesh;
+}
+
 /** Shared unit geometries — previews only rescale, never rebuild. */
 const UNIT_BOX = new THREE.BoxGeometry(1, 1, 1);
 const UNIT_CYLINDER = new THREE.CylinderGeometry(0.5, 0.5, 1, 32);
 const UNIT_SPHERE = new THREE.SphereGeometry(0.5, 32, 16);
-const MARKER = new THREE.SphereGeometry(0.07, 12, 8);
 
 /**
  * EdgesGeometry crease thresholds per tool: boxes show every edge,
@@ -200,10 +183,7 @@ export class CadBuilder {
   private readonly options: Required<CadBuilderOptions>;
   /** Persistent hierarchy of committed meshes. */
   private readonly root: THREE.Group;
-  private readonly committed: THREE.Mesh[] = [];
-  private readonly raycaster = new THREE.Raycaster();
-  private readonly groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
-  private readonly ndc = new THREE.Vector2();
+  private readonly committed: CommittedObject[] = [];
 
   private tool: CadTool = 'box';
   private build: Build | null = null;
@@ -274,7 +254,7 @@ export class CadBuilder {
       dragMaxHeight: options.dragMaxHeight ?? 5,
       dragHoldMs: options.dragHoldMs ?? 300,
       previewColor: options.previewColor ?? 0x0284c7,
-      bodyColor: options.bodyColor ?? 0x3f3f46,
+      bodyColor: options.bodyColor ?? '#3f3f46',
       edgeColor: options.edgeColor ?? 0xc9d2de,
     };
     this.root = new THREE.Group();
@@ -314,8 +294,8 @@ export class CadBuilder {
     if (this.tool === tool) return;
     this.tool = tool;
     const build = this.build;
-    if (build && (build.phase === 'footprint' || build.phase === 'base')) {
-      // Swap the preview geometry while keeping the drawn footprint.
+    if (build && build.phase === 'base') {
+      // Swap the preview geometry while keeping the size drawn so far.
       this.disposePreview(build);
       build.tool = tool;
       build.preview = this.createPreview();
@@ -325,53 +305,13 @@ export class CadBuilder {
   }
 
   /* ------------------------------------------------------------------ */
-  /* Gesture input (device space)                                       */
+  /* Hand input                                                          */
   /* ------------------------------------------------------------------ */
 
-  /** Pinch engaged at device coords (x, y): lock Point A, spawn a preview. */
-  onPinchStart(x: number, y: number): void {
-    if (this.build) return; // pending build: this pinch is likely extrude prep
-    this.startBuild(this.groundPoint(x, y), 'footprint', false);
-  }
-
   /**
-   * Pinch moved to device coords (x, y): update the footprint from Point B.
-   * (startX / startY are the device coords where this pinch began; a far
-   * travel while awaiting height starts a new primitive instead.)
-   */
-  onPinchDrag(x: number, y: number, startX = x, startY = y): void {
-    const build = this.build;
-    if (!build) return;
-    if (build.phase === 'footprint') {
-      this.updateFootprint(this.groundPoint(x, y));
-    } else if (build.phase === 'awaiting-height') {
-      const travel = Math.hypot(x - startX, y - startY);
-      if (travel > this.options.redrawDistance) {
-        // A long drag re-purposes this pinch as a new drawing: finalize the
-        // pending build with its default height and start over.
-        this.commit();
-        this.onPinchStart(startX, startY);
-        this.updateFootprint(this.groundPoint(x, y));
-      }
-    }
-  }
-
-  /** Pinch released: freeze the footprint and await height / extrusion. */
-  onPinchEnd(): void {
-    const build = this.build;
-    if (!build || build.phase !== 'footprint') return;
-    const footprint = Math.max(build.width, build.depth, build.radius);
-    if (footprint < this.options.minFootprint) {
-      this.cancel(); // accidental tap: nothing meaningful was drawn
-      return;
-    }
-    build.phase = 'awaiting-height';
-  }
-
-  /**
-   * Extrusion input. Dual-hand: size the base of a two-hand build centered
-   * on the origin from the pinch gap. Single-hand: vertical drag (device
-   * units scaled into world units) adds height; spheres grow their radius.
+   * Extrusion input. Dual-hand: size the base of the build centered on the
+   * origin from the pinch gap. Single-hand: vertical drag (device units
+   * scaled into world units) adds height; spheres grow their radius.
    */
   onExtrude(input: CadExtrudeInput): void {
     if (input.mode === 'dual-hand') {
@@ -379,7 +319,7 @@ export class CadBuilder {
       return;
     }
     const build = this.build;
-    if (!build || !build.centered) return;
+    if (!build) return;
     if (build.extrudeMode !== 'single-hand') {
       // First single-hand frame: rebase so the height grows from where the
       // base phase left it.
@@ -397,14 +337,14 @@ export class CadBuilder {
   }
 
   /**
-   * Commit the active build: replace the wireframe preview with a solid
-   * matte mesh (+ crisp edge overlays) and keep it in the scene. `flat`
-   * commits a plate of `flatHeight` instead (spheres are unaffected).
+   * Commit the active build: replace the wireframe preview with a solid matte
+   * mesh (+ crisp edge outlines) and keep it in the scene. `flat` commits a
+   * thin plate instead (spheres are unaffected).
    * @returns true if a mesh was committed.
    */
   commit({ flat = false }: { flat?: boolean } = {}): boolean {
     const build = this.build;
-    if (!build || build.phase === 'footprint') return false;
+    if (!build) return false;
     const footprint = Math.max(build.width, build.depth, build.radius);
     if (footprint < this.options.minFootprint) {
       this.cancel();
@@ -415,10 +355,11 @@ export class CadBuilder {
       : build.phase === 'height'
         ? build.height
         : Math.max(build.height, this.options.defaultHeight);
-    const radius = Math.max(build.radius, this.options.minSize);
-    const geometry = this.buildGeometry(
-      build.tool,
-      Math.max(build.width, this.options.minSize),
+
+    this.addObject({
+      shape: build.tool,
+      width: Math.max(build.width, this.options.minSize),
+      depth: Math.max(build.depth, this.options.minSize),
       height,
       Math.max(build.depth, this.options.minSize),
       radius
@@ -458,9 +399,9 @@ export class CadBuilder {
   /** Remove every committed mesh from the scene (and any selection). */
   clear(): void {
     this.cancel();
-    for (const mesh of this.committed) {
-      this.root.remove(mesh);
-      disposeMesh(mesh);
+    for (const object of this.committed) {
+      this.root.remove(object.mesh);
+      disposeMesh(object.mesh);
     }
     this.committed.length = 0;
     this.selected = null;
@@ -469,7 +410,7 @@ export class CadBuilder {
     this.endRotateSelection();
   }
 
-  /** Download all committed meshes as a binary `model.stl`. */
+  /** Download everything as a binary `model.stl`, ready for a slicer. */
   exportStl(): boolean {
     if (this.committed.length === 0) return false;
     this.root.updateMatrixWorld(true);
@@ -971,20 +912,18 @@ export class CadBuilder {
     return point;
   }
 
-  /** Spawn a new build (preview + state) anchored at `origin`. */
-  private startBuild(origin: THREE.Vector3, phase: BuildPhase, centered: boolean): Build {
+  /** Spawn a new build (preview + state) centered on `position`. */
+  private startBuild(position: THREE.Vector3): Build {
     const preview = this.createPreview();
     const build: Build = {
       tool: this.tool,
-      origin,
-      point: origin.clone(),
+      position,
       width: 0,
       depth: 0,
       radius: 0,
       height: this.options.minSize,
-      phase,
+      phase: 'base',
       preview,
-      centered,
       extrudeMode: null,
       baseHeight: 0,
       baseRadius: 0,
@@ -997,21 +936,13 @@ export class CadBuilder {
 
   /**
    * Two-hand base sizing around (0, 0, 0) from the pinch spans (units of
-   * video width): cuboid → width × depth rectangle from the horizontal /
-   * vertical gaps; box → square and cylinder / sphere → diameter from the
-   * straight-line gap. Starts the centered build on the first dual-hand
-   * frame; a single-hand footprint in progress is dropped (it was the
-   * lead-in to this pinch) and a released one is committed first.
+   * video width): cuboid -> width x depth rectangle from the horizontal /
+   * vertical gaps; box -> square and cylinder / sphere -> diameter from the
+   * straight-line gap.
    */
   private sizeBase(spanX: number | undefined, spanY: number | undefined): void {
     if (spanX === undefined || spanY === undefined) return;
-    let build = this.build;
-    if (build && !build.centered) {
-      if (build.phase === 'footprint') this.cancel();
-      else this.commit();
-      build = null;
-    }
-    if (!build) build = this.startBuild(new THREE.Vector3(0, 0, 0), 'base', true);
+    const build = this.build ?? this.startBuild(new THREE.Vector3(0, 0, 0));
     build.phase = 'base';
     build.extrudeMode = 'dual-hand';
     const { minSize, baseSizeScale } = this.options;
@@ -1027,38 +958,13 @@ export class CadBuilder {
     this.refreshPreview();
   }
 
-  /** Update footprint dimensions from a ground-plane Point B. */
-  private updateFootprint(point: THREE.Vector3): void {
-    const build = this.build;
-    if (!build || build.phase !== 'footprint') return;
-    const dx = point.x - build.origin.x;
-    const dz = point.z - build.origin.z;
-    build.radius = Math.hypot(dx, dz);
-    if (build.tool === 'box') {
-      // Square: the larger extent, extended from Point A toward Point B.
-      const side = Math.max(Math.abs(dx), Math.abs(dz));
-      build.width = side;
-      build.depth = side;
-      build.point = new THREE.Vector3(
-        build.origin.x + (dx < 0 ? -side : side),
-        0,
-        build.origin.z + (dz < 0 ? -side : side)
-      );
-    } else {
-      build.point = point;
-      build.width = Math.abs(dx);
-      build.depth = Math.abs(dz);
-    }
-    this.refreshPreview();
-  }
-
   /** Rescale / reposition the preview meshes from the build state. */
   private refreshPreview(): void {
     const build = this.build;
     if (!build) return;
-    const { fill, wire, marker, group } = build.preview;
+    const { fill, wire, group } = build.preview;
     const min = this.options.minSize;
-    const center = this.buildCenter(build);
+    const { x, z } = build.position;
     let scaleX = min;
     let scaleY = min;
     let scaleZ = min;
@@ -1069,7 +975,7 @@ export class CadBuilder {
         scaleX = Math.max(build.width, min);
         scaleY = height;
         scaleZ = Math.max(build.depth, min);
-        group.position.set(center.x, height / 2, center.z);
+        group.position.set(x, height / 2, z);
         break;
       }
       case 'cylinder': {
@@ -1078,7 +984,7 @@ export class CadBuilder {
         scaleX = radius * 2;
         scaleY = height;
         scaleZ = radius * 2;
-        group.position.set(center.x, height / 2, center.z);
+        group.position.set(x, height / 2, z);
         break;
       }
       case 'sphere': {
@@ -1086,28 +992,12 @@ export class CadBuilder {
         scaleX = radius * 2;
         scaleY = radius * 2;
         scaleZ = radius * 2;
-        group.position.set(center.x, radius, center.z);
+        group.position.set(x, radius, z);
         break;
       }
     }
     fill.scale.set(scaleX, scaleY, scaleZ);
     wire.scale.set(scaleX, scaleY, scaleZ);
-    marker.position.set(build.origin.x, 0, build.origin.z);
-  }
-
-  /**
-   * Footprint anchor: boxes / cuboids span corner-to-corner (midpoint center);
-   * cylinders / spheres are centered on Point A with radius to Point B.
-   */
-  private buildCenter(build: Build): THREE.Vector3 {
-    if (build.tool === 'box' || build.tool === 'cuboid') {
-      return new THREE.Vector3(
-        (build.origin.x + build.point.x) / 2,
-        0,
-        (build.origin.z + build.point.z) / 2
-      );
-    }
-    return new THREE.Vector3(build.origin.x, 0, build.origin.z);
   }
 
   /** Build the final (fresh, per-mesh) geometry for a committed solid. */
@@ -1163,30 +1053,39 @@ export class CadBuilder {
         opacity: 0.55,
       })
     );
-    const marker = new THREE.Mesh(
-      MARKER,
-      new THREE.MeshBasicMaterial({ color: this.options.previewColor })
-    );
-    group.add(fill, wire, marker);
-    return { group, fill, wire, marker };
+    group.add(fill, wire);
+    return { group, fill, wire };
   }
 
-  private bodyMaterial(): THREE.MeshStandardMaterial {
+  private bodyMaterial(color: string): THREE.MeshStandardMaterial {
     return new THREE.MeshStandardMaterial({
-      color: this.options.bodyColor,
+      color: new THREE.Color(color),
       roughness: 0.85,
       metalness: 0.08,
     });
   }
 
   private disposePreview(build: Build): void {
-    const { group, fill, wire, marker } = build.preview;
+    const { group, fill, wire } = build.preview;
     this.scene.scene.remove(group);
     (fill.material as THREE.Material).dispose();
     (wire.material as THREE.Material).dispose();
-    (marker.material as THREE.Material).dispose();
-    // UNIT_* geometries and MARKER are shared module singletons: not disposed.
+    // UNIT_* geometries are shared module singletons: not disposed.
   }
+}
+
+/** Strip the Three.js handle so only plain data crosses the boundary. */
+function toSummary(object: CommittedObject): SceneObjectSummary {
+  return {
+    id: object.id,
+    shape: object.shape,
+    width: object.width,
+    depth: object.depth,
+    height: object.height,
+    x: object.x,
+    z: object.z,
+    color: object.color,
+  };
 }
 
 /** Dispose a committed mesh's geometry, material and edge overlays. */

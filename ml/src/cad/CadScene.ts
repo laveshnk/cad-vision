@@ -350,6 +350,40 @@ export class CadScene {
     this.camera.updateProjectionMatrix();
   }
 
+  /**
+   * A downscaled JPEG of the viewport as it looks right now, so the voice
+   * agent can see what the user is pointing at ("make that one taller").
+   *
+   * The renderer does not preserve its drawing buffer, so the frame is
+   * re-rendered synchronously immediately before it is read back — reading a
+   * stale canvas would otherwise return transparent black.
+   *
+   * @returns base64 payload with the data-URL prefix stripped, or null if the
+   *   viewport has no pixels yet.
+   */
+  snapshotJpeg(maxWidth = 640, quality = 0.6): string | null {
+    if (this.disposed) return null;
+    const source = this.renderer.domElement;
+    if (source.width === 0 || source.height === 0) return null;
+    this.renderer.render(this.scene, this.camera);
+    const scale = Math.min(1, maxWidth / source.width);
+    const width = Math.max(1, Math.round(source.width * scale));
+    const height = Math.max(1, Math.round(source.height * scale));
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext('2d');
+    if (!context) return null;
+    // JPEG has no alpha channel, so lay down the scene background first or
+    // the transparent margins come out black.
+    context.fillStyle = `#${this.options.background.toString(16).padStart(6, '0')}`;
+    context.fillRect(0, 0, width, height);
+    context.drawImage(source, 0, 0, width, height);
+    const url = canvas.toDataURL('image/jpeg', quality);
+    const comma = url.indexOf(',');
+    return comma === -1 ? null : url.slice(comma + 1);
+  }
+
   /** Stop the render loop and release all GPU resources. */
   dispose(): void {
     if (this.disposed) return;

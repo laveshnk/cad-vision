@@ -1,0 +1,28 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "nodenext",
+    "lib": ["ES2023"],
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "isolatedModules": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "useDefineForClassFields": true,
+    "noEmit": true,
+    "types": ["node"],
+    // Node 24 runs these files directly by stripping types, which requires
+    // real `.ts` specifiers in relative imports and type-only imports to be
+    // marked as such.
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true
+  },
+  "include": ["server", "shared"],
+  // Tests run under Vitest with the browser config's bundler resolution, so
+  // they use extensionless imports that NodeNext would reject.
+  "exclude": ["**/__tests__/**"]
+}

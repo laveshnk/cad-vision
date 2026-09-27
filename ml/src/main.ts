@@ -1,10 +1,12 @@
 /**
- * App orchestrator: gesture-driven CAD workbench.
+ * App orchestrator: a hands-and-voice 3D playground.
  *
- * Strictly decoupled module wiring:
+ * Strictly decoupled module wiring — this file is the only place the layers
+ * meet:
  *
- *   Vision (GestureEngine)  --typed events-->  App (this file)
- *        --> CAD (CadScene + CadBuilder)  +  UI (Toolbar)
+ *   Vision (GestureEngine) --typed events--> App --> CAD (CadScene + CadBuilder)
+ *   Voice  (VoiceAgent)    --validated CadCommands--> App --> CAD
+ *                          <--SceneSummary + viewport snapshot-- App
  *
  * The vision layer emits device-space coordinates (x / y in [-1, 1], +Y up),
  * deltas and state events; the CAD layer consumes only those — nothing in
@@ -48,6 +50,8 @@ const toolbarRoot = document.querySelector<HTMLElement>('#toolbar');
 const viewport = document.querySelector<HTMLElement>('#viewport');
 const visionThumb = document.querySelector<HTMLElement>('#vision-thumb');
 const thumbExpand = document.querySelector<HTMLButtonElement>('#thumb-expand');
+const voicePill = document.querySelector<HTMLElement>('#voice-pill');
+const voiceCaptions = document.querySelector<HTMLElement>('#voice-captions');
 
 if (
   !video ||
@@ -56,7 +60,9 @@ if (
   !toolbarRoot ||
   !viewport ||
   !visionThumb ||
-  !thumbExpand
+  !thumbExpand ||
+  !voicePill ||
+  !voiceCaptions
 ) {
   throw new Error('cad-vision: required DOM elements are missing');
 }
@@ -133,6 +139,8 @@ const overlay = new DebugOverlay<CadTool>(canvas, {
 });
 
 /* ---- UI ---- */
+const voiceHud = new VoiceHud({ pill: voicePill, captions: voiceCaptions });
+
 const toolbar = new Toolbar(toolbarRoot, {
   onClearScene: () => {
     builder.clear();
@@ -142,6 +150,8 @@ const toolbar = new Toolbar(toolbarRoot, {
   onExportStl: () => builder.exportStl(),
   onCameraStart: () => startCamera(),
   onCameraStop: () => stopCamera(),
+  onVoiceToggle: () => void toggleVoice(),
+  onVoiceListen: () => voiceAgent.toggleListening(),
 });
 
 // Floating HSL color wheel (SELECT mode): pure UI mounted into the CAD
@@ -172,12 +182,55 @@ function setStatus(text: string): void {
   statusOutput.textContent = text;
 }
 
-/** Forward gesture events to the console as JSON (downstream consumer demo). */
-function logGestureEvent(event: GestureSignalEvent): void {
-  console.log(JSON.stringify({ source: 'cad-vision-gesture', event }));
+/* ---- Voice -> CAD bridge (validated commands only) ---- */
+
+/** Current scene, assembled fresh for every agent turn. */
+function readScene(): SceneSummary {
+  return { ...builder.describe(), cameraRunning };
 }
 
-/* ---- Vision -> CAD bridge (device-space coordinates only) ---- */
+/**
+ * Carry out a command the agent asked for. The returned string is fed back to
+ * the model as the tool result, so it is phrased the way the agent should
+ * repeat it — plain and spoken, not a status code.
+ */
+function executeCommand(command: CadCommand): string {
+  switch (command.name) {
+    case 'set_shape':
+      builder.setTool(command.shape);
+      return `Next hand-built shape is a ${command.shape}.`;
+    case 'add_shape': {
+      const object = builder.addPrimitive(command);
+      return `Built a ${object.shape} ${object.width} wide and ${object.height} tall at ${object.x}, ${object.z}.`;
+    }
+    case 'remove_last': {
+      const removed = builder.removeLast();
+      return removed ? `Removed the ${removed.shape}.` : 'There was nothing left to remove.';
+    }
+    case 'clear_scene':
+      builder.clear();
+      return 'Cleared the scene.';
+    case 'set_color': {
+      const count = builder.setColor(command.color, command.target);
+      if (count === 0) return 'There is nothing to paint yet.';
+      return `Painted ${command.target === 'all' ? `all ${count} objects` : 'it'} ${command.color}.`;
+    }
+    case 'describe_scene':
+      return describeScene(readScene());
+    case 'export_for_printing':
+      return builder.exportStl()
+        ? 'Downloaded model.stl — ready for a slicer or a printer.'
+        : 'Nothing to export yet; the scene is empty.';
+    case 'start_camera':
+      if (cameraRunning) return 'The camera is already on.';
+      startCamera();
+      return 'Camera on — hands are live.';
+    case 'stop_camera':
+      if (!cameraRunning) return 'The camera is already off.';
+      stopCamera();
+      return 'Camera off.';
+  }
+}
 
 /** MediaPipe index fingertip — the pointing hand's cursor on the color wheel. */
 const INDEX_TIP = 8;
@@ -274,7 +327,23 @@ engine.onPinchEnd((e) => {
 engine.onSelectRotate((e) => builder.rotateSelection(e.deltaRotation));
 engine.onSelectRotateEnd(() => builder.endRotateSelection());
 
-// Two-hand build: pinch both hands and pull apart to size the base (spawned
+/** Toggle the voice agent, greeting the user the first time it comes up. */
+async function toggleVoice(): Promise<void> {
+  if (voiceAgent.isRunning) {
+    voiceAgent.stop();
+    return;
+  }
+  // Presage watches the same <video> the tracker uses, so hands-free mouth
+  // detection is only possible once the camera is live.
+  await voiceAgent.start(cameraRunning ? videoElement : null);
+  if (voiceAgent.isRunning) {
+    void voiceAgent.say('Voice is on. Tell me what you want to build.');
+  }
+}
+
+/* ---- Vision -> CAD bridge (device-space coordinates only) ---- */
+
+// Two-hand build: pinch both hands and pull apart to size the shape (spawned
 // at the origin); release the upper pinch, then drag the lower one vertically
 // to set the height.
 engine.onExtrude((e) => builder.onExtrude(e));
@@ -309,7 +378,11 @@ engine.onZoom((e) => {
 
 /* ---- Misc wiring ---- */
 
-engine.on('gesture', (event) => logGestureEvent(event as GestureSignalEvent));
+if (debugMode) {
+  engine.on('gesture', (event) => {
+    console.log(JSON.stringify({ source: 'cad-vision-gesture', event: event as GestureSignalEvent }));
+  });
+}
 
 engine.on('state_change', (event) => {
   const change = event as { to: string; reason: string };
@@ -499,24 +572,31 @@ function selectionHudFrame(): OverlaySelectionHud | null {
 
 /** Start webcam + hand tracking (invoked from the toolbar). */
 function startCamera(): void {
+  cameraRunning = true;
   toolbar.setCameraRunning(true); // disable Start while the request is pending
-  setStatus('Requesting camera…');
+  setStatus('Starting…');
   engine
     .start(videoElement)
     .then(() => {
       statusOutput.dataset.state = 'IDLE';
-      setStatus('Tracking — state: IDLE');
+      setStatus('IDLE');
+      // Hands-free mouth detection needs this feed; if voice is already on it
+      // takes over from the manual button here.
+      voiceAgent.attachVideo(videoElement);
     })
     .catch((err: unknown) => {
+      cameraRunning = false;
       toolbar.setCameraRunning(false);
       setStatus(`Error: ${err instanceof Error ? err.message : String(err)}`);
       console.error('[cad-vision] failed to start:', err);
     });
 }
 
-/** Stop tracking and release the webcam (invoked from the toolbar). */
+/** Stop tracking and release the webcam (invoked from the toolbar or by voice). */
 function stopCamera(): void {
+  cameraRunning = false;
   engine.stop();
+  voiceAgent.detachVideo(); // back to the manual trigger while the camera is off
   builder.cancel(); // drop any pending preview so the scene stays clean
   builder.deselect(); // no lingering selection highlight once tracking stops
   selectHand = null;
@@ -527,7 +607,7 @@ function stopCamera(): void {
   toolbar.setCameraRunning(false);
   statusOutput.dataset.state = 'IDLE';
   statusOutput.title = '';
-  setStatus('Stopped');
+  setStatus('Idle');
   const ctx = overlayCanvas.getContext('2d');
   if (ctx) ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
 }
@@ -571,3 +651,8 @@ document.addEventListener('keydown', (event) => {
   }
 });
 
+if (debugMode) {
+  Object.assign(window, {
+    cadVision: { engine, overlay, cadScene, builder, toolbar, voiceAgent, voiceHud },
+  });
+}

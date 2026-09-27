@@ -1,10 +1,12 @@
-# CAD Vision — Gesture-Driven CAD Workbench (`ml/`)
+# CAD Vision — a hands-and-voice 3D playground (`ml/`)
 
-Self-contained TypeScript application that turns webcam hand tracking into an
-interactive CAD tool. The MediaPipe-based gesture engine emits **normalized CAD
-gesture events** (pinch/draw, extrude, camera move, zoom); a decoupled Three.js module
-(orbit rig, ground-plane building, STL export) and a light glass toolbar
-consume them. The camera renders as a floating video-call-style thumbnail
+Self-contained TypeScript application that turns a webcam into a place to
+build things. Your **hands** do the continuous work: a MediaPipe gesture engine
+emits normalized events (pinch, extrude, camera move, zoom) that a decoupled
+Three.js module turns into solids. Your **voice** does the discrete work: an
+agent hears what you ask for, builds it, and answers out loud — and it knows
+you started talking because the camera watched your mouth move, so there is no
+button to press. The camera renders as a floating video-call-style thumbnail
 (landmarks, skeleton, HUD overlay) over the full-bleed 3D viewport.
 
 Three interaction modes — **VIEW** (camera navigation only), **SELECT**
@@ -31,11 +33,37 @@ re-run it any time with `npm run setup:assets`.
 Camera access requires a secure context: `localhost` works for development;
 serving over the network needs HTTPS.
 
+### Voice (optional)
+
+Hands work with `npm run dev` alone. Voice needs the small Node server that
+holds the API keys:
+
+```bash
+cp .env.example .env   # fill in Gemini + ElevenLabs (+ Presage) keys
+npm run dev:server     # http://localhost:8787 — Vite proxies /api and /ws to it
+```
+
+Then click **Voice** in the toolbar. Each service degrades on its own: without
+`PRESAGE_API_KEY` a manual **Talk** button appears instead of hands-free mouth
+detection, and without the ElevenLabs or Gemini keys the voice button reports
+the failure and the hand-building side keeps working.
+
+> ElevenLabs free accounts can only use *premade* voices. A Voice Library ID in
+> `ELEVENLABS_VOICE_ID` returns `402 paid_plan_required`; the default in
+> `.env.example` works on any plan.
+
 ## Architecture
 
 ```
+shared/
+└── agentTools.ts              # the voice contract: tool schemas, validators, SceneSummary
+server/                        # Node 24 (type-stripped .ts); holds every API key
+├── index.ts                   # http + ws: /api/voice/*, /api/agent/*, /ws/presage
+├── agent.ts                   # Gemini turn loop + per-session history
+├── elevenlabs.ts              # Scribe token minting + TTS streaming
+└── presage.ts                 # SmartSpectra frames → "is the mouth moving"
 src/
-├── main.ts                    # app orchestrator: vision events → CAD + UI wiring
+├── main.ts                    # app orchestrator: vision + voice events → CAD + UI
 ├── styles.css                 # light theme; full-bleed viewport, camera thumbnail, glass toolbar
 ├── cad/
 │   ├── CadScene.ts            # Three.js viewport: camera rig, lights, grid, orbit
@@ -75,15 +103,33 @@ HandTracker (raw MediaPipe hands)
   → listeners            typed events + per-frame debug event
 ```
 
+Voice pipeline:
+
+```
+PresageFrames   webcam stills → the server → SmartSpectra → is the mouth moving
+  → TalkGate      hysteresis: open after 150 ms of talking, close after 700 ms
+                  of silence, barge-in after 300 ms of talking over playback
+  → Transcriber   ElevenLabs Scribe realtime; emits one sealed utterance
+  → /api/agent/turn  Gemini, with the scene summary and a viewport snapshot
+  → ToolExecutor  validated CadCommands run against CadBuilder
+  → Speaker       ElevenLabs TTS, interruptible
+```
+
+The gate is driven by the **face**, not the microphone, so the agent's own
+speech can never re-trigger it — and talking over the reply cuts it off.
+
 App wiring (strictly decoupled — `src/cad` and `src/ui` import nothing from
-`src/vision`; only device-space coordinates, deltas and state events cross
-the boundary):
+`src/vision` or `src/voice`; only device-space coordinates, deltas, state
+events and validated `CadCommand`s cross the boundaries):
 
 ```
 GestureEngine  --typed events-->  main.ts (orchestrator)
   ├── CadScene / CadBuilder      primitives, extrusion, selection, orbit, STL export
   └── Toolbar                    camera toggle + scene utilities
 ```
+
+API keys live only in `server/`. The browser gets a short-lived, single-use
+Scribe token from `/api/voice/token`; nothing secret is ever bundled.
 
 ### Running mode note
 
@@ -325,9 +371,12 @@ await engine.start(videoElement); // from a user gesture (camera permission)
 engine.stop();
 ```
 
-`main.ts` logs every gesture event to the console as JSON for downstream CAD
-consumers. Event payloads use device space: `[-1, 1]`, X mirrored (matches the
-on-screen view), +Y up — ready to map into a CAD viewport.
+Event payloads use device space: `[-1, 1]`, X mirrored (matches the on-screen
+view), +Y up — ready to map into a CAD viewport.
+
+Append `?debug` to the URL to log every gesture event to the console as JSON
+and expose the live module graph on `window.cadVision` (`engine`, `overlay`,
+`cadScene`, `builder`, `toolbar`, `voiceAgent`, `voiceHud`).
 
 ## Configuration
 
@@ -415,4 +464,25 @@ npm run build   # tsc --noEmit + vite production build
   `strategy: 'one-euro'`.
 - **Pinch feels off** — tune `pinchStartThreshold` / `pinchReleaseThreshold`
   to hand size and camera distance.
+- **Voice button errors immediately** — start the API server
+  (`npm run dev:server`) and check `GET /healthz`, which reports which keys
+  it found.
+- **Spoken replies fail with 402** — `ELEVENLABS_VOICE_ID` is a Voice Library
+  voice; free accounts can only use premade ones. See `.env.example`.
+- **A "Talk" button appeared** — hands-free mouth detection is not running
+  (no `PRESAGE_API_KEY`, the key was rejected, or the camera is off). It is a
+  toggle, not a push-to-talk: press **Talk**, say your piece, then press
+  **Send**. Starting the camera hands control back to your face automatically.
+- **Server log says "not in a valid state" or `POST /device/pair` 401** — the
+  Physiology API key in `PRESAGE_API_KEY` was rejected. The pipeline dies on
+  that, and every later frame repeats the same error. Replace the key from
+  [physiology.presagetech.com](https://physiology.presagetech.com/auth/login)
+  and restart `npm run dev:server`. Voice still works through the **Talk**
+  button in the meantime.
+- **It hears you but nothing happens** — the turn is never being sealed. That
+  means the gate never closed: either you are in manual mode and did not press
+  **Send**, or mouth detection is stuck reporting speech (the gate gives up
+  after `maxOpenMs`, 20 s, and commits anyway).
+- **The mic opens when you are not talking** — raise `openDelayMs` in the
+  `TalkGate` options; lower it if the first word keeps getting clipped.
 
