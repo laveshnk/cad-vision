@@ -20,8 +20,8 @@
  * index tip over the button for `dwellMs`; a ring marks a pointing
  * fingertip. Pinches, fists and open palms never press a toggle button, so
  * moving, editing or building objects can't switch modes / shapes by
- * accident. The trash bin icon in the bottom-right corner (`onTrashRequest`)
- * also accepts a fresh pinch.
+ * accident — including the trash bin icon below [ VIEW ] (`onTrashRequest`),
+ * which clears the scene through the confirmation dialog below.
  *
  * Destructive actions never open browser popups or DOM modals: the trash bin
  * (a scene clear) and the selection's Delete button open an in-vision
@@ -404,10 +404,10 @@ export interface DebugOverlayOptions<S extends string = string> {
    */
   arScene?: ArSceneProvider;
   /**
-   * SELECT-mode selection HUD: mirrors the color-wheel disc outline and the
-   * Delete button (device-space plain data + dwell progress) onto this
-   * canvas, so users can visually align their hands with the viewport's
-   * floating controls. Supplied by the orchestrator; null skips the layer.
+   * SELECT-mode selection HUD: mirrors the color wheel (as its full live
+   * hue / saturation disc — pointing at a color here picks that color) and
+   * the Delete button (device-space plain data + dwell progress) onto this
+   * canvas, in sync with the viewport's controls. Supplied by the orchestrator; null skips the layer.
    */
   selectionHud?: SelectionHudProvider;
   /**
@@ -478,6 +478,16 @@ interface ButtonRect {
   width: number;
   height: number;
 }
+
+/**
+ * User-facing mode names. The `select` mode is presented as **EDIT** (pick,
+ * move, recolor, delete, Boolean) — the id stays `select` in the API.
+ */
+export const MODE_LABELS: Record<InteractionMode, string> = {
+  view: 'VIEW',
+  select: 'EDIT',
+  create: 'CREATE',
+};
 
 /** Mode buttons, left to right, along the top edge of the overlay. */
 const MODE_BUTTONS: readonly InteractionMode[] = ['view', 'select', 'create'];
@@ -550,12 +560,6 @@ export class DebugOverlay<S extends string = string> {
   private readonly confirmHandLossFrames: number;
   private readonly onConfirmRequest: ((intent: OverlayConfirmIntent) => void) | null;
   private readonly onCancelRequest: ((intent: OverlayConfirmIntent) => void) | null;
-  /**
-   * Fresh-pinch tracking (pinch-activated UI — trash + dialog targets): the
-   * previous frame's `pinchActive` per hand, so only a pinch that *closes*
-   * over a button activates it (a drag sweeping across never does).
-   */
-  private readonly pinchEngaged = new Map<string, boolean>();
   /**
    * SELECT-mode Boolean tool toggles: last rendered rects, the dwell clock,
    * the armed tool (host mirrors it) and the X-cross trigger debounce.
@@ -750,7 +754,7 @@ export class DebugOverlay<S extends string = string> {
     if (frame.mode === 'create' && !dialogOpen) this.drawShapeButtons(cssWidth);
     else this.shapeRects = [];
     // The trash bin hides while the dialog is open (one question at a time).
-    if (!dialogOpen) this.drawTrashButton(cssWidth, cssHeight);
+    if (!dialogOpen) this.drawTrashButton(cssWidth);
     else this.trashRect = null;
     const dt = this.frameDt(frame);
     if (dialogOpen) {
@@ -763,10 +767,6 @@ export class DebugOverlay<S extends string = string> {
       this.updateBooleanInteraction(frame, view, dt);
       this.updateTrashInteraction(frame, view, dt);
     }
-    // Fresh pinches answer pinch-activated UI: the dialog targets while it
-    // is open, the trash bin otherwise. Runs every frame (the map must track
-    // pinch releases even while the dialog is open).
-    this.updatePinchUi(frame, view);
     this.drawPointerCursors(frame, view);
   }
 
@@ -1163,10 +1163,9 @@ export class DebugOverlay<S extends string = string> {
       const cy = ((1 - hud.wheel.y) / 2) * view.dispH;
       const rx = Math.max((hud.wheel.radiusX / 2) * view.dispW, 1);
       const ry = Math.max((hud.wheel.radiusY / 2) * view.dispH, 1);
+      this.drawHueDisc(cx, cy, rx, ry);
       ctx.beginPath();
       ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
-      ctx.fillStyle = HUD_WHEEL_FILL;
-      ctx.fill();
       ctx.lineWidth = 2;
       ctx.strokeStyle = HUD_WHEEL_STROKE;
       ctx.stroke();
@@ -1228,6 +1227,38 @@ export class DebugOverlay<S extends string = string> {
       }
     }
 
+    ctx.restore();
+  }
+
+  /**
+   * The color wheel's live hue / saturation disc, drawn into the camera
+   * view exactly where (and how) the 3D viewport's wheel maps: hue by angle
+   * (clockwise from +x on screen), saturation by radius, lightness 0.5 —
+   * fading linearly to gray at the center — so a pointing fingertip on a
+   * color here repaints the object with that same color. Falls back to a
+   * flat translucent disc without conic-gradient support.
+   */
+  private drawHueDisc(cx: number, cy: number, rx: number, ry: number): void {
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.scale(1, ry / rx); // circle of radius rx → the device-space ellipse
+    ctx.beginPath();
+    ctx.arc(0, 0, rx, 0, Math.PI * 2);
+    if (typeof ctx.createConicGradient === 'function') {
+      const hues = ctx.createConicGradient(0, 0, 0);
+      for (let i = 0; i <= 12; i++) hues.addColorStop(i / 12, `hsl(${i * 30}, 100%, 50%)`);
+      ctx.fillStyle = hues;
+      ctx.fill();
+      const saturation = ctx.createRadialGradient(0, 0, 0, 0, 0, rx);
+      saturation.addColorStop(0, 'rgb(128, 128, 128)');
+      saturation.addColorStop(1, 'rgba(128, 128, 128, 0)');
+      ctx.fillStyle = saturation;
+      ctx.fill();
+    } else {
+      ctx.fillStyle = HUD_WHEEL_FILL;
+      ctx.fill();
+    }
     ctx.restore();
   }
 
@@ -1307,7 +1338,7 @@ export class DebugOverlay<S extends string = string> {
     MODE_BUTTONS.forEach((mode, i) => {
       const x = margin + i * (width + gap);
       this.buttonRects.push({ x, y: margin, width, height });
-      const label = `[ ${mode.toUpperCase()} ]`;
+      const label = `[ ${MODE_LABELS[mode]} ]`;
       // Shrink the label to fit the button.
       let fontSize = Math.max(9, Math.round(13 * scale));
       ctx.font = `bold ${fontSize}px ui-monospace, monospace`;
@@ -1413,13 +1444,20 @@ export class DebugOverlay<S extends string = string> {
   } {
     const scale = this.fontScale(cssWidth);
     const { margin, gap, height: barHeight } = this.barMetrics(cssWidth);
+    // The trash bin owns the column below VIEW; the stack sits beside it.
+    const left = margin + this.trashSize(cssWidth) + gap;
     return {
-      margin,
+      margin: left,
       gap,
       height: Math.max(20, Math.round(26 * scale)),
-      width: Math.min(Math.round((cssWidth - margin * 2) * 0.55), 190),
+      width: Math.min(Math.round((cssWidth - left - margin) * 0.62), 190),
       top: margin + barHeight + gap,
     };
+  }
+
+  /** Side length of the square trash-bin button (CSS px). */
+  private trashSize(cssWidth: number): number {
+    return Math.max(30, Math.round(42 * this.fontScale(cssWidth)));
   }
 
   /**
@@ -1616,10 +1654,10 @@ export class DebugOverlay<S extends string = string> {
   }
 
   /* ------------------------------------------------------------------ */
-  /* In-vision trash bin (bottom-right corner)                          */
+  /* In-vision trash bin (top-left, below [ VIEW ])                      */
   /* ------------------------------------------------------------------ */
 
-  /** Fire the trash request (dwell / fresh pinch / mouse click). */
+  /** Fire the trash request (pointing dwell / mouse click). */
   private requestTrash(): void {
     this.trashDwelling = false;
     this.trashDwellElapsed = 0;
@@ -1659,19 +1697,19 @@ export class DebugOverlay<S extends string = string> {
   }
 
   /**
-   * In-vision trash bin: a boxy recycle-bin icon button in the bottom-right
-   * corner of the camera view (danger-tinted, matching the Delete HUD). A
-   * pointing dwell fills a progress bar along its bottom edge; a fresh
-   * pinch that closes over the icon (see `updatePinchUi`) activates it
-   * immediately. Hidden while the confirmation dialog is open.
+   * In-vision trash bin: a boxy recycle-bin icon button in the top-left
+   * corner, directly below the [ VIEW ] mode button (danger-tinted, matching
+   * the Delete HUD). Only a pointing index fingertip held on it (or a mouse
+   * click) activates it — a pointing dwell fills a progress bar along its
+   * bottom edge; pinches never fire it. Hidden while the confirmation dialog
+   * is open.
    */
-  private drawTrashButton(cssWidth: number, cssHeight: number): void {
+  private drawTrashButton(cssWidth: number): void {
     const ctx = this.ctx;
-    const scale = this.fontScale(cssWidth);
-    const size = Math.max(30, Math.round(42 * scale));
-    const margin = Math.round(8 * scale);
-    const x = cssWidth - margin - size;
-    const y = cssHeight - margin - size;
+    const size = this.trashSize(cssWidth);
+    const { margin, gap, height: barHeight } = this.barMetrics(cssWidth);
+    const x = margin;
+    const y = margin + barHeight + gap;
     this.trashRect = { x, y, width: size, height: size };
 
     const dwelling = this.trashDwelling;
@@ -1740,10 +1778,11 @@ export class DebugOverlay<S extends string = string> {
 
   /**
    * Dialog gestures, per frame while open:
-   * - **Confirm**: hold the "OK" gesture (thumb + index loop, middle /
-   *   ring / pinky extended) for `confirmHoldMs` anywhere in view. (A pinch
-   *   on the confirm target is handled by `updatePinchUi`.)
-   * - **Cancel**: an open palm held for `confirmPalmCancelMs` — suppressed
+   * - **Confirm**: a pointing index fingertip held on the confirm target, or
+   *   the "OK" gesture (thumb + index loop, middle / ring / pinky extended)
+   *   held anywhere in view, for `confirmHoldMs`. Pinches never answer it.
+   * - **Cancel**: a pointing hold on the cancel target (`confirmHoldMs`), or
+   *   an open palm held for `confirmPalmCancelMs` — suppressed
    *   during the first moments after opening, because the pinch that
    *   triggered the dialog releases into an open hand — or simply moving
    *   every hand away for `confirmHandLossFrames` frames.
@@ -1800,31 +1839,6 @@ export class DebugOverlay<S extends string = string> {
       }
     } else {
       this.confirmPalmElapsed = 0;
-    }
-  }
-
-  /**
-   * Fresh-pinch UI activation: only a pinch that *closes* over the trash bin
-   * fires it — a pinch drag sweeping across it never triggers anything.
-   * While the confirmation dialog is open pinches do nothing (it is answered
-   * by a hold, never instantly). The previous frame's `pinchActive` per hand
-   * provides the edge detection.
-   */
-  private updatePinchUi(frame: FrameEvent, view: ViewTransform): void {
-    for (const hand of frame.hands) {
-      const key = hand.handedness;
-      const wasEngaged = this.pinchEngaged.get(key) ?? false;
-      const engaged = hand.pinchActive;
-      this.pinchEngaged.set(key, engaged);
-      if (wasEngaged || !engaged) continue; // only a fresh pinch counts
-      // Pinch center (thumb + index tips) in canvas CSS px.
-      const thumb = this.toCanvas(hand, THUMB_TIP, view);
-      const index = this.toCanvas(hand, INDEX_TIP, view);
-      const cx = (thumb.x + index.x) / 2;
-      const cy = (thumb.y + index.y) / 2;
-      if (this.openIntent !== null) continue; // the dialog needs a hold
-      const trash = this.trashRect;
-      if (trash && this.inRect(trash, cx, cy)) this.requestTrash();
     }
   }
 

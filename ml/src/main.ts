@@ -36,7 +36,7 @@
  */
 
 import { GestureEngine } from './vision/GestureEngine';
-import { DebugOverlay } from './vision/DebugOverlay';
+import { DebugOverlay, MODE_LABELS } from './vision/DebugOverlay';
 import type {
   FrameEvent,
   GestureSignalEvent,
@@ -375,7 +375,7 @@ engine.on('state_change', (event) => {
   const change = event as { to: string; reason: string };
   statusOutput.dataset.state = change.to;
   statusOutput.title = `${change.to} — ${change.reason}`;
-  setStatus(`Mode: ${engine.mode.toUpperCase()} — State: ${change.to} (${change.reason})`);
+  setStatus(`Mode: ${MODE_LABELS[engine.mode]} — State: ${change.to} (${change.reason})`);
 });
 
 // A mode switch aborts any in-flight build / selection drag so the new mode
@@ -391,7 +391,7 @@ engine.on('mode_change', (event) => {
   colorPicked = false;
   lastSelectionStamp = null;
   statusOutput.dataset.mode = event.to;
-  setStatus(`Mode: ${event.to.toUpperCase()} — State: ${engine.state}`);
+  setStatus(`Mode: ${MODE_LABELS[event.to]} — State: ${engine.state}`);
 });
 
 // Debug overlay: re-render on every processed frame; the SELECT-mode
@@ -409,7 +409,7 @@ engine.on('frame', (event) => {
   if (event.video.height > 0) cadScene.setInteractionAspect(event.video.width / event.video.height);
   updateSelectionUi(event);
   metricsBar.update({
-    mode: event.mode.toUpperCase(),
+    mode: MODE_LABELS[event.mode],
     state: event.state,
     fps: event.fps,
     hands: event.hands.length,
