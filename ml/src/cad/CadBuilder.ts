@@ -282,6 +282,8 @@ const UNIT_BOX = new THREE.BoxGeometry(1, 1, 1);
 const UNIT_CYLINDER = new THREE.CylinderGeometry(0.5, 0.5, 1, 32);
 const UNIT_SPHERE = new THREE.SphereGeometry(0.5, 32, 16);
 const MARKER = new THREE.SphereGeometry(0.07, 12, 8);
+/** Build preview draws after every solid (x-ray, see `createPreview`). */
+const PREVIEW_RENDER_ORDER = 1000;
 
 /**
  * EdgesGeometry crease thresholds per tool: boxes show every edge,
@@ -1577,31 +1579,36 @@ export class CadBuilder {
     }
   }
 
+  /**
+   * Wireframe build preview ("blueprint"). It is drawn as an x-ray layer:
+   * no depth test and a render order after every solid, so it stays fully
+   * visible even when the new shape sits inside or behind existing objects.
+   */
   private createPreview(): Preview {
     const group = new THREE.Group();
     group.name = 'cad-preview';
+    const xray = { transparent: true, depthTest: false, depthWrite: false } as const;
     const fill = new THREE.Mesh(
       this.unitGeometry(this.tool),
-      new THREE.MeshBasicMaterial({
-        color: this.options.previewColor,
-        transparent: true,
-        opacity: 0.16,
-        depthWrite: false,
-      })
+      new THREE.MeshBasicMaterial({ color: this.options.previewColor, opacity: 0.16, ...xray })
     );
     const wire = new THREE.Mesh(
       this.unitGeometry(this.tool),
       new THREE.MeshBasicMaterial({
         color: this.options.previewColor,
         wireframe: true,
-        transparent: true,
         opacity: 0.55,
+        ...xray,
       })
     );
     const marker = new THREE.Mesh(
       MARKER,
-      new THREE.MeshBasicMaterial({ color: this.options.previewColor })
+      new THREE.MeshBasicMaterial({ color: this.options.previewColor, ...xray })
     );
+    // Fill first, then the lines and marker on top of it.
+    fill.renderOrder = PREVIEW_RENDER_ORDER;
+    wire.renderOrder = PREVIEW_RENDER_ORDER + 1;
+    marker.renderOrder = PREVIEW_RENDER_ORDER + 1;
     group.add(fill, wire, marker);
     return { group, fill, wire, marker };
   }

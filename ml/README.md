@@ -208,8 +208,9 @@ picked the same way (point-and-hold / click); it sets the shape for the next
 build:
 
 1. **Two-hand build** — pinch with both hands: a translucent wireframe
-   preview of the selected shape spawns centered on the origin `(0, 0, 0)`,
-   its base sized by the two pinches (`baseSizeScale` world units per unit
+   preview of the selected shape spawns centered on the origin `(0, 0, 0)`
+   (drawn x-ray style — always on top, so it stays visible inside or behind
+   existing solids), its base sized by the two pinches (`baseSizeScale` world units per unit
    of video width):
    - **Box** — square, side = straight-line pinch gap;
    - **Cuboid** — rectangle, horizontal gap → width, vertical gap → depth;
