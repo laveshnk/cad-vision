@@ -639,6 +639,23 @@ describe('GestureClassifier — fist rotation of a selected object', () => {
     }
   });
 
+  it('rotation gets the raw, unstraightened fist motion (no lag / re-aiming)', () => {
+    // Default options: the camera-path straightener is active for camera moves.
+    const classifier = new GestureClassifier(TEST_OPTIONS);
+    classifier.setObjectRotation(true);
+    let t = 0;
+    classifier.process([makeHand('Right', { fist: true })], (t += 100));
+    classifier.process([makeHand('Right', { fist: true })], (t += 100));
+    // A small diagonal step: straightening would swallow it (start distance).
+    const result = classifier.process([makeHand('Right', { fist: true, dx: -0.004, dy: -0.003 })], (t += 100));
+    const orbit = result.events.find((e) => e.type === 'orbit');
+    expect(orbit?.type).toBe('orbit');
+    if (orbit?.type === 'orbit') {
+      expect(orbit.deltaX).toBeCloseTo(0.008, 4);
+      expect(orbit.deltaY).toBeCloseTo(0.006, 4);
+    }
+  });
+
   it('back to camera control (zoom) once object rotation is off', () => {
     const classifier = new GestureClassifier(TEST_OPTIONS);
     classifier.setObjectRotation(true);

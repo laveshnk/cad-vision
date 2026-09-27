@@ -232,15 +232,20 @@ build:
    mesh's own material is never tinted; it stays selected after you let go).
    A quick pinch on the **already-selected** object deselects it again
    (toggle). To **rotate** the selected object, make a **fist** with one
-   hand and move it: up / down turns it about the world X axis, left /
-   right about the world Y axis (`fistRotateSpeed`, 3 rad per device unit;
-   a tilted object is lifted so it never sinks into the floor). With both
+   hand and move it, like turning it in your hand: left / right spins it
+   about the vertical axis (the side facing you follows the fist), up /
+   down tips it about the camera's horizontal axis (the side facing you
+   tips with the fist — from any camera angle). Raw fist motion, no path
+   straightening (`fistRotateSpeed` 2.5 rad per device unit, per-axis
+   jitter under `fistRotateDeadzone` dropped); it turns about its own
+   center and its lowest point keeps its height (exact, vertex-based), so
+   it neither sinks into nor creeps off the floor. With both
    hands fisted the faster-moving fist drives, and the right hand when both
    move about equally fast; fists never zoom or orbit the camera while an
    object is selected (`GestureEngine.setObjectRotation`). To **move** it, pinch and *hold* (the mesh starts following after
    `dragHoldMs`, 300 ms, so a quick pinch never nudges it), drag, and
    release to drop it. Dragging moves it under the active
-   **constraint toggle** (camera view, directly below `[ EDIT ]`): `[ XZ PLANE ]`
+   **constraint toggle** (camera view, icon column below `[ VIEW ]`): `[ XZ PLANE ]`
    (default) slides it on a horizontal plane at the height of the point you
    grabbed, with its elevation locked, while `[ Y AXIS ]` ignores
    horizontal drift and lifts / lowers it along a camera-facing vertical
@@ -258,13 +263,12 @@ build:
    your other hand: tilting it spins the selection around the vertical
    axis, with a compass ring (dashed circle + yaw needle) rendered around
    the object in both the 3D viewport and the AR mirror. A floating
-   **HSL color wheel** appears pinned in the bottom-left corner of the
-   hand-reachable area (the webcam frame's bottom-left corner mapped into
-   the viewport — the literal viewport corner lies outside the finger's
-   reach, and inside the part of the webcam image the camera view actually
-   shows — a 16:9 webcam loses its sides in the 4:3 view, see
-   `DebugOverlay.visibleDeviceRect`). The camera view shows the **same live
-   color disc**, small, in its own bottom-left corner — hue by angle, saturation by radius, exactly
+   **HSL color wheel** appears pinned at mid-height on the right edge of
+   the hand-reachable area that the camera view actually shows (a 16:9
+   webcam loses its sides in the 4:3 view — `DebugOverlay.visibleDeviceRect`).
+   Mid-height matters: a fingertip low in the frame pulls the wrist and
+   palm out of view and the tracker loses the hand. The camera view shows
+   the **same live color disc**, small, at the same spot — hue by angle, saturation by radius, exactly
    aligned with the viewport wheel — so you can pick colors right there:
    **point** at the disc (index finger
    up) — every hue under the fingertip repaints the mesh live (angle =
@@ -459,11 +463,14 @@ The `<canvas id="overlay">` (pure Canvas 2D) mirrors the feed and draws:
   (landmark 8) on the button for 500 ms (ring cursor + progress bar), via
   `DebugOverlay`'s `onModeRequest` callback. Pinches never press buttons,
   so an object drag sweeping across the bar never switches modes;
-- each mode's options sit under its own button: the VIEW-mode trash bin
-  under `[ VIEW ]`, the EDIT-mode stack under `[ EDIT ]`, the CREATE-mode
-  shape icons down the right edge under `[ CREATE ]`;
-- in **EDIT mode**, a stack of two **drag-constraint toggles** directly
-  below `[ EDIT ]`: `[ XZ PLANE ]` (default) and
+- mode options: the VIEW-mode trash bin and the EDIT-mode tools share the
+  left column below `[ VIEW ]` (never shown together); the CREATE-mode
+  shape icons run down the right edge. EDIT tools are square **icon**
+  buttons: floor plane with a 4-way arrow (XZ PLANE), vertical double arrow
+  (Y AXIS), square with a dashed bite and "−" (SUBTRACT), square + circle
+  with "+" (UNION);
+- in **EDIT mode**, two **drag-constraint toggles** at the top of that
+  column: `[ XZ PLANE ]` (default) and
   `[ Y AXIS ]` — same boxy style and pointing activation
   (`onDragConstraintRequest`);
 - in **EDIT mode**, the two **CSG Boolean tool toggles** continue the

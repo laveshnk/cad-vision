@@ -94,9 +94,21 @@ import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js';
 import type { CadScene } from './CadScene';
 import { boxesClash, evaluateBoolean, overlapBox, worldBounds, type BooleanOperation } from './booleanOps';
 
-/** World axes for fist rotation of the selection. */
-const WORLD_X = new THREE.Vector3(1, 0, 0);
+/** World up: the fist-rotation yaw axis. */
 const WORLD_Y = new THREE.Vector3(0, 1, 0);
+
+/** Lowest world-space Y over a mesh's actual vertices (exact, unlike an AABB of a rotated box). */
+function worldBottom(mesh: THREE.Mesh): number {
+  const position = mesh.geometry.getAttribute('position');
+  if (!position) return mesh.position.y;
+  const vertex = new THREE.Vector3();
+  let bottom = Infinity;
+  for (let i = 0; i < position.count; i++) {
+    vertex.fromBufferAttribute(position, i).applyMatrix4(mesh.matrixWorld);
+    if (vertex.y < bottom) bottom = vertex.y;
+  }
+  return bottom;
+}
 
 export type CadTool = 'box' | 'cuboid' | 'cylinder' | 'sphere';
 
@@ -163,9 +175,13 @@ export interface CadBuilderOptions {
   singleHandFootprint?: boolean;
   /**
    * EDIT mode fist rotation: radians of object rotation per device-space
-   * unit of fist travel (up / down → world X, left / right → world Y).
+   * unit of fist travel (left / right → vertical axis, up / down → the
+   * camera's horizontal axis). Default 2.5 (a fist sweep across a third of
+   * the view ≈ 95°).
    */
   fistRotateSpeed?: number;
+  /** Per-axis fist delta (device units) below which rotation ignores jitter. */
+  fistRotateDeadzone?: number;
   /**
    * SELECT mode: a pinch must be held this long (ms) before it starts moving
    * the picked mesh, so a quick pinch only selects it. Default 300.
@@ -329,7 +345,8 @@ export class CadBuilder {
       dragElevationScale: options.dragElevationScale ?? 3,
       dragMaxHeight: options.dragMaxHeight ?? 5,
       singleHandFootprint: options.singleHandFootprint ?? false,
-      fistRotateSpeed: options.fistRotateSpeed ?? 3,
+      fistRotateSpeed: options.fistRotateSpeed ?? 2.5,
+      fistRotateDeadzone: options.fistRotateDeadzone ?? 0.0015,
       dragHoldMs: options.dragHoldMs ?? 300,
       previewColor: options.previewColor ?? 0x0284c7,
       bodyColor: options.bodyColor ?? 0x3f3f46,
@@ -612,7 +629,7 @@ export class CadBuilder {
     // Floor clamp from the *world* bounds, so a tilted (fist-rotated) mesh
     // is clamped by its real lowest point.
     mesh.updateMatrixWorld(true);
-    const minY = mesh.position.y - worldBounds(mesh, new THREE.Box3()).min.y;
+    const minY = mesh.position.y - worldBottom(mesh);
     const drag = {
       offsetX: 0,
       offsetZ: 0,
@@ -1029,24 +1046,50 @@ export class CadBuilder {
   }
 
   /**
-   * Fist rotation of the selection (EDIT mode): a fist moving up / down
-   * turns the mesh about the world X axis, left / right about the world Y
-   * axis (device-space deltas, `fistRotateSpeed` radians per unit). Applied
-   * on world axes (quaternion), so successive turns stay intuitive whatever
-   * the current orientation. The mesh is lifted if a tilt would push it
-   * through the floor.
+   * Fist rotation of the selection (EDIT mode), screen-relative like
+   * turning the object in your hand:
+   * - fist **left / right** spins it about the vertical (world Y) axis — the
+   *   side facing you follows the fist;
+   * - fist **up / down** tips it about the camera's horizontal (screen-X)
+   *   axis — the side facing you tips up / down with the fist, from any
+   *   camera angle.
+   * Deltas are device units (`fistRotateSpeed` radians per unit; jitter
+   * below `fistRotateDeadzone` per axis is dropped). The mesh turns about
+   * its own center (world AABB center), and its lowest point keeps its
+   * height (measured on the actual vertices), so it neither sinks into nor
+   * creeps up off the floor as you turn it back and forth.
    */
   rotateSelectionBy(deltaX: number, deltaY: number): void {
     const mesh = this.selected;
     if (!mesh || !Number.isFinite(deltaX) || !Number.isFinite(deltaY)) return;
-    const speed = this.options.fistRotateSpeed;
-    if (deltaX !== 0) mesh.rotateOnWorldAxis(WORLD_Y, deltaX * speed);
-    // Fist up tips the object's front face up (away from the viewer).
-    if (deltaY !== 0) mesh.rotateOnWorldAxis(WORLD_X, -deltaY * speed);
+    const { fistRotateSpeed: speed, fistRotateDeadzone: deadzone } = this.options;
+    const yaw = Math.abs(deltaX) < deadzone ? 0 : deltaX * speed;
+    const pitch = Math.abs(deltaY) < deadzone ? 0 : -deltaY * speed;
+    if (yaw === 0 && pitch === 0) return;
+
     mesh.updateMatrixWorld(true);
-    const bounds = worldBounds(mesh, this.scratchBoxA);
-    if (bounds.min.y < 0) {
-      mesh.position.y -= bounds.min.y; // keep resting on / above the floor
+    const bottomBefore = worldBottom(mesh);
+    const pivot = worldBounds(mesh, this.scratchBoxA).getCenter(new THREE.Vector3());
+    // Screen-horizontal axis: the camera's right vector (horizontal, since
+    // the orbit camera always keeps world-up).
+    const camera = this.scene.camera;
+    camera.updateMatrixWorld();
+    const right = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0).setY(0);
+    if (right.lengthSq() < 1e-8) right.set(1, 0, 0);
+    right.normalize();
+
+    const turn = new THREE.Quaternion();
+    if (yaw !== 0) turn.multiply(new THREE.Quaternion().setFromAxisAngle(WORLD_Y, yaw));
+    if (pitch !== 0) turn.premultiply(new THREE.Quaternion().setFromAxisAngle(right, pitch));
+    // Rotate about the pivot: orientation and position together.
+    mesh.position.sub(pivot).applyQuaternion(turn).add(pivot);
+    mesh.quaternion.premultiply(turn);
+    mesh.updateMatrixWorld(true);
+
+    // Keep the lowest point where it was (never below the floor).
+    const lift = Math.max(0, bottomBefore) - worldBottom(mesh);
+    if (lift !== 0) {
+      mesh.position.y += lift;
       mesh.updateMatrixWorld(true);
     }
     this.syncSelectionOutline();

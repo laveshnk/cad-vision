@@ -13,7 +13,7 @@
  * Interaction modes (VIEW / SELECT / CREATE) are picked on the vision
  * overlay's button bar and gate the gesture routing below: pinches are inert
  * in VIEW, pick / drag / recolor / delete meshes in SELECT (a Delete HUD
- * follows the selection and a color wheel sits bottom-left; a pointing
+ * follows the selection and a color wheel sits mid-right; a pointing
  * fingertip sweeps the wheel and a 1.2 s hover locks the color; deletion is
  * confirmation-gated),
  * and build primitives in CREATE. SELECT also carries the CSG Boolean tools
@@ -405,7 +405,7 @@ engine.on('mode_change', (event) => {
 
 // Debug overlay: re-render on every processed frame; the SELECT-mode
 // selection UI rides along — the Delete HUD re-anchored beside the
-// selection's live screen projection, the color wheel pinned bottom-left of
+// selection's live screen projection, the color wheel pinned mid-right of
 // the reachable area, with the pointing index fingertip
 // driving the timed hover color lock. The selection UI updates *before* the
 // overlay renders so the thumbnail HUD (wheel outline + Delete mirror) is
@@ -499,8 +499,8 @@ function cancelDestructive(): void {
 /**
  * SELECT-mode selection UI: the Delete HUD floats beside the selected
  * mesh's live screen projection (it tracks drags and camera orbits); the
- * color wheel is pinned in the bottom-left corner of the hand-reachable
- * area (`showColorWheelInCorner`). A *pointing* index fingertip is the live color cursor — hues
+ * color wheel is pinned at mid-height on the right edge of the reachable,
+ * visible area (`showColorWheelAtSide`). A *pointing* index fingertip is the live color cursor — hues
  * repaint the mesh as it sweeps — and dwelling on one color slice for 1.2 s
  * locks the color in: it is applied and saved to the object, the wheel
  * disappears, and the interaction resets (the wheel re-arms once the
@@ -540,7 +540,7 @@ function updateSelectionUi(frame: FrameEvent): void {
     selectionMenu.show(anchor.x, anchor.y);
     return;
   }
-  showColorWheelInCorner();
+  showColorWheelAtSide();
   selectionMenu.show(anchor.x, anchor.y);
   if (!point) {
     colorWheel.advanceDwell(null, dtMs); // hover lost: the dwell clock resets
@@ -560,23 +560,21 @@ function updateSelectionUi(frame: FrameEvent): void {
 }
 
 /**
- * Pin the color wheel in the bottom-left corner of the hand-reachable part
- * of the 3D viewport that is also visible in the camera view: the visible
- * webcam area's bottom-left corner (`overlay.visibleDeviceRect()`) mapped
- * into the viewport, inset by a margin. The camera view draws the same
- * wheel (small, live-synced) in its own bottom-left corner, and pointing at
- * a color there picks it — both are the same device-space spot.
+ * Pin the color wheel at mid-height on the right edge of the part of the
+ * webcam view that is both hand-reachable and visible in the camera view
+ * (`overlay.visibleDeviceRect()`, mapped into the viewport). Mid-height
+ * matters: a pointing fingertip low in the frame drags the wrist and palm
+ * out of view and the hand tracker loses the hand — a bottom-corner wheel
+ * could never be pointed at. The camera view draws the same wheel (small,
+ * live-synced) at the same spot, and pointing at a color there picks it.
  */
-function showColorWheelInCorner(): void {
+function showColorWheelAtSide(): void {
   const width = viewportElement.clientWidth;
   const height = viewportElement.clientHeight;
-  // The *visible* webcam area's corner: the camera view cover-crops the
-  // video (a 16:9 webcam loses its sides in the 4:3 view), so anchoring at
-  // the raw frame corner would put the camera view's wheel out of sight.
   const visible = overlay.visibleDeviceRect();
-  const corner = cadScene.deviceToCanvas(visible.minX, visible.minY, width, height);
+  const edge = cadScene.deviceToCanvas(visible.maxX, (visible.minY + visible.maxY) / 2, width, height);
   const inset = colorWheel.radius + 16;
-  colorWheel.showAt(Math.max(0, corner.x) + inset, Math.min(height, corner.y) - inset);
+  colorWheel.showAt(Math.min(width, edge.x) - inset, edge.y);
 }
 
 /**

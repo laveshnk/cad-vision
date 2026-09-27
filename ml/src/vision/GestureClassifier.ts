@@ -364,9 +364,10 @@ export class GestureClassifier {
   /**
    * Route fist gestures to the host's selected object (true) or the camera
    * (false, default). While on: one fist emits `orbit` movement deltas with
-   * no wrist-roll (the host turns the object: up / down → X, left / right →
-   * Y); two fists never zoom — the faster-moving fist drives the rotation,
-   * and when both move about equally fast the right hand wins.
+   * no wrist-roll and no path straightening (raw, live palm motion — the
+   * host turns the object: up / down → screen-horizontal axis, left / right
+   * → vertical axis); two fists never zoom — the faster-moving fist drives
+   * the rotation, and when both move about equally fast the right hand wins.
    */
   setObjectRotation(enabled: boolean): void {
     if (this.objectRotation === enabled) return;
@@ -469,7 +470,10 @@ export class GestureClassifier {
    * through the straightener and return the change in straightened position.
    */
   private straightenCameraDelta(raw: Vec2): Vec2 {
-    if (!this.cameraPath) return raw;
+    // Rotating a selected object needs the live, unfiltered fist motion:
+    // straightening delays and re-aims it (fine for a camera glide, wrong
+    // for a direct "grab and turn").
+    if (!this.cameraPath || this.objectRotation) return raw;
     this.rawCameraPath = { x: this.rawCameraPath.x + raw.x, y: this.rawCameraPath.y + raw.y };
     const out = this.cameraPath.update(this.rawCameraPath);
     const delta = { x: out.x - this.lastCameraOut.x, y: out.y - this.lastCameraOut.y };

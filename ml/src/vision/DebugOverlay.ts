@@ -143,12 +143,6 @@ export type DragConstraint = 'xz' | 'y';
  */
 export type OverlayBooleanTool = 'subtract' | 'union';
 
-/** Labels for the SELECT-mode Boolean tool toggles, top to bottom. */
-const BOOLEAN_LABELS: Record<OverlayBooleanTool, string> = {
-  subtract: '[ SUBTRACT ]',
-  union: '[ UNION ]',
-};
-
 /** The Boolean tool toggles, top to bottom (below the constraint stack). */
 const BOOLEAN_BUTTONS: readonly OverlayBooleanTool[] = ['subtract', 'union'];
 
@@ -495,12 +489,6 @@ const MODE_BUTTONS: readonly InteractionMode[] = ['view', 'select', 'create'];
 
 /** SELECT-mode drag-constraint toggles, top to bottom (below [ EDIT ]). */
 const CONSTRAINT_BUTTONS: readonly DragConstraint[] = ['xz', 'y'];
-
-/** Constraint button labels, in CONSTRAINT_BUTTONS order. */
-const CONSTRAINT_LABELS: Record<DragConstraint, string> = {
-  xz: '[ XZ PLANE ]',
-  y: '[ Y AXIS ]',
-};
 
 export class DebugOverlay<S extends string = string> {
   private readonly canvas: HTMLCanvasElement;
@@ -1469,17 +1457,15 @@ export class DebugOverlay<S extends string = string> {
     width: number;
     top: number;
   } {
-    const scale = this.fontScale(cssWidth);
     const { margin, gap, height: barHeight } = this.barMetrics(cssWidth);
-    // Each mode's options sit under its own button: the EDIT stack takes
-    // the column directly below [ EDIT ] (the middle mode button).
-    const columnWidth = (cssWidth - margin * 2 - gap * (MODE_BUTTONS.length - 1)) / MODE_BUTTONS.length;
-    const editIndex = MODE_BUTTONS.indexOf('select');
+    // EDIT options: a column of square icon buttons directly below
+    // [ VIEW ] (the trash bin's spot in VIEW mode — never shown together).
+    const size = this.trashSize(cssWidth);
     return {
-      margin: margin + editIndex * (columnWidth + gap),
+      margin,
       gap,
-      height: Math.max(20, Math.round(26 * scale)),
-      width: columnWidth,
+      height: size,
+      width: size,
       top: margin + barHeight + gap,
     };
   }
@@ -1498,24 +1484,13 @@ export class DebugOverlay<S extends string = string> {
    */
   private drawConstraintButtons(cssWidth: number): void {
     const ctx = this.ctx;
-    const scale = this.fontScale(cssWidth);
     const { margin, gap, height, width, top } = this.editStackMetrics(cssWidth);
 
     this.constraintRects = [];
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
     CONSTRAINT_BUTTONS.forEach((constraint, i) => {
       const x = margin;
       const y = top + i * (height + gap);
       this.constraintRects.push({ x, y, width, height });
-      const label = CONSTRAINT_LABELS[constraint];
-      // Shrink the label to fit the button.
-      let fontSize = Math.max(9, Math.round(12 * scale));
-      ctx.font = `bold ${fontSize}px ui-monospace, monospace`;
-      while (fontSize > 7 && ctx.measureText(label).width > width - 8) {
-        fontSize -= 1;
-        ctx.font = `bold ${fontSize}px ui-monospace, monospace`;
-      }
 
       const active = this.dragConstraint === constraint;
       if (active) {
@@ -1541,10 +1516,8 @@ export class DebugOverlay<S extends string = string> {
         }
         ctx.fillStyle = dwelling ? '#f8fafc' : '#cbd5e1';
       }
-      ctx.fillText(label, x + width / 2, y + height / 2);
+      this.drawEditIcon(constraint, x + width / 2, y + height / 2 - 1, width * 0.3, ctx.fillStyle as string);
     });
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'alphabetic';
   }
 
   /* ------------------------------------------------------------------ */
@@ -1629,26 +1602,15 @@ export class DebugOverlay<S extends string = string> {
    */
   private drawBooleanButtons(cssWidth: number): void {
     const ctx = this.ctx;
-    const scale = this.fontScale(cssWidth);
     const { margin, gap, height, width, top } = this.editStackMetrics(cssWidth);
     const booleanTop = top + CONSTRAINT_BUTTONS.length * (height + gap);
     const state = this.booleanState?.() ?? null;
 
     this.booleanRects = [];
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
     BOOLEAN_BUTTONS.forEach((tool, i) => {
       const x = margin;
       const y = booleanTop + i * (height + gap);
       this.booleanRects.push({ x, y, width, height });
-      const label = BOOLEAN_LABELS[tool];
-      // Shrink the label to fit the button.
-      let fontSize = Math.max(9, Math.round(12 * scale));
-      ctx.font = `bold ${fontSize}px ui-monospace, monospace`;
-      while (fontSize > 7 && ctx.measureText(label).width > width - 8) {
-        fontSize -= 1;
-        ctx.font = `bold ${fontSize}px ui-monospace, monospace`;
-      }
 
       const active = this.armedBooleanTool === tool;
       const ready = active && state !== null && state.clash;
@@ -1676,10 +1638,89 @@ export class DebugOverlay<S extends string = string> {
         }
         ctx.fillStyle = dwelling ? '#f8fafc' : '#cbd5e1';
       }
-      ctx.fillText(label, x + width / 2, y + height / 2);
+      this.drawEditIcon(tool, x + width / 2, y + height / 2 - 1, width * 0.3, ctx.fillStyle as string);
     });
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'alphabetic';
+  }
+
+  /**
+   * Line icons for the EDIT-mode tools, centered at (cx, cy), half-size r:
+   * - `xz` — slide on the floor: a floor plane (parallelogram) with a
+   *   four-way move arrow;
+   * - `y` — lift / lower: a double-headed vertical arrow over the floor;
+   * - `subtract` — cut a hole: a square, a dashed circle biting its corner,
+   *   and a minus sign;
+   * - `union` — merge: an overlapping square + circle and a plus sign.
+   */
+  private drawEditIcon(
+    icon: DragConstraint | OverlayBooleanTool,
+    cx: number,
+    cy: number,
+    r: number,
+    ink: string
+  ): void {
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.strokeStyle = ink;
+    ctx.lineWidth = Math.max(1.5, r * 0.13);
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    const arrowHead = (x: number, y: number, dx: number, dy: number) => {
+      const h = r * 0.28;
+      ctx.moveTo(x, y);
+      ctx.lineTo(x - dx * h + dy * h * 0.7, y - dy * h - dx * h * 0.7);
+      ctx.moveTo(x, y);
+      ctx.lineTo(x - dx * h - dy * h * 0.7, y - dy * h + dx * h * 0.7);
+    };
+    ctx.beginPath();
+    if (icon === 'xz') {
+      // Floor plane in perspective.
+      ctx.moveTo(cx - r * 0.55, cy - r * 0.45);
+      ctx.lineTo(cx + r, cy - r * 0.45);
+      ctx.lineTo(cx + r * 0.55, cy + r * 0.45);
+      ctx.lineTo(cx - r, cy + r * 0.45);
+      ctx.closePath();
+      ctx.stroke();
+      // Four-way move arrow on the plane.
+      ctx.beginPath();
+      ctx.moveTo(cx - r * 0.55, cy);
+      ctx.lineTo(cx + r * 0.55, cy);
+      ctx.moveTo(cx + r * 0.12, cy - r * 0.3);
+      ctx.lineTo(cx - r * 0.12, cy + r * 0.3);
+      arrowHead(cx + r * 0.55, cy, 1, 0);
+      arrowHead(cx - r * 0.55, cy, -1, 0);
+      arrowHead(cx + r * 0.12, cy - r * 0.3, 0.37, -0.93);
+      arrowHead(cx - r * 0.12, cy + r * 0.3, -0.37, 0.93);
+    } else if (icon === 'y') {
+      // Floor line + vertical double arrow.
+      ctx.moveTo(cx - r * 0.8, cy + r);
+      ctx.lineTo(cx + r * 0.8, cy + r);
+      ctx.moveTo(cx, cy - r);
+      ctx.lineTo(cx, cy + r * 0.62);
+      arrowHead(cx, cy - r, 0, -1);
+      arrowHead(cx, cy + r * 0.62, 0, 1);
+    } else {
+      // Square + circle overlapping its top-right corner, with a sign.
+      ctx.rect(cx - r * 0.95, cy - r * 0.55, r * 1.35, r * 1.35);
+      ctx.stroke();
+      ctx.beginPath();
+      if (icon === 'subtract') ctx.setLineDash([r * 0.2, r * 0.16]);
+      ctx.arc(cx + r * 0.42, cy - r * 0.5, r * 0.55, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      // Sign in the lower-right, outside both shapes.
+      const gx = cx + r * 0.72;
+      const gy = cy + r * 0.62;
+      const g = r * 0.28;
+      ctx.moveTo(gx - g, gy);
+      ctx.lineTo(gx + g, gy);
+      if (icon === 'union') {
+        ctx.moveTo(gx, gy - g);
+        ctx.lineTo(gx, gy + g);
+      }
+    }
+    ctx.stroke();
+    ctx.restore();
   }
 
   /* ------------------------------------------------------------------ */
