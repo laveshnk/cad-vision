@@ -232,10 +232,15 @@ build:
    mesh's own material is never tinted; it stays selected after you let go).
    A quick pinch on the **already-selected** object deselects it again
    (toggle). To **rotate** the selected object, make a **fist** with one
-   hand and move it, like turning it in your hand: left / right spins it
-   about the vertical axis (the side facing you follows the fist), up /
-   down tips it about the camera's horizontal axis (the side facing you
-   tips with the fist — from any camera angle). Raw fist motion, no path
+   hand and move it, like turning it in your hand — **one axis at a time**
+   (`AxisLock`): each fist gesture picks its axis from its dominant
+   direction and sticks to it, so hand wobble never tumbles the object.
+   Mostly left / right spins it about the vertical axis (the side facing
+   you follows the fist); mostly up / down tips it about the camera's
+   horizontal axis (the side facing you tips with the fist — from any
+   camera angle). The axis is chosen after 0.03 device units of travel (no
+   motion is lost) and frees up when the fist holds still for ~0.25 s or
+   the fist opens. Raw fist motion, no path
    straightening (`fistRotateSpeed` 2.5 rad per device unit, per-axis
    jitter under `fistRotateDeadzone` dropped); it turns about its own
    center and its lowest point keeps its height (exact, vertex-based), so
@@ -262,14 +267,17 @@ build:
    with the viewport. Keep the pinch held and show an **open palm** with
    your other hand: tilting it spins the selection around the vertical
    axis, with a compass ring (dashed circle + yaw needle) rendered around
-   the object in both the 3D viewport and the AR mirror. A floating
-   **HSL color wheel** appears pinned at mid-height on the right edge of
-   the hand-reachable area that the camera view actually shows (a 16:9
-   webcam loses its sides in the 4:3 view — `DebugOverlay.visibleDeviceRect`).
-   Mid-height matters: a fingertip low in the frame pulls the wrist and
-   palm out of view and the tracker loses the hand. The camera view shows
-   the **same live color disc**, small, at the same spot — hue by angle, saturation by radius, exactly
-   aligned with the viewport wheel — so you can pick colors right there:
+   the object in both the 3D viewport and the AR mirror. An
+   **HSL color wheel** appears **in the camera view only** (the 3D view
+   draws none — `ColorWheel` runs headless as the picking model), pinned
+   at mid-height on the right edge of the part of the webcam image the
+   camera view shows (a 16:9 webcam loses its sides in the 4:3 view —
+   `DebugOverlay.visibleDeviceRect`). Mid-height matters: a fingertip low
+   in the frame pulls the wrist and palm out of view and the tracker loses
+   the hand. The disc is small and **doubles in size while a pointing
+   fingertip hovers it** (centered in place, so the hue under the finger
+   doesn't jump; picking follows the enlarged disc) — hue by angle,
+   saturation by radius:
    **point** at the disc (index finger
    up) — every hue under the fingertip repaints the mesh live (angle =
    hue, radius = saturation, wheel center = gray). This works after a
@@ -465,7 +473,8 @@ The `<canvas id="overlay">` (pure Canvas 2D) mirrors the feed and draws:
   so an object drag sweeping across the bar never switches modes;
 - mode options: the VIEW-mode trash bin and the EDIT-mode tools share the
   left column below `[ VIEW ]` (never shown together); the CREATE-mode
-  shape icons run down the right edge. EDIT tools are square **icon**
+  shape icons run down the right edge (same square size as the EDIT tool
+  and trash icons). EDIT tools are square **icon**
   buttons: floor plane with a 4-way arrow (XZ PLANE), vertical double arrow
   (Y AXIS), square with a dashed bite and "−" (SUBTRACT), square + circle
   with "+" (UNION);

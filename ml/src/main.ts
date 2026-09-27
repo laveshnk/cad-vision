@@ -195,10 +195,16 @@ const toolbar = new Toolbar(toolbarRoot, {
   onCameraStop: () => stopCamera(),
 });
 
-// Floating HSL color wheel (SELECT mode): pure UI mounted into the CAD
-// viewport — the bridge below feeds it viewport-local pixels and applies
-// the picked hex through CadBuilder.setSelectedColor.
-const colorWheel = new ColorWheel(viewport, { dwellMs: HOLD_TO_ACT_MS });
+// HSL color wheel (EDIT mode), headless: nothing is drawn in the 3D view —
+// the wheel lives in the camera view (the overlay draws it from this
+// model's center / radius). The model keeps the geometry, hue picking and
+// timed hover lock; the bridge below feeds it viewport-local pixels (the
+// same space the camera-view disc maps to) and applies the picked hex
+// through CadBuilder.setSelectedColor.
+const colorWheel = new ColorWheel(viewport, { dwellMs: HOLD_TO_ACT_MS, headless: true });
+
+/** Color-wheel zoom while a pointing fingertip hovers it (camera view). */
+const WHEEL_HOVER_ZOOM = 2;
 
 // Floating selection HUD (SELECT mode): a Delete action anchored below the
 // selection's screen projection. Deletion is destructive, so every trigger
@@ -350,6 +356,9 @@ engine.on('extrude_end', (event) => {
 engine.on('orbit_start', (event) => {
   if (event.type === 'orbit_start') builder.commit();
 });
+// A fist gesture ended: the next fist rotation chooses its axis afresh.
+engine.on('orbit_end', () => builder.endFistRotation());
+engine.on('zoom_end', () => builder.endFistRotation());
 engine.on('zoom_start', (event) => {
   if (event.type === 'zoom_start') builder.commit();
 });
@@ -542,6 +551,16 @@ function updateSelectionUi(frame: FrameEvent): void {
   }
   showColorWheelAtSide();
   selectionMenu.show(anchor.x, anchor.y);
+  // Enlarge the (camera-view) wheel while the fingertip hovers it: picking
+  // follows the zoomed disc, and the center stays put (room is reserved),
+  // so the hue under the finger doesn't jump. Hysteresis comes for free —
+  // once enlarged, the finger has the bigger disc to stay inside.
+  const center = colorWheel.center;
+  const hovering =
+    point !== null &&
+    center !== null &&
+    Math.hypot(point.x - center.x, point.y - center.y) <= colorWheel.radius;
+  colorWheel.setZoom(hovering ? WHEEL_HOVER_ZOOM : 1);
   if (!point) {
     colorWheel.advanceDwell(null, dtMs); // hover lost: the dwell clock resets
     return;
@@ -573,7 +592,9 @@ function showColorWheelAtSide(): void {
   const height = viewportElement.clientHeight;
   const visible = overlay.visibleDeviceRect();
   const edge = cadScene.deviceToCanvas(visible.maxX, (visible.minY + visible.maxY) / 2, width, height);
-  const inset = colorWheel.radius + 16;
+  // Room for the hover-enlarged disc, so the center never moves on zoom.
+  const baseRadius = colorWheel.radius / colorWheel.zoomFactor;
+  const inset = baseRadius * WHEEL_HOVER_ZOOM + 16;
   colorWheel.showAt(Math.min(width, edge.x) - inset, edge.y);
 }
 

@@ -92,6 +92,7 @@
 import * as THREE from 'three';
 import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js';
 import type { CadScene } from './CadScene';
+import { AxisLock } from './axisLock';
 import { boxesClash, evaluateBoolean, overlapBox, worldBounds, type BooleanOperation } from './booleanOps';
 
 /** World up: the fist-rotation yaw axis. */
@@ -296,6 +297,8 @@ export class CadBuilder {
     /** The mesh was already selected at pinch start: a tap deselects it. */
     toggleOnTap: boolean;
   } | null = null;
+  /** One-axis-at-a-time filter for fist rotation (see `AxisLock`). */
+  private readonly fistAxisLock = new AxisLock();
   /** Scratch plane for grab-height / lift raycasts. */
   private readonly dragPlane = new THREE.Plane();
   /** Active SELECT-mode drag constraint: ground plane ('xz') or Y axis ('y'). */
@@ -1046,13 +1049,16 @@ export class CadBuilder {
   }
 
   /**
-   * Fist rotation of the selection (EDIT mode), screen-relative like
-   * turning the object in your hand:
-   * - fist **left / right** spins it about the vertical (world Y) axis — the
+   * Fist rotation of the selection (EDIT mode), one axis at a time
+   * (`AxisLock`): each fist gesture picks its axis from its dominant
+   * direction and sticks to it — no free tumbling with every wobble:
+   * - mostly **left / right** → spin about the vertical (world Y) axis — the
    *   side facing you follows the fist;
-   * - fist **up / down** tips it about the camera's horizontal (screen-X)
+   * - mostly **up / down** → tip about the camera's horizontal (screen-X)
    *   axis — the side facing you tips up / down with the fist, from any
    *   camera angle.
+   * The lock clears when the fist holds still briefly or the gesture ends
+   * (`endFistRotation`).
    * Deltas are device units (`fistRotateSpeed` radians per unit; jitter
    * below `fistRotateDeadzone` per axis is dropped). The mesh turns about
    * its own center (world AABB center), and its lowest point keeps its
@@ -1063,8 +1069,9 @@ export class CadBuilder {
     const mesh = this.selected;
     if (!mesh || !Number.isFinite(deltaX) || !Number.isFinite(deltaY)) return;
     const { fistRotateSpeed: speed, fistRotateDeadzone: deadzone } = this.options;
-    const yaw = Math.abs(deltaX) < deadzone ? 0 : deltaX * speed;
-    const pitch = Math.abs(deltaY) < deadzone ? 0 : -deltaY * speed;
+    const locked = this.fistAxisLock.update(deltaX, deltaY);
+    const yaw = Math.abs(locked.deltaX) < deadzone ? 0 : locked.deltaX * speed;
+    const pitch = Math.abs(locked.deltaY) < deadzone ? 0 : -locked.deltaY * speed;
     if (yaw === 0 && pitch === 0) return;
 
     mesh.updateMatrixWorld(true);
@@ -1097,8 +1104,14 @@ export class CadBuilder {
     this.updateClash();
   }
 
+  /** The fist gesture ended: the next fist picks its rotation axis afresh. */
+  endFistRotation(): void {
+    this.fistAxisLock.reset();
+  }
+
   /** Clear the selection and remove its outline highlight. */
   deselect(): void {
+    this.fistAxisLock.reset(); // a new selection starts a fresh rotation axis
     this.hideSelectionOutline();
     this.selected = null;
     this.selectionDrag = null;

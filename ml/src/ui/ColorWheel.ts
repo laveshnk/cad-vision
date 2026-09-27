@@ -35,6 +35,12 @@
 export interface ColorWheelOptions {
   /** Disc diameter in CSS pixels. */
   size?: number;
+  /**
+   * Headless: keep the wheel's geometry, color picking and timed hover lock
+   * but never mount a visible disc (the host draws its own — e.g. in the
+   * camera view). Default false.
+   */
+  headless?: boolean;
   /** Gap between the anchor point and the wheel rim (CSS px). */
   gap?: number;
   /** Disc lightness (hue = angle, saturation = radius); HSL L in [0, 1]. */
@@ -232,6 +238,8 @@ export class ColorWheel {
   /** Color slice under the last `pickColorAt` (null when it missed the disc). */
   private hoverSlice: string | null = null;
   private shown = false;
+  /** Radius multiplier (e.g. enlarged while a fingertip hovers the disc). */
+  private zoom = 1;
 
   constructor(root: HTMLElement, options: ColorWheelOptions = {}) {
     this.root = root;
@@ -240,6 +248,7 @@ export class ColorWheel {
       gap: options.gap ?? 22,
       lightness: options.lightness ?? 0.5,
       dwellMs: options.dwellMs ?? 1200,
+      headless: options.headless ?? false,
     };
     this.dwell = new DwellTracker({ durationMs: this.options.dwellMs });
     this.element = document.createElement('div');
@@ -271,7 +280,7 @@ export class ColorWheel {
     this.dot.className = 'color-wheel-dot';
     this.cursor.append(ring, this.dot);
     this.element.append(this.canvas, this.cursor);
-    root.appendChild(this.element);
+    if (!this.options.headless) root.appendChild(this.element);
     this.renderWheel();
   }
 
@@ -289,9 +298,22 @@ export class ColorWheel {
     return this.shown ? { x: this.centerX, y: this.centerY } : null;
   }
 
-  /** Disc radius in CSS px (half of `size`). */
+  /** Disc radius in CSS px: half of `size`, times the current zoom. */
   get radius(): number {
-    return this.options.size / 2;
+    return (this.options.size / 2) * this.zoom;
+  }
+
+  /**
+   * Enlarge (or restore) the active disc: picking, clamping and `radius`
+   * all follow the zoom, so a host-drawn disc of `radius` stays exact.
+   */
+  /** Current radius multiplier (1 = the configured `size`). */
+  get zoomFactor(): number {
+    return this.zoom;
+  }
+
+  setZoom(factor: number): void {
+    this.zoom = Number.isFinite(factor) && factor > 0 ? factor : 1;
   }
 
   /** Timed hover lock completion [0, 1] (the countdown ring's fill ratio). */
@@ -307,9 +329,9 @@ export class ColorWheel {
    */
   show(screenX: number, screenY: number): void {
     this.shown = true;
-    const radius = this.options.size / 2;
-    const width = Math.max(this.root.clientWidth, this.options.size);
-    const height = Math.max(this.root.clientHeight, this.options.size);
+    const radius = this.radius;
+    const width = Math.max(this.root.clientWidth, radius * 2);
+    const height = Math.max(this.root.clientHeight, radius * 2);
     const reach = radius + this.options.gap;
     let x = screenX + reach; // prefer the anchor's right side
     if (x + radius > width) x = screenX - reach; // flip when it would overflow
@@ -326,9 +348,9 @@ export class ColorWheel {
    */
   showAt(centerX: number, centerY: number): void {
     this.shown = true;
-    const radius = this.options.size / 2;
-    const width = Math.max(this.root.clientWidth, this.options.size);
-    const height = Math.max(this.root.clientHeight, this.options.size);
+    const radius = this.radius;
+    const width = Math.max(this.root.clientWidth, radius * 2);
+    const height = Math.max(this.root.clientHeight, radius * 2);
     this.centerX = clamp(centerX, radius, width - radius);
     this.centerY = clamp(centerY, radius, height - radius);
     this.element.style.left = `${this.centerX}px`;
@@ -357,7 +379,7 @@ export class ColorWheel {
     }
     const dx = screenX - this.centerX;
     const dy = screenY - this.centerY;
-    const radius = this.options.size / 2;
+    const radius = this.radius;
     const color = wheelColorAt(dx, dy, radius, this.options.lightness);
     this.hoverSlice = wheelSliceAt(dx, dy, radius);
     this.setHover(color === null ? null : { x: screenX, y: screenY, color });

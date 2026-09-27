@@ -1460,7 +1460,7 @@ export class DebugOverlay<S extends string = string> {
     const { margin, gap, height: barHeight } = this.barMetrics(cssWidth);
     // EDIT options: a column of square icon buttons directly below
     // [ VIEW ] (the trash bin's spot in VIEW mode — never shown together).
-    const size = this.trashSize(cssWidth);
+    const size = this.iconButtonSize(cssWidth);
     return {
       margin,
       gap,
@@ -1470,8 +1470,8 @@ export class DebugOverlay<S extends string = string> {
     };
   }
 
-  /** Side length of the square trash-bin button (CSS px). */
-  private trashSize(cssWidth: number): number {
+  /** Side length of the square icon buttons — trash bin, EDIT tools, shapes (CSS px). */
+  private iconButtonSize(cssWidth: number): number {
     return Math.max(30, Math.round(42 * this.fontScale(cssWidth)));
   }
 
@@ -1776,7 +1776,7 @@ export class DebugOverlay<S extends string = string> {
    */
   private drawTrashButton(cssWidth: number): void {
     const ctx = this.ctx;
-    const size = this.trashSize(cssWidth);
+    const size = this.iconButtonSize(cssWidth);
     const { margin, gap, height: barHeight } = this.barMetrics(cssWidth);
     const x = margin;
     const y = margin + barHeight + gap;
@@ -2117,7 +2117,8 @@ export class DebugOverlay<S extends string = string> {
     const ctx = this.ctx;
     const scale = this.fontScale(cssWidth);
     const { margin, gap, height: barHeight } = this.barMetrics(cssWidth);
-    const size = Math.max(24, Math.round(36 * scale));
+    // Same square size as the EDIT tool / trash icon buttons.
+    const size = this.iconButtonSize(cssWidth);
     const x = cssWidth - margin - size;
     const top = margin + barHeight + gap;
 
