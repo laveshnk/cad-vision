@@ -129,7 +129,8 @@ export class HandTracker {
     this.stream?.getTracks().forEach((track) => track.stop());
     this.stream = null;
     if (this.video) this.video.srcObject = null;
-    this.resultHandler = null;
+    // The result handler is kept: it is registered once (GestureEngine's
+    // constructor), so clearing it would silence every later restart.
   }
 
   private async createLandmarker(): Promise<HandLandmarker> {
