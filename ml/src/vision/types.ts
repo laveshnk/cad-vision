@@ -11,6 +11,15 @@
 /** Handedness label (after mirroring correction, i.e. the user's physical hand). */
 export type Handedness = 'Left' | 'Right';
 
+/**
+ * Application interaction mode. Partitions gesture routing:
+ * - `view`:   camera navigation only — pinches are inert;
+ * - `select`: pinches pick / drag committed meshes;
+ * - `create`: pinches draw footprints and extrude new primitives.
+ * Camera gestures (fist orbit / two-fist zoom) stay live in every mode.
+ */
+export type InteractionMode = 'view' | 'select' | 'create';
+
 export interface Vec2 {
   x: number;
   y: number;
@@ -55,8 +64,18 @@ export interface HandFrame {
   landmarks: Landmark[];
 }
 
-/** High-level CAD gesture state driven by the classifier's finite state machine. */
-export type GestureState = 'IDLE' | 'DRAWING_BASE' | 'EXTRUDING' | 'ORBITING' | 'ZOOMING';
+/**
+ * High-level CAD gesture state driven by the classifier's finite state machine.
+ * `SELECTING` is the select-mode analogue of `DRAWING_BASE`: a held pinch picks
+ * / drags an existing mesh instead of drawing a new one.
+ */
+export type GestureState =
+  | 'IDLE'
+  | 'DRAWING_BASE'
+  | 'SELECTING'
+  | 'EXTRUDING'
+  | 'ORBITING'
+  | 'ZOOMING';
 
 export interface PinchStartEvent {
   type: 'pinch_start';
@@ -91,6 +110,35 @@ export interface PinchEndEvent {
   endPos: Vec3;
   /** `endPos - startPos` in device space. */
   delta: Vec3;
+}
+
+/**
+ * SELECT-mode open-palm rotation: the dominant hand holds a pinch on the
+ * selected mesh while the *other* hand shows an open palm (all fingertips
+ * extended + thumb out); that palm's tilt (wrist → middle-MCP azimuth)
+ * drives the mesh's yaw — `selectedMesh.rotation.y = initialRotation + deltaRotation`.
+ */
+export interface SelectRotateEvent {
+  type: 'select_rotate';
+  timestamp: number;
+  /** The hand holding the pinch on the selected object. */
+  hand: Handedness;
+  /** The open-palm hand driving the rotation. */
+  palmHand: Handedness;
+  /**
+   * Cumulative palm rotation since the gesture began (radians, unwrapped;
+   * + = counter-clockwise tilt on the mirrored screen).
+   */
+  deltaRotation: number;
+}
+
+export interface SelectRotateEndEvent {
+  type: 'select_rotate_end';
+  timestamp: number;
+  /** The open-palm hand that was driving the rotation. */
+  palmHand: Handedness;
+  /** Why the rotation ended ('palm closed' | 'pinch released' | 'palm hand lost' | 'mode switch'). */
+  reason: string;
 }
 
 export type ExtrudeMode = 'dual-hand' | 'single-hand';
@@ -216,6 +264,14 @@ export interface StateChangeEvent {
   reason: string;
 }
 
+/** The active interaction mode changed (VIEW / SELECT / CREATE). */
+export interface ModeChangeEvent {
+  type: 'mode_change';
+  timestamp: number;
+  from: InteractionMode;
+  to: InteractionMode;
+}
+
 /** Per-hand snapshot for the debug overlay / HUD. */
 export interface HandSnapshot {
   handedness: Handedness;
@@ -224,6 +280,11 @@ export interface HandSnapshot {
   pinchDistance: number;
   pinchActive: boolean;
   fistActive: boolean;
+  /**
+   * Pointing pose (index finger up, the other fingers curled, no pinch;
+   * debounced) — the only pose that presses overlay UI buttons.
+   */
+  pointing: boolean;
   landmarks: Landmark[];
 }
 
@@ -245,6 +306,8 @@ export interface GestureMetrics {
   zoomAnchor: Handedness | null;
   /** Cumulative angle (radians) the moving fist swept around the anchor. */
   zoomAngle: number | null;
+  /** Cumulative open-palm rotation delta (radians) while rotating (SELECT mode). */
+  selectRotation: number | null;
 }
 
 /** Emitted once per processed camera frame (used by the 2D debug overlay). */
@@ -252,6 +315,8 @@ export interface FrameEvent {
   type: 'frame';
   timestamp: number;
   state: GestureState;
+  /** Active interaction mode (drives the overlay's mode buttons). */
+  mode: InteractionMode;
   hands: HandSnapshot[];
   metrics: GestureMetrics;
   fps: number;
@@ -263,6 +328,8 @@ export type GestureSignalEvent =
   | PinchStartEvent
   | PinchDragEvent
   | PinchEndEvent
+  | SelectRotateEvent
+  | SelectRotateEndEvent
   | ExtrudeStartEvent
   | ExtrudeEvent
   | ExtrudeEndEvent
@@ -272,7 +339,8 @@ export type GestureSignalEvent =
   | ZoomStartEvent
   | ZoomEvent
   | ZoomEndEvent
-  | StateChangeEvent;
+  | StateChangeEvent
+  | ModeChangeEvent;
 
 /** Every event the engine can emit. */
 export type GestureEvent = GestureSignalEvent | FrameEvent;

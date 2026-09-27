@@ -46,10 +46,19 @@
 
       <footer class="footer">
         <p>
-          Pinch with both hands and pull apart to size a shape, then drag one hand up to make it
-          tall. Make a fist to grab the scene; two fists zoom and turn it. Turn on
-          <strong>Voice</strong> and just say what you want — “give me a red tube”, “taller”,
-          “undo that”. Export any time as <code>model.stl</code>.
+          Switch modes with the buttons along the top of the camera overlay — click them, or
+          point (index finger up, other fingers curled) and hold your fingertip on a button
+          for half a second. <strong>VIEW</strong>: camera navigation only.
+          <strong>SELECT</strong>: a quick pinch selects a mesh (pinch empty ground to
+          deselect); point at the floating color wheel to repaint it — hold your fingertip
+          on one hue for 1.2 seconds to lock it in; pinch and hold to move it, release to
+          drop it; delete it with the floating Delete button (click it, pinch it, or point at it) or the Delete/Backspace key,
+          then confirm. <strong>CREATE</strong>: pick a shape, pinch with both hands and
+          pull apart to size the base, relax the upper pinch and drag the lower hand to set the
+          height. A closed fist orbits the camera — roll your wrist to rotate. With two fists,
+          move both: apart to zoom in, together to zoom out, or turn them like a steering wheel
+          to turn the scene (moving only one fist just moves the camera). The camera thumbnail expands with its corner button and resizes by dragging the grip in its bottom-right corner. Committed meshes export as
+          <code>model.stl</code>; gesture events are logged to the console as JSON.
         </p>
       </footer>
     </div>

@@ -8,6 +8,14 @@
  * `onOrbit({ deltaX, deltaY })` (orbit around the origin), `onRotate({ deltaAngle })`
  * (turn the scene around the vertical axis) and `onZoom({ deltaScale })` (dolly
  * in / out) — keeping this module fully decoupled from the vision layer.
+ * `projectToCanvas` shares the camera's live perspective with 2D consumers.
+ *
+ * Hand input arrives in the webcam frame's device space, whose aspect (e.g.
+ * 4:3) differs from the wide viewport's. `interactionCamera` is the view
+ * camera's twin — same pose and vertical field of view — with the webcam
+ * aspect (`setInteractionAspect`): the AR mirror projects through it (so
+ * ghosts keep true proportions and line up with the hands on the camera
+ * view) and hand raycasts use it (so pinching a ghost picks that object).
  *
  * The camera focus is locked to the world origin (0, 0, 0): the view can only
  * rotate and zoom, never pan / translate. The camera always sits on a sphere
@@ -15,6 +23,7 @@
  */
 
 import * as THREE from 'three';
+import { canvasToNdc, ndcToCanvas, remapNdcX, type ProjectedPoint } from './arProjection';
 
 export interface CadSceneOptions {
   /** Background & fog color. */
@@ -87,6 +96,10 @@ export class CadScene {
   /** Desired camera spherical coordinates (driven by `onOrbit`). */
   private readonly sphericalTarget = new THREE.Spherical();
   private readonly clock = new THREE.Clock();
+  /** Webcam-frame twin of `camera` (see `interactionCamera`). */
+  private readonly interactionCam = new THREE.PerspectiveCamera();
+  /** Webcam frame aspect (width / height); null until known → viewport aspect. */
+  private interactionAspect: number | null = null;
   private readonly resizeObserver: ResizeObserver;
 
   private frameId = 0;
@@ -198,6 +211,92 @@ export class CadScene {
   /** The renderer's canvas (mounted into the container). */
   get domElement(): HTMLCanvasElement {
     return this.renderer.domElement;
+  }
+
+  /**
+   * Project a world-space point through the scene camera onto a 2D canvas of
+   * the given size (CSS px). Shared projection used by the SELECT-mode AR
+   * mirror on the vision overlay: NDC [-1, 1] maps onto the canvas rect
+   * (`x` left → right, `y` top → down, +Y up flipped). The returned `z` is
+   * the NDC depth — `> 1` means the point is behind the camera (cull it).
+   *
+   * The camera matrices are refreshed first (`updateMatrixWorld` also
+   * recomputes `matrixWorldInverse`), so projections stay valid between
+   * render ticks — the damped orbit rig moves the camera every frame.
+   */
+  projectToCanvas(
+    vector3: THREE.Vector3,
+    canvasWidth: number,
+    canvasHeight: number,
+    camera?: THREE.PerspectiveCamera
+  ): ProjectedPoint {
+    // A caller-supplied camera (e.g. `interactionCamera`) is already synced.
+    if (!camera) this.camera.updateMatrixWorld();
+    const projected = vector3.clone().project(camera ?? this.camera);
+    return ndcToCanvas(projected.x, projected.y, projected.z, canvasWidth, canvasHeight);
+  }
+
+  /**
+   * Set the aspect (width / height) of the webcam frame whose device-space
+   * coordinates drive interaction. Ignored unless finite and positive.
+   */
+  setInteractionAspect(aspect: number): void {
+    if (Number.isFinite(aspect) && aspect > 0) this.interactionAspect = aspect;
+  }
+
+  /**
+   * The interaction camera, synced to the view camera's live pose: same
+   * position, orientation, vertical FOV and clip planes, but the webcam
+   * frame's aspect — so device-space hand coordinates are exactly its NDC.
+   * Sync once per use (per raycast / per AR frame), then reuse.
+   */
+  get interactionCamera(): THREE.PerspectiveCamera {
+    const view = this.camera;
+    const cam = this.interactionCam;
+    view.updateMatrixWorld();
+    const aspect = this.interactionAspect ?? view.aspect;
+    if (cam.aspect !== aspect || cam.fov !== view.fov || cam.near !== view.near || cam.far !== view.far) {
+      cam.fov = view.fov;
+      cam.near = view.near;
+      cam.far = view.far;
+      cam.aspect = aspect;
+      cam.updateProjectionMatrix();
+    }
+    cam.position.copy(view.position);
+    cam.quaternion.copy(view.quaternion);
+    cam.updateMatrixWorld(); // also refreshes matrixWorldInverse
+    return cam;
+  }
+
+  /**
+   * Map a device-space point (the webcam frame; [-1, 1], +Y up) onto a canvas
+   * showing the view camera (the 3D viewport, CSS px): the point that the
+   * interaction camera sees at that position lands at the returned pixel.
+   */
+  deviceToCanvas(x: number, y: number, canvasWidth: number, canvasHeight: number): ProjectedPoint {
+    const aspect = this.interactionAspect ?? this.camera.aspect;
+    const viewAspect = canvasHeight > 0 ? canvasWidth / canvasHeight : aspect;
+    return ndcToCanvas(remapNdcX(x, aspect, viewAspect), y, 0, canvasWidth, canvasHeight);
+  }
+
+  /**
+   * Inverse of `deviceToCanvas`: map a point on a canvas showing the view
+   * camera (the 3D viewport, CSS px) back into device space ([-1, 1], +Y up).
+   * Lets the host mirror viewport-local UI geometry (the SELECT-mode color
+   * wheel / Delete HUD) into the webcam frame, so the camera thumbnail can
+   * draw a HUD exactly where a fingertip has to point.
+   */
+  canvasToDevice(
+    screenX: number,
+    screenY: number,
+    canvasWidth: number,
+    canvasHeight: number
+  ): { x: number; y: number } {
+    const aspect = this.interactionAspect ?? this.camera.aspect;
+    const viewAspect = canvasHeight > 0 ? canvasWidth / canvasHeight : aspect;
+    const ndc = canvasToNdc(screenX, screenY, canvasWidth, canvasHeight);
+    // Undo the aspect remap: ndcX_view = deviceX * aspect / viewAspect.
+    return { x: remapNdcX(ndc.x, viewAspect, aspect), y: ndc.y };
   }
 
   /**

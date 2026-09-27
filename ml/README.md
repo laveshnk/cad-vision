@@ -9,8 +9,12 @@ you started talking because the camera watched your mouth move, so there is no
 button to press. The camera renders as a floating video-call-style thumbnail
 (landmarks, skeleton, HUD overlay) over the full-bleed 3D viewport.
 
-Anything you build exports as `model.stl`, so it can go to a slicer or a
-printer — but that is a choice at the end, not the point.
+Three interaction modes — **VIEW** (camera navigation only), **SELECT**
+(pick / drag / recolor meshes) and **CREATE** (build primitives) — are
+switched with a
+button bar on the camera overlay (mouse click, or a **pointing** hand — index
+finger up, other fingers curled — holding its fingertip on a button)
+and strictly partition which gestures can act on the scene.
 
 ## Quick start
 
@@ -62,18 +66,17 @@ src/
 ├── main.ts                    # app orchestrator: vision + voice events → CAD + UI
 ├── styles.css                 # light theme; full-bleed viewport, camera thumbnail, glass toolbar
 ├── cad/
-│   ├── CadScene.ts            # Three.js viewport: camera rig, lights, grid, orbit, snapshots
-│   └── CadBuilder.ts          # hand- and voice-built primitives + STL export
+│   ├── CadScene.ts            # Three.js viewport: camera rig, lights, grid, orbit
+│   ├── CadBuilder.ts          # gesture-driven primitives + STL export
+│   ├── arProjection.ts        # pure NDC→canvas math + 2D convex hull (AR mirror)
+│   └── ArMirror.ts            # plain-data AR projection of grid + meshes for the overlay
 ├── ui/
-│   ├── Toolbar.ts             # camera + voice toggles, Clear scene, Export for printing
-│   └── VoiceHud.ts            # voice state badge + caption strip
-├── voice/
-│   ├── PresageFrames.ts       # streams webcam stills to the server over a WebSocket
-│   ├── TalkGate.ts            # hysteresis: when to open/close the mic, and barge-in
-│   ├── Transcriber.ts         # ElevenLabs Scribe realtime connection
-│   ├── Speaker.ts             # interruptible playback of the spoken reply
-│   ├── VoiceAgent.ts          # facade: gate → transcript → agent → tools → speech
-│   └── index.ts               # public API barrel
+│   ├── Toolbar.ts             # CAD toolbar: camera toggle, Clear scene, Export STL
+│   ├── ColorWheel.ts          # floating HSL color wheel + timed hover lock (dwell tracker)
+│   ├── SelectionMenu.ts       # floating selection HUD (Delete action, SELECT mode)
+│   ├── ConfirmDialog.ts       # modal confirmation for destructive actions
+│   ├── hitTest.ts             # root-local DOM hit-tests for the floating overlays
+│   └── ThumbResizer.ts        # mouse-drag resize grip for the camera thumbnail
 └── vision/
     ├── types.ts               # shared types + event payloads
     ├── coordinates.ts         # device-space mapping, vec3 math
@@ -95,7 +98,8 @@ HandTracker (raw MediaPipe hands)
   → HandednessStabilizer  Left/Right label votes + chirality, flicker/collision-proof
   → HandSmootherBank     EMA over all 21 landmarks, per-hand identity
   → coordinates          normalized / pixel / device spaces
-  → GestureClassifier    FSM: IDLE | DRAWING_BASE | EXTRUDING | ORBITING | ZOOMING
+  → GestureClassifier    mode-partitioned FSM: IDLE | DRAWING_BASE | SELECTING |
+                         EXTRUDING | ORBITING | ZOOMING (VIEW / SELECT / CREATE)
   → listeners            typed events + per-frame debug event
 ```
 
@@ -119,11 +123,9 @@ App wiring (strictly decoupled — `src/cad` and `src/ui` import nothing from
 events and validated `CadCommand`s cross the boundaries):
 
 ```
-GestureEngine  --typed events-------->  main.ts (orchestrator)
-VoiceAgent     --validated commands-->
-               <--SceneSummary + viewport snapshot--
-  ├── CadScene / CadBuilder      primitives, extrusion, orbit, STL export
-  └── Toolbar / VoiceHud         camera + voice toggles, state, captions
+GestureEngine  --typed events-->  main.ts (orchestrator)
+  ├── CadScene / CadBuilder      primitives, extrusion, selection, orbit, STL export
+  └── Toolbar                    camera toggle + scene utilities
 ```
 
 API keys live only in `server/`. The browser gets a short-lived, single-use
@@ -156,13 +158,30 @@ hands on the mirrored preview.
 
 ## Gestures
 
+### Interaction modes
+
+`GestureEngine.setMode('view' | 'select' | 'create')` partitions gesture
+routing (classifier default `'create'` = the full legacy set; the app itself
+starts in `'view'`):
+
+| Mode | Pinches | Camera gestures (fist orbit / two-fist zoom) |
+| ---- | ------- | -------------------------------------------- |
+| **VIEW** | inert — no `pinch_*` / `extrude_*` events, never a build state, cannot veto orbit / zoom | live |
+| **SELECT** | `pinch_start` raycasts against committed meshes (pick + highlight, empty ground deselects); `pinch_drag` drags the selected mesh under the active constraint toggle — `[ XZ PLANE ]` slides it across the ground (elevation locked) and `[ Y AXIS ]` maps vertical hand travel to a lift / lower; with the pinch held, an **open palm** on the other hand emits `select_rotate` yaw deltas (compass ring around the object); the vision overlay mirrors the 3D scene as a translucent AR layer; FSM state `SELECTING` | live |
+| **CREATE** | full build gesture set (below) | live |
+
+A mode switch force-releases in-flight pinches (synthetic `pinch_end`) and
+returns pinch-driven states to IDLE; it emits a `mode_change` event and is
+reflected on the overlay's button bar and in the per-frame event's `mode`.
+
 | Gesture | Detection | Events |
 | ------- | --------- | ------ |
 | **Pinch / draw** | 3D Euclidean distance between landmarks 4 (thumb tip) and 8 (index tip); trigger `< 0.045`, hysteresis release `> 0.065` (both configurable) | `pinch_start`, `pinch_drag` (position, delta in device space), `pinch_end` |
 | **Extrude (dual-hand)** | both hands pinch; pull distance `D` between pinch centers `center = (P_thumb + P_index) / 2` | `extrude_start`, `extrude` (`distance`, `scaleFactor = D / D₀`, `deltaDistance`, `spanX` / `spanY` = horizontal / vertical pinch gap in aspect-corrected units of video width), `extrude_end` (`heightSet`: `false` when both pinches release together or the lower pinch releases first — that upper pinch is then consumed until released) |
 | **Extrude (single-hand)** | while EXTRUDING with one pinch: vertical drag of landmark 8 | `extrude` (`deltaHeight`, `cumulativeHeight`, +Y up) |
 | **Camera move (one fist)** | a *real* closed fist, not just curled fingers (`handShape.ts`): all 4 fingertips folded into the palm — `dist(tip, wrist) < 0.9 · dist(MCP, wrist)`, which rejects claw / hook curls and half-curls — and the thumb tucked over the fingers (thumb tip within 0.75 × palm size of an index / middle / ring knuckle, rejecting a thumbs-up); all ratios, so size / distance / rotation invariant. Needs 3 consecutive frames (app default); once held, thresholds relax by `fistHoldSlack` and one finger may loosen. Only engaged from IDLE with no active pinch, and a pinch never engages from a fist. Palm-center motion is reported as deltas, **straightened** by `PathStraightener` so the camera travels in straight segments instead of copying hand wiggle (see below); the app orbits the camera around the locked origin so the scene follows the fist (fist right → camera swings left, fist up → camera swings lower). **Wrist roll** — twisting the fist like a doorknob, measured as the rotation of the knuckle line (index MCP → pinky MCP) around the wrist → middle-MCP axis — turns the scene around the vertical axis with the twist; reported only after the twist exceeds `rollEngageAngle` (0.15 rad ≈ 9°) per fist, per-frame jitter under `rollDeadzone` dropped | `orbit_start`, `orbit` (`deltaX`, `deltaY` device units, `deltaRoll` radians), `orbit_end` |
-| **Zoom / turn (two fists)** | both hands closed fists (same test). The steadier fist (lower smoothed palm speed; switches only when the other is below `zoomAnchorSwitchRatio` 0.5× its speed) is the **anchor** — the pivot — and only the other fist's motion relative to it counts, so the anchor's own jitter is ignored. Distance `D` from the anchor (aspect-corrected palm centers): moving fist farther away → zoom in, closer → zoom out. Circling the anchor → `deltaAngle` (counter-clockwise on screen = +) turns the scene, after `zoomTurnEngageAngle` (0.12 rad ≈ 7°) of sweep so a straight pull doesn't rotate. Engaged from IDLE, or upgraded from a one-fist move when the second fist closes; ends on a pinch, a lost hand, or one hand open longer than `orbitOpenPalmGraceFrames` (then falls back to a one-fist move if the other fist is still closed) | `zoom_start`, `zoom` (`anchor`, `distance`, `scaleFactor = D / D₀`, `deltaScale = D / D_prev`, `deltaAngle`), `zoom_end` |
+| **Zoom / turn (two fists)** | both hands closed fists (same test). Each fist counts as **moving** when its smoothed palm speed exceeds `zoomMoveSpeed` (0.004 video widths / frame). **Both moving** → zoom by the gap between them (aspect-corrected palm centers): apart → zoom in, together → zoom out; rotating them around each other (steering wheel) → `deltaAngle` (counter-clockwise on screen = +) turns the scene, after `zoomTurnEngageAngle` (0.12 rad ≈ 7°) so a straight pull doesn't rotate. **Only one moving** → that fist moves the camera exactly like a single fist (`orbit` deltas, straightened) and never zooms. **Neither moving** → nothing. The steadier fist is reported as the `anchor` (switches only when the other is below `zoomAnchorSwitchRatio` 0.5× its speed). Engaged from IDLE, or upgraded from a one-fist move when the second fist closes; ends on a pinch, a lost hand, or one hand open longer than `orbitOpenPalmGraceFrames` (then falls back to a one-fist move if the other fist is still closed) | `zoom_start`, `zoom` (`anchor`, `distance`, `scaleFactor = D / D₀`, `deltaScale = D / D_prev`, `deltaAngle`), `orbit` (one fist moving), `zoom_end` |
+| **Open-palm rotation (SELECT)** | while exactly one hand holds a pinch, the *other* hand shows an open palm: all four fingertips extended past their own PIP joints (`dist(tip, wrist) > 1.0 · dist(PIP, wrist)` per finger) and the thumb held out (thumb-tip farther than `openPalmThumbTuckRatio` 0.6 × palm size from the nearest knuckle — the inverse of the fist thumb-tuck test). The palm's tilt (angle of the wrist → middle-MCP vector in the mirrored, aspect-corrected view) is tracked frame-to-frame, unwrapped across ±π and anchored at gesture start, so the app applies `selectedMesh.rotation.y = initialRotation + deltaRotation` and a re-opened palm never jumps the object. Ends — `select_rotate_end` — when the palm closes / starts pinching, the pinch releases, a hand is lost or the mode switches. Only in SELECT mode; elsewhere the same poses route to build / navigation gestures | `select_rotate` (`hand`, `palmHand`, cumulative `deltaRotation` radians), `select_rotate_end` (`palmHand`, `reason`) |
 
 **Straight camera paths.** Building gestures (pinch, extrude) are live and
 unfiltered, but a camera that copies every hand tremor feels unsteady and can
@@ -178,8 +197,10 @@ straight segments A → B and B → C. `CadScene` then eases the camera toward
 its target with gentle damping (`damping` 5). Set `cameraPath: null` for raw
 deltas.
 
-Finite state machine: `IDLE ↔ DRAWING_BASE ↔ EXTRUDING ↔ ORBITING ↔ ZOOMING`.
-Pinch always wins over fist gestures; a lost hand finalizes its gesture after a
+Finite state machine: `IDLE ↔ DRAWING_BASE ↔ SELECTING ↔ EXTRUDING ↔ ORBITING
+↔ ZOOMING` (`SELECTING` only in select mode; no pinch-driven state is ever
+entered in view mode). Outside view mode pinch always wins over fist
+gestures; a lost hand finalizes its gesture after a
 small grace window (synthetic `pinch_end` / `orbit_end` / `zoom_end`) so
 states never get stuck.
 
@@ -205,10 +226,22 @@ and hands absent > 10 frames re-seed from fresh evidence. Configurable via
 
 The full-bleed viewport is a Three.js scene (floor grid, fog, damped orbit
 camera, starting straight on so the grid is square to the screen) driven entirely by the gesture events above, with the camera rendered
-as a floating thumbnail (top-left, click ⤢ to expand/collapse) over it:
+as a floating thumbnail (top-left, click ⤢ to expand/collapse, drag its
+bottom-right corner to resize) over it.
+Interaction modes are switched with the button bar along the top of the
+camera overlay — mouse click, or **point** (index finger up, other fingers
+curled) and hold the fingertip on a button for 500 ms (a ring marks the
+pointing fingertip, a progress bar fills). Pinches, fists and open palms
+never press buttons, so moving, editing or building can't switch modes or
+shapes by accident. The app starts in **VIEW** and the active
+mode is shown inverted with an indicator bar (and in the bottom-left HUD).
+In **CREATE** mode a column of shape icon buttons appears down the right edge
+of the camera view — **cube** (default), **cuboid**, **cylinder**, **sphere** —
+picked the same way (point-and-hold / click); it sets the shape for the next
+build:
 
 1. **Two-hand build** — pinch with both hands: a translucent wireframe
-   preview of the selected tool spawns centered on the origin `(0, 0, 0)`,
+   preview of the selected shape spawns centered on the origin `(0, 0, 0)`,
    its base sized by the two pinches (`baseSizeScale` world units per unit
    of video width):
    - **Box** — square, side = straight-line pinch gap;
@@ -222,7 +255,65 @@ as a floating thumbnail (top-left, click ⤢ to expand/collapse) over it:
    `EdgesGeometry` outlines (a fist / zoom also commits). Releasing the
    **lower** pinch first, or both at once, commits a **flat** plate
    (`flatHeight`, spheres unaffected).
-3. **Orbit the camera** — make a fist and move it: the camera orbits the
+3. **Single-hand footprint (legacy)** — pinch and drag with one hand: the
+   pinch start raycasts onto the ground plane (`y = 0`) and dragging sets the
+   footprint (box: square, cuboid: corner-to-corner rectangle,
+   cylinder/sphere: center + radius). It is committed with the default height on the next build or
+   camera gesture; pinching the second hand before releasing replaces it
+   with a two-hand build.
+4. **Select, move, recolor & delete (SELECT mode)** — a quick pinch on a committed
+   mesh **selects** it (a bright outline shell is drawn around it — the
+   mesh's own material is never tinted; it stays selected after you let go).
+   To **move** it, pinch and *hold* (the mesh starts following after
+   `dragHoldMs`, 300 ms, so a quick pinch never nudges it), drag, and
+   release to drop it. Dragging moves it under the active
+   **constraint toggle** (top-left of the vision overlay): `[ XZ PLANE ]`
+   (default) slides it on a horizontal plane at the height of the point you
+   grabbed, with its elevation locked, while `[ Y AXIS (ELEVATE) ]` ignores
+   horizontal drift and lifts / lowers it along a camera-facing vertical
+   plane through the grab point (clamped so it never sinks below the floor).
+   Either way the exact point you grabbed stays under your fingertip — in
+   depth as well as sideways. Switching between the toggles mid-drag
+   re-anchors, so the mesh never jerks or resets. Pinching empty ground
+   deselects (so does leaving SELECT mode), restoring the mesh's normal look
+   — the selection outline goes, a picked color stays. While in SELECT mode the camera thumbnail doubles as a live
+   **AR spatial mirror**: the ground grid (30 × 30 world units, 1-unit minor
+   + stronger 5-unit major lines, off-canvas geometry culled) and every
+   committed mesh are projected through the shared 3D camera and drawn as
+   translucent ghosts (the active selection glows amber/cyan) in lockstep
+   with the viewport. Keep the pinch held and show an **open palm** with
+   your other hand: tilting it spins the selection around the vertical
+   axis, with a compass ring (dashed circle + yaw needle) rendered around
+   the object in both the 3D viewport and the AR mirror. A floating
+   **HSL color wheel** appears beside the selected mesh (tracking it
+   through drags and camera moves): **point** at the disc (index finger
+   up) — every hue under the fingertip repaints the mesh live (angle =
+   hue, radius = saturation, wheel center = gray). This works after a
+   quick select-pinch, or with your other hand while one hand holds the
+   mesh. The camera thumbnail mirrors the wheel's disc outline and the
+    Delete button as a HUD, drawn exactly where your fingertip has to point
+    (with live dwell progress), so you can align your hand with the controls
+    while looking at the camera feed. **Hold the fingertip on one color slice
+    for 1.2 seconds** and a
+   countdown ring fills around the cursor; when it completes, the color
+   is locked in and saved to the object, the wheel disappears, and the
+   interaction resets (point again — or re-grab the mesh — to bring it
+   back). The dwell is keyed to 15° hue slices (the desaturated center
+   is one neutral slice), so micro-jitter never restarts the clock,
+   while any slice change or hover loss does. The wheel also hides when
+   the selection is cleared or the mode changes; pinches over the disc
+   never re-pick the 3D scene behind it, and only the grabbing hand's
+   release ends the drag. Pinches never draw or extrude in this mode.
+   **Delete**: the selection HUD below the object carries a **Delete**
+   button — click it, pinch it, point at it (index-tip dwell of ~0.8 s with a progress
+    fill), or press `Delete` / `Backspace`. Every
+   trigger opens a modal confirmation ("Are you sure you want to delete
+   this object? [Confirm] [Cancel]"): only Confirm (button, pinch, or
+   `Enter`) removes the mesh from the scene and frees its geometry /
+   material / edge overlays, while Cancel (button, pinch, `Escape`, or
+   clicking the backdrop) leaves everything untouched. While the dialog
+   is open the scene is frozen — pinches only answer the dialog.
+5. **Orbit the camera** — make a fist and move it: the camera orbits the
    world origin and the scene follows your hand — fist right swings the
    camera left, fist up swings it lower — with damping (`CadScene.onOrbit`);
    open palm stops. The camera focus is **locked to `(0, 0, 0)`**: the view
@@ -232,44 +323,19 @@ as a floating thumbnail (top-left, click ⤢ to expand/collapse) over it:
    doorknob): the scene turns around the vertical axis with your twist
    (`CadScene.onRotate`, `rotateSpeed` 1.5×). Open and re-close the fist to
    ratchet further.
-4. **Zoom / turn** — make fists with both hands and hold one still: it
-   becomes the anchor (ringed in the camera thumbnail). Move the other fist
-   away from it to zoom in, toward it to zoom out (`CadScene.onZoom`, clamped
-   between `minDistance` and `maxDistance`), or circle it around the anchor
-   to turn the scene (`CadScene.onRotate`).
+6. **Zoom / turn** — make fists with both hands and move **both**: pull them
+   apart to zoom in, bring them together to zoom out (`CadScene.onZoom`,
+   clamped between `minDistance` and `maxDistance`), or turn them around
+   each other like a steering wheel to turn the scene (`CadScene.onRotate`).
+   If only one fist moves (the other held still), it just moves the camera
+   like a single fist — it never zooms.
 
-Toolbar (mouse or programmatic): a **Start camera / Stop** toggle (webcam +
-tracking lifecycle), a **Voice** toggle, **Clear scene**, and **Export for
-printing** (binary `model.stl` download via
-`three/examples/jsm/exporters/STLExporter`). New builds use the box
-primitive; cylinder / sphere remain selectable by voice or via
-`CadBuilder.setTool()`.
-
-## Talking to it
-
-Turn on **Voice** and start talking — the badge on the camera thumbnail turns
-green when the mic is actually open, and captions along the bottom of the
-viewport show what was heard and what the agent said back. Interrupt the reply
-by talking over it.
-
-The agent can call these, and nothing else (`shared/agentTools.ts`):
-
-| Tool | Say something like |
-| ---- | ------------------ |
-| `add_shape` | "give me a tall red tube", "put a small ball next to it" |
-| `set_shape` | "switch to cylinder" (so your *hands* build cylinders next) |
-| `set_color` | "make it blue", "paint everything white" |
-| `remove_last` | "undo that", "nope, take it back" |
-| `clear_scene` | "start over" |
-| `describe_scene` | "what have I got?" |
-| `export_for_printing` | "save this for printing" |
-| `start_camera` / `stop_camera` | "turn the camera on" |
-
-Every call is re-validated in the browser before it reaches `CadBuilder`:
-sizes and positions are clamped rather than rejected ("make it huge" should
-still build something), but unknown tools, shapes and colors are refused and
-reported back so the agent corrects itself out loud. Spoken synonyms map to
-the four primitives — cube/block → box, tube → cylinder, ball/orb → sphere.
+Toolbar (mouse or programmatic): a single **Start camera / Stop** toggle
+(webcam + tracking lifecycle), **Clear scene**, and **Export STL** (binary
+`model.stl` download via `three/examples/jsm/exporters/STLExporter`). New
+builds use the cube by default; the shape is picked with the CREATE-mode
+icon buttons on the camera view (or programmatically via
+`CadBuilder.setTool()`).
 
 ## Event API
 
@@ -291,9 +357,15 @@ engine.onPinchEnd((e) => { /* e.endPos, e.delta */ });
 engine.onExtrude((e) => { /* e.mode, e.scaleFactor | e.deltaHeight */ });
 engine.onOrbit((e) => { /* e.deltaX, e.deltaY, e.deltaRoll (one fist) */ });
 engine.onZoom((e) => { /* e.anchor, e.deltaScale, e.deltaAngle, e.scaleFactor (two fists) */ });
+engine.onSelectRotate((e) => { /* e.hand, e.palmHand, e.deltaRotation (SELECT, open palm) */ });
+engine.onSelectRotateEnd((e) => { /* e.palmHand, e.reason */ });
 
 // Debug overlay / HUD data (fires once per processed frame):
-engine.on('frame', (frame) => { /* state, hands, metrics, fps */ });
+engine.on('frame', (frame) => { /* state, mode, hands, metrics, fps */ });
+
+// Interaction modes (VIEW / SELECT / CREATE):
+engine.setMode('select');
+engine.on('mode_change', (event) => { /* event.from, event.to */ });
 
 await engine.start(videoElement); // from a user gesture (camera permission)
 engine.stop();
@@ -308,7 +380,7 @@ and expose the live module graph on `window.cadVision` (`engine`, `overlay`,
 
 ## Configuration
 
-`new GestureEngine({ tracker, handedness, smoothing, classifier })`:
+`new GestureEngine({ tracker, handedness, smoothing, classifier, initialMode })`:
 
 - `tracker` — `HandTrackerOptions`: asset paths, delegate (`GPU`/`CPU`),
   confidence thresholds, camera constraints.
@@ -319,34 +391,68 @@ and expose the live module graph on `window.cadVision` (`engine`, `overlay`,
   `alpha` (default 0.35), teleport/stale-history thresholds.
 - `classifier` — `GestureClassifierOptions`: pinch thresholds, fist shape
   (`fistFoldRatio` 0.9, `fistMinFoldedFingers` 4, `fistThumbTuckRatio` 0.75,
-  `fistHoldSlack` 0.15, `fistPinchGuardDistance`) & debounce frames, wrist
+  `fistHoldSlack` 0.15, `fistPinchGuardDistance`) & debounce frames, wrist 
   roll (`rollEngageAngle` 0.15 rad, `rollDeadzone` 0.003 rad), two-fist anchor
-  (`zoomAnchorSwitchRatio` 0.5, `zoomTurnEngageAngle` 0.12 rad), camera path
+  (`zoomAnchorSwitchRatio` 0.5, `zoomTurnEngageAngle` 0.12 rad,
+  `zoomMoveSpeed` 0.004), camera path
   straightening (`cameraPath`: `startDistance`, `cornerDeviation`,
   `settleDistance`, `deadband`, or `null`), orbit
-  open-palm grace, hand-loss grace frames.
+  open-palm grace, hand-loss grace frames, and open-palm detection for the
+  SELECT-mode rotation (`openPalmExtensionRatio` 1.0,
+  `openPalmMinExtendedFingers` 4, `openPalmThumbTuckRatio` 0.6), and the
+  pointing pose that presses overlay buttons (`pointingIndexRatio` 1.5,
+  `pointingCurlRatio` 1.2, `pointingHoldSlack` 0.15,
+  `pointingDebounceFrames` 2).
+- `initialMode` — `InteractionMode`: starting interaction mode. Defaults to
+  `'create'` (full legacy gesture set); the app itself starts in `'view'`
+  and switches via `setMode()` at runtime.
 
 ## Debug overlay
 
 The `<canvas id="overlay">` (pure Canvas 2D) mirrors the feed and draws:
 
+- the **mode switcher** along the top edge: three boxy, mutually exclusive
+  toggle buttons (`[ VIEW ] [ SELECT ] [ CREATE ]`) — the active one is
+  inverted (solid light fill + high-contrast indicator bar). Activated by
+  mouse click or a **pointing** hand (`HandSnapshot.pointing`: index up,
+  middle / ring / pinky curled, no pinch; debounced) holding its index tip
+  (landmark 8) on the button for 500 ms (ring cursor + progress bar), via
+  `DebugOverlay`'s `onModeRequest` callback. Pinches never press buttons,
+  so an object drag sweeping across the bar never switches modes;
+- in **SELECT mode**, a stack of two **drag-constraint toggles** below the
+  mode bar in the top-left corner: `[ XZ PLANE ]` (default) and
+  `[ Y AXIS (ELEVATE) ]` — same boxy style and pointing activation
+  (`onDragConstraintRequest`);
+- in **CREATE mode**, a column of square **shape icon buttons** down the
+  right edge (cube (default), cuboid, cylinder, sphere — from the `shapes`
+  option, each with an `icon`; picks reported through `onShapeRequest` →
+  `CadBuilder.setTool`) — same boxy style and pointing activation;
+- in **SELECT mode**, a live **AR spatial mirror**: the 3D ground grid and
+  every committed mesh are projected through the scene camera's
+  webcam-aspect twin (`CadScene.interactionCamera` — same pose and vertical
+  FOV, the webcam frame's aspect — + `ArMirror`) into the webcam image's
+  on-screen rect, so ghosts keep their true proportions (a sphere stays
+  round) and line up with the hands; hand raycasts use the same camera, so
+  pinching a ghost picks that object. They are drawn as translucent cyan
+  ghosts beneath the hands — the active selection gets an energetic
+  amber/cyan glowing outline, and while an open-palm rotation runs a dashed
+  compass ring + amber yaw needle circles the selection;
 - all 21 landmarks per hand + MediaPipe skeleton connections,
-- state color-coding: **green** = pinch/draw, **blue** = one-fist move,
-  **purple** = two-fist zoom / turn (ring = anchor fist, dashed line to the
+- state color-coding: **green** = pinch/draw, **cyan** = selecting, **blue**
+  = one-fist move, **purple** = two-fist zoom / turn (ring = anchor fist,
+  dashed line to the
   moving fist), **yellow** = idle
   (orange for EXTRUDING),
 - thumb↔index pinch line with live distance, dual-hand extrusion link with
   `D` and scale factor,
-- HUD: FPS, hand count + handedness, gesture state, live pinch/extrude/orbit
-  metrics.
+- HUD (bottom-left): interaction mode, FPS, hand count + handedness, gesture
+  state, live pinch/extrude/orbit metrics.
 
 ## Tests
 
 ```bash
-npm test          # vitest — coordinates, filters, handedness stabilizer, path
-                  # straightener, classifier/FSM, talk gate, tool validation
-npm run typecheck # tsc --noEmit (browser) + tsc -p tsconfig.server.json (server)
-npm run build     # typecheck + vite production build
+npm test        # vitest — coordinates, filters, handedness stabilizer, path straightener, classifier/FSM + color-wheel math / dwell tracker unit tests
+npm run build   # tsc --noEmit + vite production build
 ```
 
 ## Troubleshooting

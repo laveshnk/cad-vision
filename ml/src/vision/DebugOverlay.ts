@@ -4,6 +4,22 @@
  * Draws the mirrored webcam landmarks (21 per hand) with the MediaPipe skeleton,
  * pinch indicators, and a HUD with live metrics. Pure Canvas 2D — no WebGL.
  *
+ * Along the top edge it renders the interaction-mode switcher ([ VIEW ],
+ * [ SELECT ], [ CREATE ]): boxy, mutually exclusive toggle buttons reported
+ * through the `onModeRequest` callback. In SELECT mode a second stack of
+ * mutually exclusive toggles, [ XZ PLANE ] (default) and
+ * [ Y AXIS (ELEVATE) ], sits vertically below the mode bar in the top-left
+ * corner (`onDragConstraintRequest`); in CREATE mode a column of shape
+ * icon buttons (cube / cuboid / cylinder / sphere, from the `shapes` option)
+ * is stacked vertically down the right edge instead (`onShapeRequest`).
+ *
+ * Every button responds to a mouse click or to a **pointing** hand (index
+ * finger up, other fingers curled — `HandSnapshot.pointing`) holding its
+ * index tip over the button for `dwellMs`; a ring marks a pointing
+ * fingertip. Pinches, fists and open palms never press a button, so moving,
+ * editing or building objects can't switch modes / shapes by accident. The
+ * stats HUD is anchored bottom-left so the buttons own the top edge.
+ *
  * Alignment: the <video> is CSS-mirrored (`scaleX(-1)`) and displayed with
  * `object-fit: cover`, which center-crops it into its container (the floating
  * camera thumbnail, or that thumbnail expanded). The canvas backing store
@@ -12,10 +28,23 @@
  * transform so they land exactly on the webcam image — while the HUD stays
  * anchored to the visible container edges (never cropped). Typography scales
  * with the container width (see `fontScale`).
+ *
+ * In SELECT mode the overlay additionally renders a live AR spatial mirror
+ * of the 3D CAD scene (translucent ground grid + mesh ghosts) through the
+ * `arScene` provider — plain projected 2D data supplied by the host, so this
+ * module stays free of Three.js. It also mirrors the selection's floating
+ * controls (color-wheel disc outline + Delete button, device-space data via
+ * the `selectionHud` provider) so users can visually align their hands with
+ * the viewport-anchored UI.
  */
 
 import { HandLandmarker } from '@mediapipe/tasks-vision';
-import type { FrameEvent, GestureState, HandSnapshot } from './types';
+import type {
+  FrameEvent,
+  GestureState,
+  HandSnapshot,
+  InteractionMode,
+} from './types';
 
 const THUMB_TIP = 4;
 const INDEX_TIP = 8;
@@ -27,10 +56,14 @@ export interface SkeletonConnection {
   end: number;
 }
 
-/** State color-coding: green = pinch/draw, blue = orbit, purple = zoom, yellow = idle. */
+/**
+ * State color-coding: green = pinch/draw, cyan = select, blue = orbit,
+ * purple = zoom, yellow = idle.
+ */
 export const STATE_COLORS: Record<GestureState, string> = {
   IDLE: '#facc15', // yellow
   DRAWING_BASE: '#22c55e', // green
+  SELECTING: '#06b6d4', // cyan
   EXTRUDING: '#f97316', // orange
   ORBITING: '#3b82f6', // blue
   ZOOMING: '#a855f7', // purple
@@ -44,6 +77,9 @@ interface HandStyle {
 }
 
 function styleFor(hand: HandSnapshot, state: GestureState): HandStyle {
+  if (state === 'SELECTING') {
+    return { skeleton: '#06b6d4', joint: '#67e8f9', jointFill: '#a5f3fc', label: '#06b6d4' };
+  }
   if (hand.pinchActive || state === 'DRAWING_BASE' || state === 'EXTRUDING') {
     return { skeleton: '#22c55e', joint: '#86efac', jointFill: '#bbf7d0', label: '#22c55e' };
   }
@@ -68,30 +104,421 @@ interface ViewTransform {
   dispH: number;
 }
 
-export class DebugOverlay {
+/* -------------------------------------------------------------------- */
+/* AR spatial mirror (SELECT mode)                                      */
+/* -------------------------------------------------------------------- */
+
+/**
+ * SELECT-mode drag constraint, mirrored structurally from the CAD builder's
+ * `DragConstraint` (no shared import — the orchestrator bridges the two):
+ * `'xz'` slides the grabbed mesh across the ground plane, `'y'` maps
+ * vertical hand travel to a world-Y lift / lower.
+ */
+export type DragConstraint = 'xz' | 'y';
+
+/**
+ * Plain-data AR mirror payloads, structurally compatible with
+ * `src/cad/ArMirror.ts`'s `ArSceneFrame` (the same pattern as the CAD side's
+ * `CadExtrudeInput`) — `main.ts` forwards the CAD-side projection directly
+ * into the `arScene` provider, keeping the vision layer free of Three.js.
+ */
+
+/** A projected 2D canvas point (CSS px, +Y down). */
+export interface ArPoint {
+  x: number;
+  y: number;
+}
+
+/** One projected mesh edge segment (endpoints in 2D canvas space). */
+export type ArSegment = [ArPoint, ArPoint];
+
+/** One projected ground-grid line (straight 3D lines stay straight). */
+export interface ArGridLine {
+  points: ArPoint[];
+  /** Major division — rendered stronger than the 1-unit minor lines. */
+  major: boolean;
+}
+
+/** Translucent ghost of one committed mesh, projected to canvas space. */
+export interface ArMeshGhost {
+  /** Projected silhouette polygon (convex hull of the projected vertices). */
+  hull: ArPoint[];
+  /** Projected `EdgesGeometry` segments (crisp accent lines). */
+  edges: ArSegment[];
+  /** The active selection gets an energetic highlight. */
+  selected: boolean;
+}
+
+/**
+ * Rotational compass ring around the selected object while an open-palm
+ * rotation gesture is running (SELECT mode).
+ */
+export interface ArRotationRing {
+  /** Projected circle segments (both endpoints visible). */
+  circle: ArSegment[];
+  /** Projected yaw indicator: object center → ring edge (null when culled). */
+  needle: ArSegment | null;
+}
+
+/** One AR mirror frame: projected ground grid + mesh ghosts. */
+export interface ArSceneFrame {
+  /** Projected ground-grid lines, minor and major divisions. */
+  grid: ArGridLine[];
+  /** Ghosts of the committed meshes, in scene order. */
+  meshes: ArMeshGhost[];
+  /** Compass ring around the selection while rotating, or null. */
+  rotationRing: ArRotationRing | null;
+}
+
+/**
+ * Projects the CAD scene onto the overlay — called once per rendered frame
+ * (only in SELECT mode) with the size (CSS px) of the webcam image's
+ * on-screen rect (the cover-scaled video, which may overhang the canvas);
+ * the overlay offsets the result into place. The projection must use the
+ * webcam frame's aspect so proportions stay true. Returns `null` to skip
+ * the AR layer entirely.
+ */
+export type ArSceneProvider = (width: number, height: number) => ArSceneFrame | null;
+
+/* -------------------------------------------------------------------- */
+/* SELECT-mode selection-HUD mirror (color wheel + Delete button)       */
+/* -------------------------------------------------------------------- */
+
+/**
+ * A disc in device space ([-1, 1], +X right in the mirrored view, +Y up):
+ * center plus per-axis radii — an ellipse, since device units map onto the
+ * video rect's width / height separately. Mirrors the color wheel.
+ */
+export interface OverlayHudDisc {
+  x: number;
+  y: number;
+  radiusX: number;
+  radiusY: number;
+}
+
+/**
+ * A rectangle in device space: (x, y) is its minimum corner (left edge,
+ * bottom edge — +Y up), with width / height extending toward +X / +Y.
+ * Mirrors the selection HUD's Delete button.
+ */
+export interface OverlayHudRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * One frame of the SELECT-mode selection HUD, expressed in device space so
+ * the drawn controls sit exactly where a tracked fingertip must point to hit
+ * the real (viewport-anchored) controls.
+ */
+export interface OverlaySelectionHud {
+  /** Color-wheel disc outline, or null while the wheel is dismissed. */
+  wheel: OverlayHudDisc | null;
+  /** Delete-button bounds, or null while the selection HUD is hidden. */
+  deleteButton: OverlayHudRect | null;
+  /** Color-lock dwell completion [0, 1] (fills the wheel outline ring). */
+  wheelProgress: number;
+  /** Delete-button dwell completion [0, 1] (fills the delete HUD). */
+  deleteProgress: number;
+}
+
+/**
+ * Supplies the selection HUD per rendered frame; null skips the layer (no
+ * selection, outside SELECT mode, or while the delete confirmation is open).
+ * Plain data from the host — the overlay stays free of UI dependencies.
+ */
+export type SelectionHudProvider = () => OverlaySelectionHud | null;
+
+/** AR mirror paint: minor ground-grid strokes (1-unit lines). */
+const AR_GRID_STROKE = 'rgba(0, 150, 255, 0.18)';
+/** AR mirror paint: major ground-grid divisions (stronger, every 5 units). */
+const AR_GRID_MAJOR_STROKE = 'rgba(0, 150, 255, 0.4)';
+/** AR mirror paint: ghost fill for unselected meshes. */
+const AR_GHOST_FILL = 'rgba(40, 120, 200, 0.35)';
+/** AR mirror paint: ghost fill for the active selection (higher opacity). */
+const AR_SELECTED_FILL = 'rgba(40, 120, 200, 0.5)';
+/** AR mirror paint: crisp edge accents. */
+const AR_EDGE_STROKE = 'rgba(0, 200, 255, 0.8)';
+/** AR mirror paint: edge accents for the active selection. */
+const AR_SELECTED_EDGE_STROKE = 'rgba(0, 200, 255, 0.95)';
+/** AR mirror paint: amber outline of the active selection. */
+const AR_SELECTED_OUTLINE = 'rgba(251, 191, 36, 0.9)';
+/** AR mirror paint: cyan halo behind the selection outline. */
+const AR_SELECTED_GLOW = 'rgba(0, 200, 255, 0.8)';
+/** AR mirror paint: dashed rotation compass ring. */
+const AR_RING_STROKE = 'rgba(0, 200, 255, 0.9)';
+/** AR mirror paint: amber yaw needle inside the compass ring. */
+const AR_RING_NEEDLE_STROKE = 'rgba(251, 191, 36, 0.95)';
+
+/** Selection-HUD paint: color-wheel disc tint + outline. */
+const HUD_WHEEL_FILL = 'rgba(56, 189, 248, 0.10)';
+const HUD_WHEEL_STROKE = 'rgba(255, 255, 255, 0.9)';
+/** Selection-HUD paint: color-lock dwell arc filling the wheel outline. */
+const HUD_WHEEL_PROGRESS_STROKE = '#38bdf8';
+/** Selection-HUD paint: Delete button tint + outline (danger red). */
+const HUD_DELETE_FILL = 'rgba(248, 113, 113, 0.14)';
+const HUD_DELETE_STROKE = 'rgba(248, 113, 113, 0.9)';
+/** Selection-HUD paint: Delete label + its dwell progress fill. */
+const HUD_DELETE_LABEL = '#fecaca';
+const HUD_DELETE_PROGRESS_FILL = '#f87171';
+
+/** Options for the debug overlay. */
+/** A CREATE-mode shape button: `id` is the host's opaque shape key. */
+export interface OverlayShape<S extends string = string> {
+  id: S;
+  /** Name of the shape (drawn as text only when no `icon` is given). */
+  label: string;
+  /** Line icon drawn on the button instead of the label. */
+  icon?: OverlayShapeIcon;
+}
+
+/** Built-in line icons for the CREATE-mode shape buttons. */
+export type OverlayShapeIcon = 'cube' | 'cuboid' | 'cylinder' | 'sphere';
+
+/**
+ * Options for the debug overlay. `S` is the host's shape id type — shape ids
+ * are opaque strings here, so the overlay has no CAD dependency.
+ */
+export interface DebugOverlayOptions<S extends string = string> {
+  /** Hand skeleton connections (defaults to MediaPipe HAND_CONNECTIONS). */
+  connections?: ReadonlyArray<SkeletonConnection>;
+  /**
+   * Called when a mode button is activated — via mouse click or an index-tip
+   * dwell of a pointing hand (>= `dwellMs` over the button). The host
+   * decides what to do with the request (typically `engine.setMode`).
+   */
+  onModeRequest?: (mode: InteractionMode) => void;
+  /**
+   * Called when a SELECT-mode drag-constraint toggle is activated — via
+   * mouse click or a pointing index-tip dwell. The host routes
+   * it to the CAD builder's `setDragConstraint`; the overlay keeps the
+   * visual state (both default to 'xz').
+   */
+  onDragConstraintRequest?: (constraint: DragConstraint) => void;
+  /** Index-tip dwell time (ms) before a hovered mode button activates. Default 500. */
+  dwellMs?: number;
+  /** CREATE-mode shape buttons, left to right below the mode bar (none by default). */
+  shapes?: ReadonlyArray<OverlayShape<S>>;
+  /** Initially highlighted shape (defaults to the first of `shapes`). */
+  activeShape?: S;
+  /**
+   * Called when a CREATE-mode shape button is activated — via mouse click or
+   * a pointing index-tip dwell. The host routes it to
+   * the CAD builder's tool (typically `builder.setTool`).
+   */
+  onShapeRequest?: (shape: S) => void;
+  /**
+   * SELECT-mode AR mirror: projects the live CAD scene (ground grid +
+   * committed meshes) through the shared 3D camera onto this canvas, once
+   * per rendered frame. Implemented on the CAD side (`buildArSceneFrame`)
+   * and injected here by the orchestrator — the overlay stays Three.js-free.
+   */
+  arScene?: ArSceneProvider;
+  /**
+   * SELECT-mode selection HUD: mirrors the color-wheel disc outline and the
+   * Delete button (device-space plain data + dwell progress) onto this
+   * canvas, so users can visually align their hands with the viewport's
+   * floating controls. Supplied by the orchestrator; null skips the layer.
+   */
+  selectionHud?: SelectionHudProvider;
+}
+
+/** A hit-testable rectangle in CSS pixels. */
+interface ButtonRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** Mode buttons, left to right, along the top edge of the overlay. */
+const MODE_BUTTONS: readonly InteractionMode[] = ['view', 'select', 'create'];
+
+/** SELECT-mode drag-constraint toggles, top to bottom (top-left corner). */
+const CONSTRAINT_BUTTONS: readonly DragConstraint[] = ['xz', 'y'];
+
+/** Constraint button labels, in CONSTRAINT_BUTTONS order. */
+const CONSTRAINT_LABELS: Record<DragConstraint, string> = {
+  xz: '[ XZ PLANE ]',
+  y: '[ Y AXIS (ELEVATE) ]',
+};
+
+export class DebugOverlay<S extends string = string> {
   private readonly canvas: HTMLCanvasElement;
   private readonly ctx: CanvasRenderingContext2D;
   private readonly connections: ReadonlyArray<SkeletonConnection>;
+  private readonly onModeRequest: ((mode: InteractionMode) => void) | null;
+  private readonly onDragConstraintRequest: ((constraint: DragConstraint) => void) | null;
+  private readonly dwellMs: number;
+  private readonly arScene: ArSceneProvider | null;
+  private readonly selectionHud: SelectionHudProvider | null;
+  /** Last rendered button rects (CSS px) — hit targets for mouse + finger. */
+  private buttonRects: ButtonRect[] = [];
+  /** Button the index tip is dwelling over (-1 = none). */
+  private dwellTarget = -1;
+  private dwellElapsed = 0;
+  private lastFrameTimestamp: number | null = null;
+  /** Last rendered constraint-button rects (CSS px); empty outside SELECT mode. */
+  private constraintRects: ButtonRect[] = [];
+  /** Constraint toggle the index tip is dwelling over (-1 = none). */
+  private constraintDwellTarget = -1;
+  private constraintDwellElapsed = 0;
+  /** Visual + authoritative overlay state of the drag constraint (host mirrors it). */
+  private dragConstraint: DragConstraint = 'xz';
+  private readonly shapes: ReadonlyArray<OverlayShape<S>>;
+  private readonly onShapeRequest: ((shape: S) => void) | null;
+  /** Highlighted CREATE-mode shape (host mirrors it). */
+  private activeShapeId: S | null;
+  /** Last rendered shape-button rects (CSS px); empty outside CREATE mode. */
+  private shapeRects: ButtonRect[] = [];
+  /** Shape button the index tip is dwelling over (-1 = none). */
+  private shapeDwellTarget = -1;
+  private shapeDwellElapsed = 0;
+  /** Last rendered mirrored cover transform (device-space UI hit tests). */
+  private lastView: ViewTransform | null = null;
 
-  constructor(canvas: HTMLCanvasElement, connections?: ReadonlyArray<SkeletonConnection>) {
+  constructor(canvas: HTMLCanvasElement, options: DebugOverlayOptions<S> = {}) {
     this.canvas = canvas;
     const ctx = canvas.getContext('2d');
     if (!ctx) throw new Error('DebugOverlay: 2D canvas context unavailable');
     this.ctx = ctx;
-    this.connections = connections ?? HandLandmarker.HAND_CONNECTIONS;
+    this.connections = options.connections ?? HandLandmarker.HAND_CONNECTIONS;
+    this.onModeRequest = options.onModeRequest ?? null;
+    this.onDragConstraintRequest = options.onDragConstraintRequest ?? null;
+    this.dwellMs = options.dwellMs ?? 500;
+    this.arScene = options.arScene ?? null;
+    this.selectionHud = options.selectionHud ?? null;
+    this.shapes = options.shapes ?? [];
+    this.onShapeRequest = options.onShapeRequest ?? null;
+    this.activeShapeId = options.activeShape ?? this.shapes[0]?.id ?? null;
+    canvas.addEventListener('click', this.onCanvasClick);
+    canvas.addEventListener('mousemove', this.onCanvasMouseMove);
   }
+
+  /** Detach the mode-button mouse listeners (the canvas stays with the host). */
+  dispose(): void {
+    this.canvas.removeEventListener('click', this.onCanvasClick);
+    this.canvas.removeEventListener('mousemove', this.onCanvasMouseMove);
+  }
+
+  /** Highlighted CREATE-mode shape. */
+  get activeShape(): S | null {
+    return this.activeShapeId;
+  }
+
+  /** Highlight a shape button (e.g. when the host changes the shape itself). */
+  setActiveShape(shape: S): void {
+    this.activeShapeId = shape;
+  }
+
+  /** Click anywhere inside a rendered mode / constraint / shape button activates it. */
+  private readonly onCanvasClick = (event: MouseEvent): void => {
+    const shape = this.hitShapeButton(event.offsetX, event.offsetY);
+    if (shape >= 0) {
+      this.requestShape(shape);
+      return;
+    }
+    const constraint = this.hitConstraintButton(event.offsetX, event.offsetY);
+    if (constraint >= 0) {
+      this.requestConstraint(constraint);
+      return;
+    }
+    const index = this.hitButton(event.offsetX, event.offsetY);
+    if (index >= 0) this.requestMode(index);
+  };
+
+  /** Pointer feedback while hovering the mode / constraint buttons. */
+  private readonly onCanvasMouseMove = (event: MouseEvent): void => {
+    const hovering =
+      this.hitButton(event.offsetX, event.offsetY) >= 0 ||
+      this.hitConstraintButton(event.offsetX, event.offsetY) >= 0 ||
+      this.hitShapeButton(event.offsetX, event.offsetY) >= 0;
+    this.canvas.style.cursor = hovering ? 'pointer' : 'default';
+  };
 
   /** Render one frame of landmarks + HUD. */
   render(frame: FrameEvent): void {
     const { cssWidth, cssHeight } = this.ensureSize(frame.video.width, frame.video.height);
     this.ctx.clearRect(0, 0, cssWidth, cssHeight);
     const view = this.coverTransform(cssWidth, cssHeight, frame.video.width, frame.video.height);
+    this.lastView = view; // device-space UI hit tests between frames
+    // SELECT mode: live AR mirror of the 3D scene, drawn beneath the hands.
+    if (frame.mode === 'select') this.drawArMirror(view, cssWidth);
     for (const hand of frame.hands) {
       this.drawHand(hand, frame.state, view, cssWidth);
     }
     this.drawDualHandsLink(frame, view, cssWidth);
     this.drawZoomAnchor(frame, view);
-    this.drawHud(frame, cssWidth);
+    // SELECT mode: mirror the selection's color wheel + Delete button as a
+    // HUD (drawn over the hands' skeletons so the alignment guide reads).
+    if (frame.mode === 'select') this.drawSelectionHud(view, cssWidth);
+    this.drawModeButtons(frame, cssWidth);
+    if (frame.mode === 'select') this.drawConstraintButtons(cssWidth);
+    else this.constraintRects = [];
+    if (frame.mode === 'create') this.drawShapeButtons(cssWidth);
+    else this.shapeRects = [];
+    const dt = this.frameDt(frame);
+    this.updateModeInteraction(frame, view, dt);
+    this.updateConstraintInteraction(frame, view, dt);
+    this.updateShapeInteraction(frame, view, dt);
+    this.drawPointerCursors(frame, view);
+    this.drawHud(frame, cssWidth, cssHeight);
+  }
+
+  /**
+   * Dwell clock tick from frame timestamps; capped so a stalled camera feed
+   * cannot complete a dwell in one jump.
+   */
+  private frameDt(frame: FrameEvent): number {
+    const dt =
+      this.lastFrameTimestamp === null
+        ? 0
+        : Math.max(0, Math.min(frame.timestamp - this.lastFrameTimestamp, 500));
+    this.lastFrameTimestamp = frame.timestamp;
+    return dt;
+  }
+
+  /**
+   * Ring on each pointing hand's index fingertip: the visible cursor for the
+   * overlay buttons (only a pointing hand can press them).
+   */
+  private drawPointerCursors(frame: FrameEvent, view: ViewTransform): void {
+    const ctx = this.ctx;
+    for (const hand of frame.hands) {
+      if (!hand.pointing) continue;
+      const tip = this.toCanvas(hand, INDEX_TIP, view);
+      ctx.lineWidth = 2.5;
+      ctx.strokeStyle = '#38bdf8';
+      ctx.beginPath();
+      ctx.arc(tip.x, tip.y, 11, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(56, 189, 248, 0.25)';
+      ctx.fill();
+    }
+  }
+
+  /**
+   * Device-space hit test against the last rendered UI buttons (mode bar +
+   * SELECT-mode constraint stack + CREATE-mode shape row), e.g. to tell
+   * whether a device-space point sits under the overlay's buttons. Runs
+   * through the same mirrored cover transform as the landmarks, using the
+   * previous frame's metrics (the buttons do not move between frames).
+   */
+  isUiAtDevice(x: number, y: number): boolean {
+    const view = this.lastView;
+    if (!view) return false;
+    // Device [-1, 1] (mirrored, +Y up) -> normalized [0, 1] -> canvas CSS px.
+    const nx = (1 - x) / 2;
+    const ny = (1 - y) / 2;
+    const px = view.ox + (1 - nx) * view.dispW;
+    const py = view.oy + ny * view.dispH;
+    return (
+      this.hitButton(px, py) >= 0 ||
+      this.hitConstraintButton(px, py) >= 0 ||
+      this.hitShapeButton(px, py) >= 0
+    );
   }
 
   /**
@@ -285,10 +712,611 @@ export class DebugOverlay {
     ctx.fill();
   }
 
-  /** Rounded HUD panel (top-left, always inside the visible panel) with state, FPS, hands and live metrics. */
-  private drawHud(frame: FrameEvent, cssWidth: number): void {
+  /* ------------------------------------------------------------------ */
+  /* AR spatial mirror (SELECT mode)                                     */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * Translucent CAD mirror: the projected ground grid and ghost meshes are
+   * drawn beneath the hand skeletons, turning the vision canvas into a live
+   * AR spatial view of the 3D environment (in lockstep with pinch-driven
+   * drags — the provider runs inside this same rAF-driven frame).
+   */
+  private drawArMirror(view: ViewTransform, cssWidth: number): void {
+    if (!this.arScene) return;
+    // Project into the webcam image's on-screen rect (the same cover
+    // transform the landmarks use): true proportions, aligned with the hands.
+    const frame = this.arScene(view.dispW, view.dispH);
+    if (!frame) return;
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.translate(view.ox, view.oy);
+
+    // Ground grid in two batched passes: faint 1-unit minor lines first,
+    // then the stronger major divisions (every 5 units) — a 30 × 30 unit
+    // floor window stays readable at thumbnail scale.
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = AR_GRID_STROKE;
+    ctx.beginPath();
+    for (const line of frame.grid) {
+      if (line.major || line.points.length < 2) continue;
+      ctx.moveTo(line.points[0].x, line.points[0].y);
+      for (let i = 1; i < line.points.length; i++) ctx.lineTo(line.points[i].x, line.points[i].y);
+    }
+    ctx.stroke();
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = AR_GRID_MAJOR_STROKE;
+    ctx.beginPath();
+    for (const line of frame.grid) {
+      if (!line.major || line.points.length < 2) continue;
+      ctx.moveTo(line.points[0].x, line.points[0].y);
+      for (let i = 1; i < line.points.length; i++) ctx.lineTo(line.points[i].x, line.points[i].y);
+    }
+    ctx.stroke();
+
+    for (const mesh of frame.meshes) this.drawArMesh(mesh, cssWidth);
+    if (frame.rotationRing) this.drawArRotationRing(frame.rotationRing, cssWidth);
+    ctx.restore();
+  }
+
+  /** Rotational compass ring: dashed cyan circle + amber yaw needle. */
+  private drawArRotationRing(ring: ArRotationRing, cssWidth: number): void {
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.setLineDash([9, 7]);
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = AR_RING_STROKE;
+    ctx.shadowColor = AR_SELECTED_GLOW;
+    ctx.shadowBlur = Math.max(5, cssWidth * 0.02);
+    ctx.beginPath();
+    for (const [a, b] of ring.circle) {
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+    }
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.shadowBlur = 0;
+    if (ring.needle) {
+      ctx.lineWidth = 2.5;
+      ctx.strokeStyle = AR_RING_NEEDLE_STROKE;
+      ctx.beginPath();
+      ctx.moveTo(ring.needle[0].x, ring.needle[0].y);
+      ctx.lineTo(ring.needle[1].x, ring.needle[1].y);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  /** One mesh ghost: translucent silhouette fill + crisp accent edges. */
+  private drawArMesh(mesh: ArMeshGhost, cssWidth: number): void {
+    const ctx = this.ctx;
+
+    // Ghost fill over the projected silhouette (2D footprint) of the solid.
+    if (mesh.hull.length >= 3) {
+      ctx.beginPath();
+      ctx.moveTo(mesh.hull[0].x, mesh.hull[0].y);
+      for (let i = 1; i < mesh.hull.length; i++) ctx.lineTo(mesh.hull[i].x, mesh.hull[i].y);
+      ctx.closePath();
+      ctx.fillStyle = mesh.selected ? AR_SELECTED_FILL : AR_GHOST_FILL;
+      ctx.fill();
+
+      if (mesh.selected) {
+        // Energetic highlight: glowing cyan halo behind an amber outline.
+        ctx.save();
+        ctx.shadowColor = AR_SELECTED_GLOW;
+        ctx.shadowBlur = Math.max(6, cssWidth * 0.025);
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = AR_SELECTED_OUTLINE;
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+
+    // Crisp accent edges (projected EdgesGeometry) on top of the fill.
+    ctx.lineWidth = mesh.selected ? 2 : 1.25;
+    ctx.strokeStyle = mesh.selected ? AR_SELECTED_EDGE_STROKE : AR_EDGE_STROKE;
+    ctx.beginPath();
+    for (const [a, b] of mesh.edges) {
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+    }
+    ctx.stroke();
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* SELECT-mode selection HUD (color wheel + Delete mirror)            */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * Mirror the selection's floating controls onto the camera thumbnail: the
+   * color wheel's disc outline and the Delete button, expressed in device
+   * space by the host (the inverse of the viewport mapping the real controls
+   * live in), so the drawn controls sit exactly where a tracked fingertip
+   * must point. Both dwell progress bars (color lock, delete) fill as live
+   * feedback — the same model as the overlay's own buttons.
+   */
+  private drawSelectionHud(view: ViewTransform, cssWidth: number): void {
+    if (!this.selectionHud) return;
+    const hud = this.selectionHud();
+    if (!hud) return;
+    const ctx = this.ctx;
+    const scale = this.fontScale(cssWidth);
+    ctx.save();
+    ctx.translate(view.ox, view.oy);
+
+    if (hud.wheel) {
+      const cx = ((hud.wheel.x + 1) / 2) * view.dispW;
+      const cy = ((1 - hud.wheel.y) / 2) * view.dispH;
+      const rx = Math.max((hud.wheel.radiusX / 2) * view.dispW, 1);
+      const ry = Math.max((hud.wheel.radiusY / 2) * view.dispH, 1);
+      ctx.beginPath();
+      ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+      ctx.fillStyle = HUD_WHEEL_FILL;
+      ctx.fill();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = HUD_WHEEL_STROKE;
+      ctx.stroke();
+      // Color-lock dwell: an arc sweeps the rim as the timed hover fills.
+      if (hud.wheelProgress > 0) {
+        ctx.beginPath();
+        ctx.ellipse(
+          cx,
+          cy,
+          rx,
+          ry,
+          0,
+          -Math.PI / 2,
+          -Math.PI / 2 + Math.min(1, hud.wheelProgress) * Math.PI * 2
+        );
+        ctx.lineWidth = 3.5;
+        ctx.strokeStyle = HUD_WHEEL_PROGRESS_STROKE;
+        ctx.stroke();
+      }
+    }
+
+    if (hud.deleteButton) {
+      // Device rect (min corner, +Y up) → canvas rect (top-left, +Y down).
+      const left = ((hud.deleteButton.x + 1) / 2) * view.dispW;
+      const right = ((hud.deleteButton.x + hud.deleteButton.width + 1) / 2) * view.dispW;
+      const top = ((1 - (hud.deleteButton.y + hud.deleteButton.height)) / 2) * view.dispH;
+      const bottom = ((1 - hud.deleteButton.y) / 2) * view.dispH;
+      const x = Math.min(left, right);
+      const y = Math.min(top, bottom);
+      const width = Math.abs(right - left);
+      const height = Math.abs(bottom - top);
+      if (width > 2 && height > 2) {
+        this.panelPath(x, y, width, height, 6 * scale);
+        ctx.fillStyle = HUD_DELETE_FILL;
+        ctx.fill();
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = HUD_DELETE_STROKE;
+        ctx.stroke();
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.font = `bold ${Math.max(7, Math.round(9 * scale))}px ui-monospace, monospace`;
+        ctx.fillStyle = HUD_DELETE_LABEL;
+        ctx.shadowColor = 'rgba(15, 23, 42, 0.9)';
+        ctx.shadowBlur = 3;
+        ctx.fillText('DEL', x + width / 2, y + height / 2);
+        ctx.shadowBlur = 0;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'alphabetic';
+        // Pointing dwell on Delete fills along its bottom edge.
+        if (hud.deleteProgress > 0) {
+          ctx.fillStyle = HUD_DELETE_PROGRESS_FILL;
+          ctx.fillRect(
+            x + 1,
+            y + height - 3.5,
+            (width - 2) * Math.min(1, hud.deleteProgress),
+            2.5
+          );
+        }
+      }
+    }
+
+    ctx.restore();
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Mode switcher buttons (top edge of the overlay)                    */
+  /* ------------------------------------------------------------------ */
+
+  /** CSS-pixel hit test against the last rendered mode buttons. */
+  private hitButton(px: number, py: number): number {
+    for (let i = 0; i < this.buttonRects.length; i++) {
+      const r = this.buttonRects[i];
+      if (px >= r.x && px <= r.x + r.width && py >= r.y && py <= r.y + r.height) return i;
+    }
+    return -1;
+  }
+
+  private requestMode(index: number): void {
+    this.onModeRequest?.(MODE_BUTTONS[index]);
+  }
+
+  /** Shared layout metrics of the top-edge button bars (mode + constraint). */
+  private barMetrics(cssWidth: number): { margin: number; gap: number; height: number } {
+    const scale = this.fontScale(cssWidth);
+    return {
+      margin: Math.round(8 * scale),
+      gap: Math.round(6 * scale),
+      height: Math.max(22, Math.round(32 * scale)),
+    };
+  }
+
+  /**
+   * Finger interaction with the mode buttons: a *pointing* hand's index tip
+   * (landmark 8) dwelling over a button for `dwellMs` activates it. Pinches
+   * never press buttons, so a pinch-drag (moving / building an object) that
+   * sweeps across the bar never switches modes.
+   */
+  private updateModeInteraction(frame: FrameEvent, view: ViewTransform, dt: number): void {
+    let dwellTarget = -1;
+    for (const hand of frame.hands) {
+      if (!hand.pointing) continue; // only a pointing hand presses buttons
+      const tip = this.toCanvas(hand, INDEX_TIP, view);
+      const index = this.hitButton(tip.x, tip.y);
+      if (index < 0) continue;
+      if (dwellTarget < 0) dwellTarget = index;
+    }
+
+    // Dwell clock from frame timestamps; capped so a stalled camera feed
+    // cannot complete a dwell in one jump.
+    if (dwellTarget !== this.dwellTarget) {
+      this.dwellTarget = dwellTarget;
+      this.dwellElapsed = 0;
+    } else if (dwellTarget >= 0 && dt > 0) {
+      this.dwellElapsed += dt;
+    }
+    if (this.dwellTarget >= 0 && this.dwellElapsed >= this.dwellMs) {
+      this.requestMode(this.dwellTarget);
+      this.dwellTarget = -1;
+      this.dwellElapsed = 0;
+    }
+  }
+
+  /**
+   * Boxy mode switcher across the top edge: three sharp-cornered, mutually
+   * exclusive toggle buttons. The active one is inverted — solid light fill,
+   * dark text, high-contrast indicator bar — while a dwell fills a progress
+   * bar along the bottom edge of the hovered button.
+   */
+  private drawModeButtons(frame: FrameEvent, cssWidth: number): void {
+    const ctx = this.ctx;
+    const scale = this.fontScale(cssWidth);
+    const { margin, gap, height } = this.barMetrics(cssWidth);
+    const width = (cssWidth - margin * 2 - gap * (MODE_BUTTONS.length - 1)) / MODE_BUTTONS.length;
+
+    this.buttonRects = [];
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    MODE_BUTTONS.forEach((mode, i) => {
+      const x = margin + i * (width + gap);
+      this.buttonRects.push({ x, y: margin, width, height });
+      const label = `[ ${mode.toUpperCase()} ]`;
+      // Shrink the label to fit the button.
+      let fontSize = Math.max(9, Math.round(13 * scale));
+      ctx.font = `bold ${fontSize}px ui-monospace, monospace`;
+      while (fontSize > 8 && ctx.measureText(label).width > width - 8) {
+        fontSize -= 1;
+        ctx.font = `bold ${fontSize}px ui-monospace, monospace`;
+      }
+
+      const active = frame.mode === mode;
+      if (active) {
+        ctx.fillStyle = '#f8fafc'; // solid inverted background
+        ctx.fillRect(x, margin, width, height);
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = '#0f172a';
+        ctx.strokeRect(x + 1, margin + 1, width - 2, height - 2);
+        ctx.fillStyle = '#0284c7'; // high-contrast indicator bar
+        ctx.fillRect(x + 3, margin + height - 7, width - 6, 4);
+        ctx.fillStyle = '#0f172a';
+      } else {
+        const dwelling = this.dwellTarget === i;
+        ctx.fillStyle = dwelling ? 'rgba(15, 23, 42, 0.85)' : 'rgba(15, 23, 42, 0.6)';
+        ctx.fillRect(x, margin, width, height);
+        ctx.lineWidth = dwelling ? 2 : 1.5;
+        ctx.strokeStyle = dwelling ? '#e2e8f0' : 'rgba(148, 163, 184, 0.55)';
+        ctx.strokeRect(x + 1, margin + 1, width - 2, height - 2);
+        if (dwelling && this.dwellMs > 0) {
+          const progress = Math.min(1, this.dwellElapsed / this.dwellMs);
+          ctx.fillStyle = '#38bdf8';
+          ctx.fillRect(x + 2, margin + height - 5, (width - 4) * progress, 3);
+        }
+        ctx.fillStyle = dwelling ? '#f8fafc' : '#cbd5e1';
+      }
+      ctx.fillText(label, x + width / 2, margin + height / 2);
+    });
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Drag-constraint toggles (SELECT mode, top-left corner)             */
+  /* ------------------------------------------------------------------ */
+
+  /** CSS-pixel hit test against the last rendered constraint buttons. */
+  private hitConstraintButton(px: number, py: number): number {
+    for (let i = 0; i < this.constraintRects.length; i++) {
+      const r = this.constraintRects[i];
+      if (px >= r.x && px <= r.x + r.width && py >= r.y && py <= r.y + r.height) return i;
+    }
+    return -1;
+  }
+
+  private requestConstraint(index: number): void {
+    const constraint = CONSTRAINT_BUTTONS[index];
+    if (!constraint || this.dragConstraint === constraint) return;
+    this.dragConstraint = constraint;
+    this.onDragConstraintRequest?.(constraint);
+  }
+
+  /**
+   * Finger interaction with the constraint stack: the same pointing-dwell
+   * model as the mode bar, active only while the buttons are visible
+   * (SELECT mode).
+   */
+  private updateConstraintInteraction(frame: FrameEvent, view: ViewTransform, dt: number): void {
+    if (frame.mode !== 'select') {
+      this.constraintDwellTarget = -1;
+      this.constraintDwellElapsed = 0;
+      return;
+    }
+    let dwellTarget = -1;
+    for (const hand of frame.hands) {
+      if (!hand.pointing) continue; // only a pointing hand presses buttons
+      const tip = this.toCanvas(hand, INDEX_TIP, view);
+      const index = this.hitConstraintButton(tip.x, tip.y);
+      if (index < 0) continue;
+      if (dwellTarget < 0) dwellTarget = index;
+    }
+
+    if (dwellTarget !== this.constraintDwellTarget) {
+      this.constraintDwellTarget = dwellTarget;
+      this.constraintDwellElapsed = 0;
+    } else if (dwellTarget >= 0 && dt > 0) {
+      this.constraintDwellElapsed += dt;
+    }
+    if (this.constraintDwellTarget >= 0 && this.constraintDwellElapsed >= this.dwellMs) {
+      this.requestConstraint(this.constraintDwellTarget);
+      this.constraintDwellTarget = -1;
+      this.constraintDwellElapsed = 0;
+    }
+  }
+
+  /**
+   * SELECT-mode drag-constraint toggles, stacked vertically in the top-left
+   * corner below the mode bar: `[ XZ PLANE ]` (default active) and
+   * `[ Y AXIS (ELEVATE) ]` — mutually exclusive, boxy industrial style
+   * (crisp border, monospace, inverted background when active) with the
+   * same dwell progress bar as the mode buttons.
+   */
+  private drawConstraintButtons(cssWidth: number): void {
+    const ctx = this.ctx;
+    const scale = this.fontScale(cssWidth);
+    const { margin, gap, height: barHeight } = this.barMetrics(cssWidth);
+    const height = Math.max(20, Math.round(26 * scale));
+    const width = Math.min(Math.round((cssWidth - margin * 2) * 0.55), 190);
+    const top = margin + barHeight + gap;
+
+    this.constraintRects = [];
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    CONSTRAINT_BUTTONS.forEach((constraint, i) => {
+      const x = margin;
+      const y = top + i * (height + gap);
+      this.constraintRects.push({ x, y, width, height });
+      const label = CONSTRAINT_LABELS[constraint];
+      // Shrink the label to fit the button.
+      let fontSize = Math.max(9, Math.round(12 * scale));
+      ctx.font = `bold ${fontSize}px ui-monospace, monospace`;
+      while (fontSize > 7 && ctx.measureText(label).width > width - 8) {
+        fontSize -= 1;
+        ctx.font = `bold ${fontSize}px ui-monospace, monospace`;
+      }
+
+      const active = this.dragConstraint === constraint;
+      if (active) {
+        ctx.fillStyle = '#f8fafc'; // solid inverted background
+        ctx.fillRect(x, y, width, height);
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = '#0f172a';
+        ctx.strokeRect(x + 1, y + 1, width - 2, height - 2);
+        ctx.fillStyle = '#0284c7'; // high-contrast indicator bar
+        ctx.fillRect(x + 3, y + height - 6, width - 6, 3);
+        ctx.fillStyle = '#0f172a';
+      } else {
+        const dwelling = this.constraintDwellTarget === i;
+        ctx.fillStyle = dwelling ? 'rgba(15, 23, 42, 0.85)' : 'rgba(15, 23, 42, 0.6)';
+        ctx.fillRect(x, y, width, height);
+        ctx.lineWidth = dwelling ? 2 : 1;
+        ctx.strokeStyle = dwelling ? '#e2e8f0' : 'rgba(148, 163, 184, 0.55)';
+        ctx.strokeRect(x + 1, y + 1, width - 2, height - 2);
+        if (dwelling && this.dwellMs > 0) {
+          const progress = Math.min(1, this.constraintDwellElapsed / this.dwellMs);
+          ctx.fillStyle = '#38bdf8';
+          ctx.fillRect(x + 2, y + height - 5, (width - 4) * progress, 3);
+        }
+        ctx.fillStyle = dwelling ? '#f8fafc' : '#cbd5e1';
+      }
+      ctx.fillText(label, x + width / 2, y + height / 2);
+    });
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Shape picker (CREATE mode, row below the mode bar)                 */
+  /* ------------------------------------------------------------------ */
+
+  /** CSS-pixel hit test against the last rendered shape buttons. */
+  private hitShapeButton(px: number, py: number): number {
+    for (let i = 0; i < this.shapeRects.length; i++) {
+      const r = this.shapeRects[i];
+      if (px >= r.x && px <= r.x + r.width && py >= r.y && py <= r.y + r.height) return i;
+    }
+    return -1;
+  }
+
+  private requestShape(index: number): void {
+    const shape = this.shapes[index];
+    if (!shape || this.activeShapeId === shape.id) return;
+    this.activeShapeId = shape.id;
+    this.onShapeRequest?.(shape.id);
+  }
+
+  /**
+   * Finger interaction with the shape row: the same pointing-dwell model as
+   * the mode bar, active only while the row is visible (CREATE).
+   */
+  private updateShapeInteraction(frame: FrameEvent, view: ViewTransform, dt: number): void {
+    if (frame.mode !== 'create') {
+      this.shapeDwellTarget = -1;
+      this.shapeDwellElapsed = 0;
+      return;
+    }
+    let dwellTarget = -1;
+    for (const hand of frame.hands) {
+      if (!hand.pointing) continue; // only a pointing hand presses buttons
+      const tip = this.toCanvas(hand, INDEX_TIP, view);
+      const index = this.hitShapeButton(tip.x, tip.y);
+      if (index < 0) continue;
+      if (dwellTarget < 0) dwellTarget = index;
+    }
+
+    if (dwellTarget !== this.shapeDwellTarget) {
+      this.shapeDwellTarget = dwellTarget;
+      this.shapeDwellElapsed = 0;
+    } else if (dwellTarget >= 0 && dt > 0) {
+      this.shapeDwellElapsed += dt;
+    }
+    if (this.shapeDwellTarget >= 0 && this.shapeDwellElapsed >= this.dwellMs) {
+      this.requestShape(this.shapeDwellTarget);
+      this.shapeDwellTarget = -1;
+      this.shapeDwellElapsed = 0;
+    }
+  }
+
+  /**
+   * CREATE-mode shape picker: square icon buttons stacked vertically down
+   * the right edge, below the mode bar — mutually exclusive boxy toggles
+   * (inverted when active) with the same dwell progress bar as the mode
+   * buttons. Shapes without an `icon` fall back to their text label.
+   */
+  private drawShapeButtons(cssWidth: number): void {
+    this.shapeRects = [];
+    if (this.shapes.length === 0) return;
+    const ctx = this.ctx;
+    const scale = this.fontScale(cssWidth);
+    const { margin, gap, height: barHeight } = this.barMetrics(cssWidth);
+    const size = Math.max(24, Math.round(36 * scale));
+    const x = cssWidth - margin - size;
+    const top = margin + barHeight + gap;
+
+    this.shapes.forEach((shape, i) => {
+      const y = top + i * (size + gap);
+      this.shapeRects.push({ x, y, width: size, height: size });
+      const active = this.activeShapeId === shape.id;
+      let ink: string;
+      if (active) {
+        ctx.fillStyle = '#f8fafc'; // solid inverted background
+        ctx.fillRect(x, y, size, size);
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = '#0f172a';
+        ctx.strokeRect(x + 1, y + 1, size - 2, size - 2);
+        ctx.fillStyle = '#0284c7'; // high-contrast indicator bar
+        ctx.fillRect(x + 3, y + size - 5, size - 6, 3);
+        ink = '#0f172a';
+      } else {
+        const dwelling = this.shapeDwellTarget === i;
+        ctx.fillStyle = dwelling ? 'rgba(15, 23, 42, 0.85)' : 'rgba(15, 23, 42, 0.6)';
+        ctx.fillRect(x, y, size, size);
+        ctx.lineWidth = dwelling ? 2 : 1.5;
+        ctx.strokeStyle = dwelling ? '#e2e8f0' : 'rgba(148, 163, 184, 0.55)';
+        ctx.strokeRect(x + 1, y + 1, size - 2, size - 2);
+        if (dwelling && this.dwellMs > 0) {
+          const progress = Math.min(1, this.shapeDwellElapsed / this.dwellMs);
+          ctx.fillStyle = '#38bdf8';
+          ctx.fillRect(x + 2, y + size - 5, (size - 4) * progress, 3);
+        }
+        ink = dwelling ? '#f8fafc' : '#cbd5e1';
+      }
+      if (shape.icon) {
+        this.drawShapeIcon(shape.icon, x + size / 2, y + size / 2 - 1, size * 0.3, ink);
+      } else {
+        ctx.fillStyle = ink;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.font = `bold ${Math.max(7, Math.round(9 * scale))}px ui-monospace, monospace`;
+        ctx.fillText(shape.label.slice(0, 4), x + size / 2, y + size / 2);
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'alphabetic';
+      }
+    });
+  }
+
+  /** Line icon for a shape button, centered at (cx, cy) with half-size r. */
+  private drawShapeIcon(icon: OverlayShapeIcon, cx: number, cy: number, r: number, ink: string): void {
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.strokeStyle = ink;
+    ctx.lineWidth = Math.max(1.5, r * 0.14);
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    if (icon === 'cube' || icon === 'cuboid') {
+      // Isometric box: outer hexagon + the three edges meeting at the near
+      // top corner. The cuboid is stretched wide and squat.
+      const sx = icon === 'cuboid' ? 1.3 : 1;
+      const sy = icon === 'cuboid' ? 0.75 : 1;
+      const hx = r * 0.87 * sx;
+      const hy = r * 0.5 * sy;
+      const v = r * sy; // vertical edge length
+      const top = { x: cx, y: cy - hy - v / 2 };
+      const near = { x: cx, y: cy + hy - v / 2 };
+      const pts = [
+        top,
+        { x: cx + hx, y: cy - v / 2 },
+        { x: cx + hx, y: cy + v / 2 },
+        { x: cx, y: cy + hy + v / 2 },
+        { x: cx - hx, y: cy + v / 2 },
+        { x: cx - hx, y: cy - v / 2 },
+      ];
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (const p of pts.slice(1)) ctx.lineTo(p.x, p.y);
+      ctx.closePath();
+      ctx.moveTo(pts[5].x, pts[5].y);
+      ctx.lineTo(near.x, near.y);
+      ctx.lineTo(pts[1].x, pts[1].y);
+      ctx.moveTo(near.x, near.y);
+      ctx.lineTo(pts[3].x, pts[3].y);
+    } else if (icon === 'cylinder') {
+      const rx = r * 0.8;
+      const ry = r * 0.3;
+      const h = r * 1.3;
+      ctx.ellipse(cx, cy - h / 2, rx, ry, 0, 0, Math.PI * 2);
+      ctx.moveTo(cx - rx, cy - h / 2);
+      ctx.lineTo(cx - rx, cy + h / 2);
+      ctx.ellipse(cx, cy + h / 2, rx, ry, 0, Math.PI, 0, true);
+      ctx.lineTo(cx + rx, cy - h / 2);
+    } else {
+      // Sphere: outline + equator and meridian ellipses.
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.moveTo(cx + r, cy);
+      ctx.ellipse(cx, cy, r, r * 0.35, 0, 0, Math.PI * 2);
+      ctx.moveTo(cx, cy - r);
+      ctx.ellipse(cx, cy, r * 0.35, r, 0, -Math.PI / 2, Math.PI * 1.5);
+    }
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  /** Rounded HUD panel (bottom-left, always inside the visible panel) with mode, state, FPS, hands and live metrics. */
+  private drawHud(frame: FrameEvent, cssWidth: number, cssHeight: number): void {
     const ctx = this.ctx;
     const lines: string[] = [];
+    lines.push(`MODE: ${frame.mode.toUpperCase()}`);
     lines.push(`STATE: ${frame.state}`);
     lines.push(`FPS: ${frame.fps.toFixed(1)}`);
     lines.push(
@@ -325,6 +1353,10 @@ export class DebugOverlay {
       const turn = ((frame.metrics.zoomAngle ?? 0) * 180) / Math.PI;
       lines.push(`anchor: ${frame.metrics.zoomAnchor}  turn: ${turn.toFixed(0)}°`);
     }
+    if (frame.metrics.selectRotation !== null) {
+      const rotate = ((frame.metrics.selectRotation * 180) / Math.PI).toFixed(0);
+      lines.push(`rotate: ${rotate}°`);
+    }
 
     const scale = this.fontScale(cssWidth);
     const fontSize = Math.round(13 * scale);
@@ -337,7 +1369,9 @@ export class DebugOverlay {
     const panelHeight = lines.length * lineHeight + padding * 2;
 
     const x = 12;
-    const y = 12;
+    // The mode buttons own the top edge, so the stats panel is anchored to
+    // the bottom-left corner (clamped to stay inside the visible panel).
+    const y = Math.max(12, cssHeight - panelHeight - 12);
     ctx.fillStyle = 'rgba(3, 7, 18, 0.78)';
     ctx.strokeStyle = 'rgba(148, 163, 184, 0.22)';
     ctx.lineWidth = 1;

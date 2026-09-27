@@ -224,6 +224,40 @@ button:disabled {
   border-radius: 6px;
 }
 
+/* Mouse-resize grip for the camera thumbnail (bottom-right corner of the
+   video stage): diagonal hatch clipped to a corner triangle. The overlay
+   canvas beneath keeps pointer events for its own buttons — the grip sits on
+   top and owns the drag (pointer capture keeps it even outside the card). */
+.thumb-resize {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  z-index: 5;
+  width: 24px;
+  height: 24px;
+  cursor: nwse-resize;
+  touch-action: none; /* the grip is a pointer drag, not a scroll */
+  background: repeating-linear-gradient(
+    135deg,
+    rgba(15, 23, 42, 0.45) 0 1.5px,
+    transparent 1.5px 5px
+  );
+  clip-path: polygon(100% 0, 100% 100%, 0 100%);
+}
+
+.thumb-resize:hover {
+  background: repeating-linear-gradient(
+    135deg,
+    rgba(2, 132, 199, 0.9) 0 1.5px,
+    transparent 1.5px 5px
+  );
+}
+
+/* While dragging: the card tracks the cursor 1:1 (no width transition). */
+.vision-thumb--resizing {
+  transition: none;
+}
+
 /* ---- Vision stage (webcam + 2D overlay) ---- */
 .stage {
   position: relative;
@@ -246,7 +280,10 @@ button:disabled {
   inset: 0;
   width: 100%;
   height: 100%;
-  pointer-events: none;
+  /* Receives mouse events for the in-vision mode switcher buttons
+     (DebugOverlay swaps the cursor to a pointer when hovering one). */
+  pointer-events: auto;
+  cursor: default;
   object-fit: cover;
 }
 
@@ -304,128 +341,9 @@ button:disabled {
   box-shadow: 0 0 6px rgba(147, 51, 234, 0.45);
 }
 
-/* ---- Voice: state badge in the thumbnail header ---- */
-.voice-pill {
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 2px 8px;
-  border-radius: 999px;
-  font-size: 9px;
-  font-weight: 600;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  white-space: nowrap;
-  color: var(--text-dim);
-  background: rgba(100, 116, 139, 0.12);
-  transition: color 150ms ease, background 150ms ease;
-}
-
-.voice-pill::before {
-  content: '';
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: currentColor;
-}
-
-.voice-pill[data-state='listening'] {
-  color: #15803d;
-  background: rgba(22, 163, 74, 0.15);
-}
-
-/* Pulse only while the mic is actually open — the one state worth noticing. */
-.voice-pill[data-state='listening']::before {
-  animation: voice-pulse 1.1s ease-in-out infinite;
-}
-
-.voice-pill[data-state='thinking'] {
-  color: #b45309;
-  background: rgba(217, 119, 6, 0.15);
-}
-
-.voice-pill[data-state='speaking'] {
-  color: #1d4ed8;
-  background: rgba(37, 99, 235, 0.15);
-}
-
-@keyframes voice-pulse {
-  0%,
-  100% {
-    opacity: 1;
-    transform: scale(1);
-  }
-  50% {
-    opacity: 0.45;
-    transform: scale(0.72);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .voice-pill[data-state='listening']::before {
-    animation: none;
-  }
-}
-
-/* ---- Voice: caption strip along the bottom of the viewport ---- */
-.voice-captions {
-  position: absolute;
-  left: 50%;
-  bottom: 20px;
-  z-index: 20;
-  transform: translate(-50%, 8px);
-  max-width: min(680px, calc(100% - 48px));
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 10px 18px;
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.88);
-  backdrop-filter: blur(12px) saturate(140%);
-  -webkit-backdrop-filter: blur(12px) saturate(140%);
-  border: 1px solid rgba(15, 23, 42, 0.1);
-  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.16);
-  opacity: 0;
-  pointer-events: none; /* never steals a drag meant for the viewport */
-  transition: opacity 200ms ease, transform 200ms ease;
-}
-
-.voice-captions.visible {
-  opacity: 1;
-  transform: translate(-50%, 0);
-}
-
-.voice-caption {
-  margin: 0;
-  text-align: center;
-  line-height: 1.45;
-  overflow-wrap: anywhere;
-}
-
-.voice-caption:empty {
-  display: none;
-}
-
-.voice-caption.heard {
-  font-size: 11px;
-  color: var(--text-dim);
-}
-
-/* Dimmer while the transcript is still changing. */
-.voice-caption.heard.partial {
-  opacity: 0.6;
-  font-style: italic;
-}
-
-.voice-caption.reply {
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--text);
-}
-
-.voice-caption.reply.error {
-  color: #b91c1c;
+.status[data-state='SELECTING']::before {
+  background: #0891b2;
+  box-shadow: 0 0 6px rgba(8, 145, 178, 0.45);
 }
 
 /* ---- CAD viewport (Three.js canvas fills the panel) ---- */
@@ -444,6 +362,188 @@ button:disabled {
   width: 100%;
   height: 100%;
   display: block;
+}
+
+/* ---- Floating color wheel (SELECT-mode selection repaint) ---- */
+.color-wheel {
+  position: absolute;
+  /* Below the camera thumbnail (z-index 30) — the control surface wins. */
+  z-index: 20;
+  border-radius: 50%;
+  /* No overflow clip: the canvas paints its own soft circular rim, so the
+     hover cursor's countdown ring may overhang the disc edge. */
+  box-shadow:
+    0 6px 20px rgba(15, 23, 42, 0.28),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.9);
+  opacity: 0;
+  transform: translate(-50%, -50%) scale(0.9);
+  transition: opacity 140ms ease, transform 140ms ease;
+  /* Display-only overlay: gestures (not the mouse) drive the wheel. */
+  pointer-events: none;
+}
+
+.color-wheel--visible {
+  opacity: 1;
+  transform: translate(-50%, -50%) scale(1);
+}
+
+/* Opt out of the `.viewport canvas` stretch rule; sizes come inline. */
+.color-wheel canvas {
+  position: static;
+  display: block;
+}
+
+/* Live hover cursor: the pointing hand's index fingertip on the disc, with
+   the timed hover lock's countdown ring around it. */
+.color-wheel-cursor {
+  position: absolute;
+  width: 28px;
+  height: 28px;
+  transform: translate(-50%, -50%);
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.color-wheel-cursor--visible {
+  opacity: 1;
+}
+
+.color-wheel-ring {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.color-wheel-ring-track {
+  fill: none;
+  stroke: rgba(15, 23, 42, 0.35);
+  stroke-width: 3;
+}
+
+/* Countdown arc: stroke-dashoffset is driven from TypeScript (pathLength 100). */
+.color-wheel-ring-fill {
+  fill: none;
+  stroke: #ffffff;
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-dasharray: 100;
+  stroke-dashoffset: 100;
+  transform: rotate(-90deg);
+  transform-origin: center;
+}
+
+.color-wheel-dot {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: #ffffff;
+  border: 2px solid #ffffff;
+  box-shadow: 0 0 0 1.5px rgba(15, 23, 42, 0.6);
+  transform: translate(-50%, -50%);
+}
+
+/* ---- Floating selection action HUD (SELECT mode Delete button) ---- */
+.selection-menu {
+  position: absolute;
+  /* Below the camera thumbnail (z-index 30) — the control surface wins. */
+  z-index: 20;
+  transform: translate(-50%, -50%);
+  opacity: 0;
+  transition: opacity 140ms ease;
+  pointer-events: none;
+}
+
+.selection-menu--visible {
+  opacity: 1;
+}
+
+.selection-menu-delete {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 11px;
+  font-size: 12px;
+  border-radius: 7px;
+  border: 1px solid rgba(185, 28, 28, 0.35);
+  background: rgba(255, 255, 255, 0.92);
+  color: #b91c1c;
+  box-shadow: 0 3px 12px rgba(15, 23, 42, 0.18);
+  /* The one mouse-interactive piece of the selection HUD. */
+  pointer-events: auto;
+}
+
+.selection-menu-delete:hover {
+  background: #fef2f2;
+  border-color: #b91c1c;
+  color: #dc2626;
+}
+
+/* ---- Modal confirm dialog (destructive action safety) ---- */
+.confirm-dialog {
+  position: absolute;
+  inset: 0;
+  /* Above the camera thumbnail (z-index 30): a modal confirmation outranks
+     every floating surface. */
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.confirm-dialog--open {
+  visibility: visible;
+  pointer-events: auto;
+}
+
+.confirm-dialog-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.32);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+}
+
+.confirm-dialog-card {
+  position: relative;
+  max-width: 340px;
+  margin: 16px;
+  padding: 18px 20px;
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(12px) saturate(140%);
+  -webkit-backdrop-filter: blur(12px) saturate(140%);
+  border: 1px solid rgba(15, 23, 42, 0.1);
+  border-radius: 12px;
+  box-shadow: 0 12px 40px rgba(15, 23, 42, 0.28);
+}
+
+.confirm-dialog-message {
+  margin: 0 0 14px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.confirm-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.confirm-dialog-confirm {
+  color: #b91c1c;
+  border-color: rgba(185, 28, 28, 0.45);
+}
+
+.confirm-dialog-confirm:hover {
+  color: #dc2626;
+  background: #fef2f2;
+  border-color: #b91c1c;
 }
 
 /* ---- Footer ---- */

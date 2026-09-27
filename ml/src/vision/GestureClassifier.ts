@@ -6,10 +6,19 @@
  *      distance (EMA + hysteresis), fist detection (all fingers folded into
  *      the palm + thumb tucked, with enter/hold hysteresis), palm center.
  *   2. Lost-hand finalization (grace frames, then synthetic release events).
- *   3. State machine: IDLE <-> DRAWING_BASE <-> EXTRUDING <-> ORBITING <-> ZOOMING.
- *      One closed fist = ORBITING (camera navigation deltas); two closed
- *      fists = ZOOMING: the steadier fist is the anchor (pivot) and the other
- *      fist's motion relative to it drives zoom (distance) and turn (angle).
+ *   3. State machine: IDLE <-> DRAWING_BASE <-> EXTRUDING <-> ORBITING <-> ZOOMING
+ *      (+ SELECTING in select mode). One closed fist = ORBITING (camera
+ *      navigation deltas); two closed fists = ZOOMING: the steadier fist is
+ *      the anchor (pivot) and the other fist's motion relative to it drives
+ *      zoom (distance) and turn (angle).
+ *
+ * The classifier is mode-partitioned (`setMode`, VIEW / SELECT / CREATE):
+ * VIEW keeps pinches inert (pure navigation), SELECT maps a held pinch to the
+ * SELECTING state (mesh picking, no drawing / extrusion) — and while that
+ * pinch is held, an open palm on the other hand emits `select_rotate` yaw
+ * deltas for the selected object — and CREATE keeps the full build gesture
+ * set. Camera gestures (fist orbit / two-fist zoom) stay live in every
+ * mode.
  *
  * The classifier is a pure function of its inputs: `process()` returns the
  * events to emit and never touches the DOM, which keeps it unit-testable.
@@ -22,6 +31,7 @@ import {
   frameAspect,
   measureHandShape,
   measureWristRoll,
+  palmAzimuth,
   palmCenter2D,
   wrapAngle,
   type HandShape,
@@ -34,6 +44,7 @@ import type {
   HandFrame,
   HandSnapshot,
   Handedness,
+  InteractionMode,
   Vec2,
   Vec3,
 } from './types';
@@ -97,15 +108,58 @@ export interface GestureClassifierOptions {
    */
   zoomAnchorSwitchRatio?: number;
   /**
-   * Two fists: cumulative angle (radians) the moving fist must circle around
-   * the anchor before turn deltas are reported — keeps a straight pull
-   * (zoom) from also rotating the view.
+   * Two fists: cumulative angle (radians) the two fists must turn around
+   * each other (steering-wheel) before turn deltas are reported — keeps a
+   * straight pull (zoom) from also rotating the view.
    */
   zoomTurnEngageAngle?: number;
+  /**
+   * Two fists: a fist counts as moving when its smoothed palm speed exceeds
+   * this (units of video width per frame). Both moving → zoom / turn; only
+   * one moving → that fist moves the camera like a single fist; neither →
+   * nothing.
+   */
+  zoomMoveSpeed?: number;
   /** Frames an orbiting / zooming hand may open (palm drag) before the gesture ends. */
   orbitOpenPalmGraceFrames?: number;
   /** Frames a hand may vanish before its gesture state is finalized. */
   handLossGraceFrames?: number;
+  /**
+   * A fingertip counts as extended when `dist(tip, wrist) >
+   * openPalmExtensionRatio * dist(pip, wrist)` — the fingertip beyond its
+   * own PIP joint (open-palm detection for the SELECT-mode rotation
+   * gesture). Unitless ratio.
+   */
+  openPalmExtensionRatio?: number;
+  /** Extended fingertips (of index / middle / ring / pinky) required for an open palm. */
+  openPalmMinExtendedFingers?: number;
+  /**
+   * The open-palm hand must hold the thumb out: thumb-tip distance to the
+   * nearest index / middle / ring knuckle above `openPalmThumbTuckRatio * palmSize`
+   * (wrist → middle MCP) — the inverse of `fistThumbTuckRatio`.
+   */
+  openPalmThumbTuckRatio?: number;
+  /**
+   * Pointing hand (index finger up, others curled) — the only pose that
+   * presses overlay UI buttons. The index counts as up when
+   * `dist(tip, wrist) > pointingIndexRatio * dist(mcp, wrist)`.
+   */
+  pointingIndexRatio?: number;
+  /**
+   * Middle / ring / pinky count as curled when
+   * `dist(tip, wrist) < pointingCurlRatio * dist(mcp, wrist)`.
+   */
+  pointingCurlRatio?: number;
+  /** Threshold relaxation while a pointing pose is held (hysteresis). */
+  pointingHoldSlack?: number;
+  /** Consecutive frames (pointing / not pointing) required to enter / leave the pose. */
+  pointingDebounceFrames?: number;
+  /**
+   * Initial interaction mode (VIEW / SELECT / CREATE). Defaults to
+   * `'create'` — the full legacy gesture set; switch at runtime with
+   * `setMode()`.
+   */
+  initialMode?: InteractionMode;
 }
 
 /** Per-hand temporal state carried across frames. */
@@ -127,6 +181,10 @@ interface HandTrack {
   fistActive: boolean;
   fistFrames: number;
   openFrames: number;
+  /** Pointing pose (index up, others curled; debounced) — presses overlay UI. */
+  pointingActive: boolean;
+  /** Consecutive frames disagreeing with `pointingActive` (debounce counter). */
+  pointingFlipFrames: number;
   /** Palm center (device space) used for orbit deltas. */
   palmCenter: Vec3;
   prevPalmCenter: Vec3;
@@ -169,14 +227,24 @@ export class GestureClassifier {
       | 'rollDeadzone'
       | 'zoomAnchorSwitchRatio'
       | 'zoomTurnEngageAngle'
+      | 'zoomMoveSpeed'
       | 'fistEnterFrames'
       | 'fistExitFrames'
       | 'orbitOpenPalmGraceFrames'
       | 'handLossGraceFrames'
+      | 'openPalmExtensionRatio'
+      | 'openPalmMinExtendedFingers'
+      | 'openPalmThumbTuckRatio'
+      | 'pointingIndexRatio'
+      | 'pointingCurlRatio'
+      | 'pointingHoldSlack'
+      | 'pointingDebounceFrames'
     >
   > & { pinchDistanceSmoothing: number | null };
 
   private state: GestureState = 'IDLE';
+  /** Active interaction mode (VIEW / SELECT / CREATE). */
+  private mode: InteractionMode = 'create';
   /** Straightens the one-fist camera path; `null` = raw deltas. */
   private readonly cameraPath: PathStraightener | null;
   /** Raw cumulative palm path since the one-fist gesture started. */
@@ -192,6 +260,8 @@ export class GestureClassifier {
   private zoomAnchor: Handedness | null = null;
   private zoomAngleTotal = 0;
   private zoomTurnEngaged = false;
+  /** Two-fist sub-gesture last frame: both fists zooming, or one moving the camera. */
+  private zoomSubMode: 'zoom' | 'move' | null = null;
   private lastZoomDistance: number | null = null;
   private lastZoomScale: number | null = null;
 
@@ -212,6 +282,20 @@ export class GestureClassifier {
   private orbitRollTotal = 0;
   private rollEngaged = false;
 
+  /**
+   * Live open-palm rotation gesture (SELECT mode): while exactly one hand
+   * holds a pinch, the other hand's open-palm tilt drives the selected
+   * object's yaw. `delta` is the cumulative unwrapped palm rotation since
+   * the gesture began (anchored, so it always restarts at 0).
+   */
+  private rotation: {
+    pinchHand: Handedness;
+    palmHand: Handedness;
+    delta: number;
+    /** Previous raw palm azimuth, for frame-to-frame unwrapping. */
+    prevAngle: number;
+  } | null = null;
+
   constructor(options: GestureClassifierOptions = {}) {
     this.options = {
       pinchStartThreshold: options.pinchStartThreshold ?? 0.045,
@@ -228,17 +312,31 @@ export class GestureClassifier {
       rollDeadzone: options.rollDeadzone ?? 0.003,
       zoomAnchorSwitchRatio: options.zoomAnchorSwitchRatio ?? 0.5,
       zoomTurnEngageAngle: options.zoomTurnEngageAngle ?? 0.12,
+      zoomMoveSpeed: options.zoomMoveSpeed ?? 0.004,
       fistEnterFrames: options.fistEnterFrames ?? 2,
       fistExitFrames: options.fistExitFrames ?? 2,
       orbitOpenPalmGraceFrames: options.orbitOpenPalmGraceFrames ?? 10,
       handLossGraceFrames: options.handLossGraceFrames ?? 3,
+      openPalmExtensionRatio: options.openPalmExtensionRatio ?? 1.0,
+      openPalmMinExtendedFingers: options.openPalmMinExtendedFingers ?? 4,
+      openPalmThumbTuckRatio: options.openPalmThumbTuckRatio ?? 0.6,
+      pointingIndexRatio: options.pointingIndexRatio ?? 1.5,
+      pointingCurlRatio: options.pointingCurlRatio ?? 1.2,
+      pointingHoldSlack: options.pointingHoldSlack ?? 0.15,
+      pointingDebounceFrames: options.pointingDebounceFrames ?? 2,
     };
     this.cameraPath =
       options.cameraPath === null ? null : new PathStraightener(options.cameraPath);
+    this.mode = options.initialMode ?? 'create';
   }
 
   get currentState(): GestureState {
     return this.state;
+  }
+
+  /** Active interaction mode (VIEW / SELECT / CREATE). */
+  get currentMode(): InteractionMode {
+    return this.mode;
   }
 
   reset(): void {
@@ -259,7 +357,60 @@ export class GestureClassifier {
     this.lastOrbitDelta = null;
     this.orbitRollTotal = 0;
     this.rollEngaged = false;
+    this.rotation = null;
     this.resetCameraPath();
+  }
+
+  /**
+   * Switch the interaction mode (VIEW / SELECT / CREATE). Any in-flight pinch
+   * is force-released (synthetic `pinch_end`) and pinch-driven states fall
+   * back to IDLE, so a mode switch never leaves a build gesture running —
+   * camera gestures (orbit / zoom) are unaffected. Switching to the current
+   * mode is a no-op. The mode survives `reset()`.
+   * @returns the events to emit (the caller dispatches them).
+   */
+  setMode(mode: InteractionMode, timestamp: number = performance.now()): GestureSignalEvent[] {
+    if (mode === this.mode) return [];
+    const events: GestureSignalEvent[] = [];
+    this.abortPinches(timestamp, events);
+    this.endRotation('mode switch', timestamp, events);
+    if (
+      this.state === 'DRAWING_BASE' ||
+      this.state === 'EXTRUDING' ||
+      this.state === 'SELECTING'
+    ) {
+      if (this.state === 'EXTRUDING') this.clearExtrudeReference();
+      this.setState('IDLE', 'mode switched', timestamp, events);
+    }
+    events.push({ type: 'mode_change', timestamp, from: this.mode, to: mode });
+    this.mode = mode;
+    return events;
+  }
+
+  /**
+   * Force-release every active pinch (mode switches). Synthetic `pinch_end`s
+   * are emitted only when the outgoing mode emitted their `pinch_start`.
+   */
+  private abortPinches(timestamp: number, events: GestureSignalEvent[]): void {
+    for (const track of this.tracks.values()) {
+      if (!track.pinchActive) continue;
+      const startPos = track.pinchStartPos ?? track.lastPinchCenter;
+      if (startPos && this.mode !== 'view') {
+        const endPos = track.lastPinchCenter ?? startPos;
+        events.push({
+          type: 'pinch_end',
+          timestamp,
+          hand: track.handedness,
+          startPos,
+          endPos,
+          delta: subtract3(endPos, startPos),
+        });
+      }
+      track.pinchActive = false;
+      track.pinchConsumed = false;
+      track.pinchStartPos = null;
+      track.lastPinchCenter = null;
+    }
   }
 
   private resetCameraPath(): void {
@@ -300,6 +451,8 @@ export class GestureClassifier {
         fistActive: false,
         fistFrames: 0,
         openFrames: 0,
+        pointingActive: false,
+        pointingFlipFrames: 0,
         palmCenter,
         prevPalmCenter: palmCenter,
         palm2D: palmCenter2D(hand),
@@ -335,6 +488,7 @@ export class GestureClassifier {
       const shape = measureHandShape(hand);
       this.updatePinch(track, hand, shape, timestamp, events);
       this.updateFist(track, shape);
+      this.updatePointing(track, shape);
       // Reads `missedFrames` to avoid jump deltas on reappearance; reset after.
       this.updatePalmCenter(track, hand);
       track.missedFrames = 0;
@@ -370,6 +524,10 @@ export class GestureClassifier {
    * A pinch never engages while the hand is (becoming) a fist or the index
    * finger is folded into the palm — a thumb resting on a closed fist is not
    * a pinch.
+   *
+   * Pinch tracking always runs (metrics / the overlay need it), but
+   * in VIEW mode no `pinch_start` / `pinch_end` events are emitted — pinches
+   * are inert for pure navigation.
    */
   private updatePinch(
     track: HandTrack,
@@ -396,13 +554,15 @@ export class GestureClassifier {
         track.pinchActive = true;
         track.pinchStartPos = center;
         track.lastPinchCenter = center;
-        events.push({
-          type: 'pinch_start',
-          timestamp,
-          hand: track.handedness,
-          position: center,
-          distance: dist,
-        });
+        if (this.mode !== 'view') {
+          events.push({
+            type: 'pinch_start',
+            timestamp,
+            hand: track.handedness,
+            position: center,
+            distance: dist,
+          });
+        }
       }
     } else {
       track.lastPinchCenter = center;
@@ -411,14 +571,16 @@ export class GestureClassifier {
         track.pinchConsumed = false;
         const startPos = track.pinchStartPos ?? center;
         const endPos = center;
-        events.push({
-          type: 'pinch_end',
-          timestamp,
-          hand: track.handedness,
-          startPos,
-          endPos,
-          delta: subtract3(endPos, startPos),
-        });
+        if (this.mode !== 'view') {
+          events.push({
+            type: 'pinch_end',
+            timestamp,
+            hand: track.handedness,
+            startPos,
+            endPos,
+            delta: subtract3(endPos, startPos),
+          });
+        }
         track.pinchStartPos = null;
         track.lastPinchCenter = null;
       }
@@ -470,6 +632,36 @@ export class GestureClassifier {
     }
   }
 
+  /**
+   * Pointing pose: the index finger up (tip well beyond its knuckle), the
+   * middle / ring / pinky curled toward the palm, and no pinch (thumb away
+   * from the index tip). Ratio-based like the fist test, so size / distance /
+   * rotation invariant; thresholds relax by `pointingHoldSlack` while held,
+   * and `pointingDebounceFrames` agreeing frames are needed to flip.
+   */
+  private updatePointing(track: HandTrack, shape: HandShape): void {
+    const slack = track.pointingActive ? this.options.pointingHoldSlack : 0;
+    const [index, middle, ring, pinky] = shape.foldRatios;
+    const indexUp = index > this.options.pointingIndexRatio - slack;
+    const curlLimit = this.options.pointingCurlRatio + slack;
+    const othersCurled = middle < curlLimit && ring < curlLimit && pinky < curlLimit;
+    const pointing =
+      indexUp &&
+      othersCurled &&
+      !track.pinchActive &&
+      shape.thumbIndexDistance > this.options.pinchReleaseThreshold;
+
+    if (pointing === track.pointingActive) {
+      track.pointingFlipFrames = 0;
+      return;
+    }
+    track.pointingFlipFrames++;
+    if (track.pointingFlipFrames >= this.options.pointingDebounceFrames) {
+      track.pointingActive = pointing;
+      track.pointingFlipFrames = 0;
+    }
+  }
+
   /** Track the palm center (device space) and wrist roll used for orbit deltas. */
   private updatePalmCenter(track: HandTrack, hand: HandFrame): void {
     const center = centroid(PALM_INDICES.map((i) => hand.landmarks[i].device));
@@ -491,7 +683,7 @@ export class GestureClassifier {
   private finalizeTrack(track: HandTrack, timestamp: number, events: GestureSignalEvent[]): void {
     if (track.pinchActive) {
       const startPos = track.pinchStartPos ?? track.lastPinchCenter;
-      if (startPos) {
+      if (startPos && this.mode !== 'view') {
         const endPos = track.lastPinchCenter ?? startPos;
         events.push({
           type: 'pinch_end',
@@ -526,7 +718,12 @@ export class GestureClassifier {
     events: GestureSignalEvent[]
   ): void {
     // Active pinch tracks, including hands absent within the loss-grace window.
-    let activePinches = [...this.tracks.values()].filter((t) => t.pinchActive && !t.pinchConsumed);
+    // VIEW mode: pinches are inert — treated as absent, so navigation never
+    // enters a build state and a pinching hand cannot veto fist gestures.
+    let activePinches =
+      this.mode === 'view'
+        ? []
+        : [...this.tracks.values()].filter((t) => t.pinchActive && !t.pinchConsumed);
 
     // Two-hand build: the lower pinch released while the upper one is still
     // held ends the extrusion as a flat build; the upper pinch is consumed.
@@ -549,7 +746,7 @@ export class GestureClassifier {
       const hand = presentHands.get(this.orbitHand);
       const endReason = !track
         ? 'orbit hand lost'
-        : track.pinchActive
+        : this.mode !== 'view' && track.pinchActive
           ? 'pinch started while orbiting'
           : null;
 
@@ -592,12 +789,30 @@ export class GestureClassifier {
       this.handleZoom(presentHands, timestamp, events);
     }
 
-    // --- Pinch-driven states: DRAWING_BASE / EXTRUDING. ---
-    if (activePinches.length >= 2) {
+    // --- Pinch-driven states, partitioned by the interaction mode. ---
+    if (this.mode === 'select') {
+      // SELECT: pinches pick / drag meshes — a dedicated SELECTING state,
+      // never drawing or extruding. Each active pinch keeps reporting drag
+      // deltas so the app can follow the grabbed mesh.
+      if (activePinches.length >= 1) {
+        if (this.state !== 'SELECTING') {
+          this.setState('SELECTING', 'pinch engaged (select mode)', timestamp, events);
+        }
+        for (const track of activePinches) {
+          if (presentHands.has(track.handedness)) {
+            this.emitPinchDrag(track, timestamp, events);
+          }
+        }
+      } else if (this.state === 'SELECTING') {
+        this.setState('IDLE', 'pinch released', timestamp, events);
+      }
+      // Secondary-hand open-palm rotation of the pinched selection.
+      this.updateOpenPalmRotation(presentHands, activePinches, timestamp, events);
+    } else if (activePinches.length >= 2) {
       this.handleDualHandExtrude(activePinches, presentHands, timestamp, events);
     } else if (activePinches.length === 1) {
       this.handleSinglePinch(activePinches[0], presentHands, timestamp, events);
-    } else if (this.state === 'DRAWING_BASE') {
+    } else if (this.state === 'DRAWING_BASE' || this.state === 'SELECTING') {
       this.setState('IDLE', 'pinch released', timestamp, events);
     } else if (this.state === 'EXTRUDING') {
       events.push({
@@ -657,16 +872,21 @@ export class GestureClassifier {
   }
 
   /**
-   * Two-fist navigation around an anchor. The steadier fist (lower smoothed
-   * speed, with `zoomAnchorSwitchRatio` hysteresis) is the pivot; only the
-   * other fist's motion relative to it counts, so the anchor's own jitter is
-   * ignored:
-   *   - distance change (mover toward / away from the anchor) → `deltaScale`;
-   *   - angle change (mover circling the anchor, + = counter-clockwise on
-   *     screen) → `deltaAngle`, after `zoomTurnEngageAngle` has accumulated.
-   * Ends when a pinch starts, a hand is lost, or one hand stays open longer
-   * than `orbitOpenPalmGraceFrames`. The first frame (and the first frame
-   * after a hand reappears) only records the reference, so there is no jump.
+   * Two-fist navigation. Each fist counts as moving when its smoothed palm
+   * speed exceeds `zoomMoveSpeed`:
+   *   - **both moving** → zoom / turn from the two fists relative to each
+   *     other: the change in the gap between them → `deltaScale`, and their
+   *     rotation around each other (steering-wheel, + = counter-clockwise on
+   *     screen) → `deltaAngle`, after `zoomTurnEngageAngle` has accumulated;
+   *   - **only one moving** → that fist moves the camera exactly like a single
+   *     fist (straightened `orbit` deltas); the still fist does nothing, so
+   *     moving one hand never zooms;
+   *   - **neither moving** → nothing.
+   * The steadier fist is still reported as the `anchor` (with
+   * `zoomAnchorSwitchRatio` hysteresis) for the HUD. Ends when a pinch
+   * starts, a hand is lost, or one hand stays open longer than
+   * `orbitOpenPalmGraceFrames`. The first frame (and the first frame after
+   * a hand reappears) only records the reference, so there is no jump.
    */
   private handleZoom(
     presentHands: Map<Handedness, HandFrame>,
@@ -674,7 +894,7 @@ export class GestureClassifier {
     events: GestureSignalEvent[]
   ): void {
     const tracks = [...this.tracks.values()];
-    if (tracks.some((t) => t.pinchActive)) {
+    if (this.mode !== 'view' && tracks.some((t) => t.pinchActive)) {
       this.endZoom('pinch started while zooming', timestamp, events);
       return;
     }
@@ -700,12 +920,11 @@ export class GestureClassifier {
 
     const [a, b] = present;
     const anchor = this.pickAnchor(a, b);
-    const mover = anchor === a ? b : a;
-    const pivot = anchor.palm2D;
-    const prevX = mover.prevPalm2D.x - pivot.x;
-    const prevY = mover.prevPalm2D.y - pivot.y;
-    const nowX = mover.palm2D.x - pivot.x;
-    const nowY = mover.palm2D.y - pivot.y;
+    // Gap vector a → b now and last frame (aspect-corrected, mirrored, Y up).
+    const nowX = b.palm2D.x - a.palm2D.x;
+    const nowY = b.palm2D.y - a.palm2D.y;
+    const prevX = b.prevPalm2D.x - a.prevPalm2D.x;
+    const prevY = b.prevPalm2D.y - a.prevPalm2D.y;
     const distance = Math.hypot(nowX, nowY);
     const prevDistance = Math.hypot(prevX, prevY);
     if (distance <= 1e-6 || prevDistance <= 1e-6) return;
@@ -718,6 +937,37 @@ export class GestureClassifier {
       return;
     }
 
+    const aMoving = a.speedEma > this.options.zoomMoveSpeed;
+    const bMoving = b.speedEma > this.options.zoomMoveSpeed;
+
+    if (aMoving !== bMoving) {
+      // Only one fist moving: it moves the camera like a single fist.
+      if (this.zoomSubMode !== 'move') this.resetCameraPath();
+      this.zoomSubMode = 'move';
+      const moving = aMoving ? a : b;
+      const raw = subtract3(moving.palmCenter, moving.prevPalmCenter);
+      const delta = this.straightenCameraDelta({ x: raw.x, y: raw.y });
+      this.lastOrbitDelta = { x: delta.x, y: delta.y };
+      events.push({
+        type: 'orbit',
+        timestamp,
+        hand: moving.handedness,
+        deltaX: delta.x,
+        deltaY: delta.y,
+        deltaRoll: 0,
+      });
+      // Keep the zoom reference current so a later two-fist zoom has no jump.
+      this.lastZoomDistance = distance;
+      return;
+    }
+    if (!aMoving) {
+      this.zoomSubMode = null; // both still: nothing to do
+      this.lastZoomDistance = distance;
+      return;
+    }
+
+    // Both fists moving: zoom by their gap, turn by their rotation.
+    this.zoomSubMode = 'zoom';
     const deltaScale = distance / prevDistance;
     const scaleFactor = distance / (this.zoomReferenceDistance ?? distance);
     const rawAngle = wrapAngle(Math.atan2(nowY, nowX) - Math.atan2(prevY, prevX));
@@ -770,6 +1020,7 @@ export class GestureClassifier {
     this.zoomAnchor = null;
     this.zoomAngleTotal = 0;
     this.zoomTurnEngaged = false;
+    this.zoomSubMode = null;
     this.lastZoomDistance = null;
     this.lastZoomScale = null;
   }
@@ -889,19 +1140,114 @@ export class GestureClassifier {
     if (this.state !== 'DRAWING_BASE') {
       this.setState('DRAWING_BASE', 'index pinch engaged', timestamp, events);
     }
+    this.emitPinchDrag(track, timestamp, events);
+  }
+
+  /** Emit a `pinch_drag` for an active pinch (drawing or selecting). */
+  private emitPinchDrag(track: HandTrack, timestamp: number, events: GestureSignalEvent[]): void {
     const startPos = track.pinchStartPos ?? track.lastPinchCenter;
     const currentPos = track.lastPinchCenter;
-    if (startPos && currentPos) {
-      events.push({
-        type: 'pinch_drag',
-        timestamp,
-        hand: track.handedness,
-        currentPos,
-        startPos,
-        delta: subtract3(currentPos, startPos),
-        distance: track.pinchDistance,
-      });
+    if (!startPos || !currentPos) return;
+    events.push({
+      type: 'pinch_drag',
+      timestamp,
+      hand: track.handedness,
+      currentPos,
+      startPos,
+      delta: subtract3(currentPos, startPos),
+      distance: track.pinchDistance,
+    });
+  }
+
+  /**
+   * Secondary-hand open-palm rotation (SELECT mode): while exactly one hand
+   * holds a pinch (the dominant hand picking / dragging an object) and the
+   * other hand shows an open palm, the palm's tilt — the wrist → middle-MCP
+   * azimuth — drives the selected object's yaw. Emits `select_rotate` with
+   * the cumulative unwrapped angle since the gesture began (anchored, so
+   * the host applies `rotation.y = initialRotation + deltaRotation`);
+   * `select_rotate_end` fires when the pinch releases, the palm closes /
+   * starts pinching, the hand is lost or the mode switches. Requires SELECT
+   * mode: elsewhere the same poses route to build / navigation gestures.
+   */
+  private updateOpenPalmRotation(
+    presentHands: Map<Handedness, HandFrame>,
+    activePinches: HandTrack[],
+    timestamp: number,
+    events: GestureSignalEvent[]
+  ): void {
+    const pinchHand =
+      activePinches.length === 1 && presentHands.has(activePinches[0].handedness)
+        ? activePinches[0].handedness
+        : null;
+    let palmHand: HandFrame | null = null;
+    if (pinchHand) {
+      for (const hand of presentHands.values()) {
+        if (hand.handedness !== pinchHand && this.isOpenPalm(hand)) {
+          palmHand = hand;
+          break;
+        }
+      }
     }
+
+    if (!pinchHand || !palmHand) {
+      const reason = activePinches.length === 0 ? 'pinch released' : 'palm closed';
+      this.endRotation(reason, timestamp, events);
+      return;
+    }
+
+    const angle = palmAzimuth(palmHand);
+    if (!this.rotation || this.rotation.palmHand !== palmHand.handedness) {
+      // Fresh gesture (or the palm moved to the other hand): end the old
+      // one, then anchor the new one at the current tilt so the object
+      // never jumps.
+      this.endRotation('palm hand lost', timestamp, events);
+      this.rotation = {
+        pinchHand,
+        palmHand: palmHand.handedness,
+        delta: 0,
+        prevAngle: angle,
+      };
+    } else {
+      // Unwrap frame-to-frame so crossing ±π keeps rotating smoothly.
+      this.rotation.delta += wrapAngle(angle - this.rotation.prevAngle);
+      this.rotation.prevAngle = angle;
+    }
+    events.push({
+      type: 'select_rotate',
+      timestamp,
+      hand: pinchHand,
+      palmHand: palmHand.handedness,
+      deltaRotation: this.rotation.delta,
+    });
+  }
+
+  /** End the open-palm rotation (no-op when none is running). */
+  private endRotation(reason: string, timestamp: number, events: GestureSignalEvent[]): void {
+    if (!this.rotation) return;
+    events.push({
+      type: 'select_rotate_end',
+      timestamp,
+      palmHand: this.rotation.palmHand,
+      reason,
+    });
+    this.rotation = null;
+  }
+
+  /**
+   * Open palm: every fingertip (index / middle / ring / pinky) extended
+   * past its own PIP joint plus the thumb held out — the deliberate "show
+   * palm" pose. A fist, claw, pinch or loose curl fails at least one test.
+   */
+  private isOpenPalm(hand: HandFrame): boolean {
+    const shape = measureHandShape(hand);
+    const extended = shape.extensionRatios.filter(
+      (r) => r > this.options.openPalmExtensionRatio
+    ).length;
+    return (
+      extended >= this.options.openPalmMinExtendedFingers &&
+      shape.thumbTuckRatio > this.options.openPalmThumbTuckRatio
+    );
   }
 
   private setState(
@@ -940,6 +1286,7 @@ export class GestureClassifier {
         pinchDistance: track?.pinchDistance ?? Number.POSITIVE_INFINITY,
         pinchActive: track?.pinchActive ?? false,
         fistActive: track?.fistActive ?? false,
+        pointing: track?.pointingActive ?? false,
         landmarks: hand.landmarks,
       });
     }
@@ -963,6 +1310,7 @@ export class GestureClassifier {
       zoomScaleFactor: this.state === 'ZOOMING' ? this.lastZoomScale : null,
       zoomAnchor: this.state === 'ZOOMING' ? this.zoomAnchor : null,
       zoomAngle: this.state === 'ZOOMING' ? this.zoomAngleTotal : null,
+      selectRotation: this.rotation ? this.rotation.delta : null,
     };
   }
 }
