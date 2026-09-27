@@ -8,6 +8,7 @@ const TEST_OPTIONS = {
   pinchStartThreshold: 0.045,
   pinchReleaseThreshold: 0.065,
   pinchDistanceSmoothing: null,
+  pinchEnterFrames: 1,
   fistEnterFrames: 1,
   fistExitFrames: 1,
   orbitOpenPalmGraceFrames: 3,

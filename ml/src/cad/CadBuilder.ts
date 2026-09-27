@@ -151,6 +151,13 @@ export interface CadBuilderOptions {
   /** Highest allowed mesh center height while drag-lifting (world units). */
   dragMaxHeight?: number;
   /**
+   * Allow the legacy single-hand footprint drawing (one pinch raycast onto
+   * the floor starts a build). Off by default: a single stray / misdetected
+   * pinch would drop objects in random spots — building takes the
+   * deliberate two-hand gesture. Default false.
+   */
+  singleHandFootprint?: boolean;
+  /**
    * SELECT mode: a pinch must be held this long (ms) before it starts moving
    * the picked mesh, so a quick pinch only selects it. Default 300.
    */
@@ -310,6 +317,7 @@ export class CadBuilder {
       groundRadius: options.groundRadius ?? 16,
       dragElevationScale: options.dragElevationScale ?? 3,
       dragMaxHeight: options.dragMaxHeight ?? 5,
+      singleHandFootprint: options.singleHandFootprint ?? false,
       dragHoldMs: options.dragHoldMs ?? 300,
       previewColor: options.previewColor ?? 0x0284c7,
       bodyColor: options.bodyColor ?? 0x3f3f46,
@@ -368,6 +376,7 @@ export class CadBuilder {
 
   /** Pinch engaged at device coords (x, y): lock Point A, spawn a preview. */
   onPinchStart(x: number, y: number): void {
+    if (!this.options.singleHandFootprint) return; // two-hand builds only
     if (this.build) return; // pending build: this pinch is likely extrude prep
     this.startBuild(this.groundPoint(x, y), 'footprint', false);
   }
@@ -899,13 +908,16 @@ export class CadBuilder {
     const result = evaluateBoolean(base, tool, op, material);
     if (!result) return false;
 
-    // Swap the result in at the base's scene-graph slot; both operands go.
-    const slot = this.committed.indexOf(base);
+    // Swap the result in at the base's slot; both operands go. (Replace the
+    // base first, then drop the tool — splicing first would shift the base's
+    // index and leave the disposed base behind as an invisible, pickable,
+    // exportable ghost.)
     this.root.remove(base, tool);
-    const toolIndex = this.committed.indexOf(tool);
-    if (toolIndex >= 0) this.committed.splice(toolIndex, 1);
+    const slot = this.committed.indexOf(base);
     if (slot >= 0) this.committed[slot] = result;
     else this.committed.push(result);
+    const toolIndex = this.committed.indexOf(tool);
+    if (toolIndex >= 0) this.committed.splice(toolIndex, 1);
     this.root.add(result);
     disposeMesh(base);
     disposeMesh(tool);

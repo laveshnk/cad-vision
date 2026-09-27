@@ -11,6 +11,8 @@
  * to the selected mesh through CadBuilder.
  *
  * Interaction contract (driven entirely by the orchestrator):
+ *   showAt(x, y)       → pin the disc center at a point (clamped inside the
+ *                        root), e.g. a fixed corner of the reachable area.
  *   show(x, y)         → float the wheel next to an anchor point (the
  *                        selected mesh's screen projection); it flips left
  *                        and clamps so the disc always stays on screen.
@@ -313,6 +315,22 @@ export class ColorWheel {
     if (x + radius > width) x = screenX - reach; // flip when it would overflow
     this.centerX = clamp(x, radius, width - radius);
     this.centerY = clamp(screenY, radius, height - radius);
+    this.element.style.left = `${this.centerX}px`;
+    this.element.style.top = `${this.centerY}px`;
+    this.element.classList.add('color-wheel--visible');
+  }
+
+  /**
+   * Pin the disc center at a root-local point (CSS px), clamped so the disc
+   * stays fully inside the root — for a fixed placement such as a corner.
+   */
+  showAt(centerX: number, centerY: number): void {
+    this.shown = true;
+    const radius = this.options.size / 2;
+    const width = Math.max(this.root.clientWidth, this.options.size);
+    const height = Math.max(this.root.clientHeight, this.options.size);
+    this.centerX = clamp(centerX, radius, width - radius);
+    this.centerY = clamp(centerY, radius, height - radius);
     this.element.style.left = `${this.centerX}px`;
     this.element.style.top = `${this.centerY}px`;
     this.element.classList.add('color-wheel--visible');

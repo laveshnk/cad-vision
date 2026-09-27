@@ -219,12 +219,14 @@ build:
    `EdgesGeometry` outlines (a fist / zoom also commits). Releasing the
    **lower** pinch first, or both at once, commits a **flat** plate
    (`flatHeight`, spheres unaffected).
-3. **Single-hand footprint (legacy)** — pinch and drag with one hand: the
-   pinch start raycasts onto the ground plane (`y = 0`) and dragging sets the
-   footprint (box: square, cuboid: corner-to-corner rectangle,
-   cylinder/sphere: center + radius). It is committed with the default height on the next build or
-   camera gesture; pinching the second hand before releasing replaces it
-   with a two-hand build.
+3. **No accidental builds** — only the deliberate two-hand gesture creates
+   an object. A single pinch in CREATE mode does nothing (the legacy
+   single-hand floor footprint is opt-in via `CadBuilder`'s
+   `singleHandFootprint`), a pinch must hold for 2 frames
+   (`pinchEnterFrames`) and cannot start within 3 % of the frame border
+   (`pinchEdgeMargin` — stray / half-visible hands in the corners), and a
+   two-hand build shorter than 0.4 s (`MIN_BUILD_MS`, from the
+   `extrude_end` event's `durationMs`) is discarded instead of committed.
 4. **Select, move, recolor & delete (SELECT mode)** — a quick pinch on a committed
    mesh **selects** it (a bright outline shell is drawn around it — the
    mesh's own material is never tinted; it stays selected after you let go).
@@ -249,8 +251,11 @@ build:
    your other hand: tilting it spins the selection around the vertical
    axis, with a compass ring (dashed circle + yaw needle) rendered around
    the object in both the 3D viewport and the AR mirror. A floating
-   **HSL color wheel** appears beside the selected mesh (tracking it
-   through drags and camera moves): **point** at the disc (index finger
+   **HSL color wheel** appears pinned in the bottom-left corner of the
+   hand-reachable area (the webcam frame's bottom-left corner mapped into
+   the viewport — the literal viewport corner lies outside the finger's
+   reach; the camera view mirrors it in its own bottom-left corner):
+   **point** at the disc (index finger
    up) — every hue under the fingertip repaints the mesh live (angle =
    hue, radius = saturation, wheel center = gray). This works after a
    quick select-pinch, or with your other hand while one hand holds the
@@ -295,7 +300,13 @@ build:
      `three-bvh-csg`): the base is replaced by the result mesh (fresh
      geometry with crisp regenerated `EdgesGeometry` edge lines, the
      base's frame and transform), and the cutter is removed
-     from the scene.
+     from the scene. The cutter is grown 0.1 % first: solids all rest on
+     the floor, so the operands' bottom faces are coplanar, which makes
+     BSP CSG leave slivers and stray fragments. Result edges come from
+     `creaseEdges` (skips the T-junction seams CSG leaves inside flat
+     faces), keep the base's edge color and the evaluator's normals, and
+     the result renders double-sided so T-junction pixel cracks never show
+     the floor through the solid.
    - **Union** fuses both solids into **one continuous body**
      (`ADDITION`), wearing the selected mesh's color, with unified edge
      lines replacing the two separate entities in the scene hierarchy.
@@ -324,13 +335,16 @@ build:
 — deleting the selected object (Delete button, keyboard) or clearing the
 whole scene (in-vision trash bin) — is confirmed *in vision*: a translucent
 scrim + centered card drawn on the camera canvas with two spatial targets,
-`[ CONFIRM (Pinch) ]` (danger red) and `[ CANCEL (Open Palm) ]` (calm blue).
-Confirm by pinching so the pinch *closes* over the confirm target, by
-clicking it, by pressing `Enter`, or by holding the **OK gesture** — thumb
-and index tips touching, middle / ring / pinky extended — anywhere in view
-for 1 second (an amber progress bar fills the target). Cancel by holding an
-**open palm** briefly, by moving every hand out of view, by `Escape`, or by
-clicking the cancel target. The pinch that triggered the dialog stays
+`[ CONFIRM (Hold) ]` (danger red) and `[ CANCEL (Hold) ]` (calm blue).
+Confirm by **pointing** at the confirm target and holding for 1.2 s — the
+same wait as locking a color on the wheel and pressing the Delete button
+(one shared `HOLD_TO_ACT_MS` in `main.ts`) — or by holding the **OK
+gesture** (thumb and index tips touching, middle / ring / pinky extended)
+anywhere in view for the same time, by clicking the target, or by pressing
+`Enter`; an amber progress bar fills the target. A pinch never confirms
+instantly. Cancel by a pointing hold on the cancel target, an **open palm**
+held briefly, moving every hand out of view, `Escape`, or clicking the
+cancel target. The pinch that triggered the dialog stays
 "engaged", so releasing it into an open hand can never instantly cancel —
 and while the dialog is open the scene below is frozen. There is no
 `window.confirm()` and no DOM modal anywhere in the delete / clear flows.
@@ -469,7 +483,7 @@ The `<canvas id="overlay">` (pure Canvas 2D) mirrors the feed and draws:
   triggers it), or by a mouse click. Hidden while the confirmation
   dialog is open;
 - the **spatial confirmation dialog**: scrim + centered card with the
-  `[ CONFIRM (Pinch) ]` / `[ CANCEL (Open Palm) ]` targets (see the
+  `[ CONFIRM (Hold) ]` / `[ CANCEL (Hold) ]` targets (see the
   workflow section). While it is open (`overlay.confirmActive` /
   `confirmIntent`), every other overlay interaction freezes; the host
   receives the answer through `onConfirmRequest` / `onCancelRequest`

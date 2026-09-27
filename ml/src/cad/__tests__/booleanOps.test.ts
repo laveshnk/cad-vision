@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three';
-import { boxesClash, evaluateBoolean, overlapBox, worldBounds } from '../booleanOps';
+import { boxesClash, creaseEdges, evaluateBoolean, overlapBox, worldBounds } from '../booleanOps';
 
 /**
  * A committed-mesh stand-in: a cube with a computed bounding box, placed in
@@ -78,7 +78,10 @@ describe('evaluateBoolean — subtract (cut hole)', () => {
     // …expressed in the base's frame: the survivor is x ∈ [-1, 0].
     const bounds = result?.geometry.boundingBox;
     expect(bounds?.min.x).toBeCloseTo(-1, 3);
-    expect(bounds?.max.x).toBeCloseTo(0, 3);
+    // The cutter is grown 0.1 % (coplanar-face guard), so the cut face sits
+    // a hair past x = 0.
+    expect(bounds?.max.x).toBeCloseTo(0, 2);
+    expect(bounds?.max.x).toBeLessThanOrEqual(0);
     expect(bounds?.min.y).toBeCloseTo(-1, 3);
     expect(bounds?.max.y).toBeCloseTo(1, 3);
     // Base transform inherited; crisp EdgesGeometry overlay regenerated.
@@ -122,5 +125,95 @@ describe('evaluateBoolean — union (merge)', () => {
     expect(bounds?.max.y).toBeCloseTo(1, 3);
     // One single mesh replaces both entities (no groups / material arrays).
     expect(Array.isArray(result?.material)).toBe(false);
+  });
+});
+
+/** Triangle soup (non-indexed) from [x, y, z] corner triples. */
+function soup(triangles: [number, number, number][][]): THREE.BufferGeometry {
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(triangles.flat(2), 3));
+  return geometry;
+}
+
+/** Line segments of a creaseEdges result as [[ax, ay, az], [bx, by, bz]] pairs. */
+function segmentsOf(lines: THREE.BufferGeometry): number[][][] {
+  const p = lines.getAttribute('position');
+  const out: number[][][] = [];
+  for (let i = 0; i < p.count; i += 2) {
+    out.push([
+      [p.getX(i), p.getY(i), p.getZ(i)],
+      [p.getX(i + 1), p.getY(i + 1), p.getZ(i + 1)],
+    ]);
+  }
+  return out;
+}
+
+describe('creaseEdges', () => {
+  it('finds exactly the 12 edges of a cube (face diagonals skipped)', () => {
+    expect(segmentsOf(creaseEdges(new THREE.BoxGeometry(2, 2, 2)))).toHaveLength(12);
+  });
+
+  it('skips a T-junction seam inside a flat face', () => {
+    // One triangle's edge (0,0)-(2,0) meets two triangles split at (1,0).
+    const flat = soup([
+      [[0, 0, 0], [2, 0, 0], [1, 1, 0]],
+      [[0, 0, 0], [1, -1, 0], [1, 0, 0]],
+      [[1, 0, 0], [1, -1, 0], [2, 0, 0]],
+    ]);
+    const segments = segmentsOf(creaseEdges(flat));
+    // Only the 4 outer boundary edges — nothing along the y = 0 seam.
+    expect(segments).toHaveLength(4);
+    expect(segments.some(([a, b]) => Math.abs(a[1]) < 1e-6 && Math.abs(b[1]) < 1e-6)).toBe(false);
+  });
+
+  it('keeps a T-junction edge that is a real crease', () => {
+    // Same layout, but the lower half folds down: y = 0 is now a crease.
+    const folded = soup([
+      [[0, 0, 0], [2, 0, 0], [1, 1, 0]],
+      [[0, 0, 0], [1, -1, -1], [1, 0, 0]],
+      [[1, 0, 0], [1, -1, -1], [2, 0, 0]],
+    ]);
+    const onSeam = segmentsOf(creaseEdges(folded)).filter(
+      ([a, b]) => Math.abs(a[1]) < 1e-6 && Math.abs(b[1]) < 1e-6 && Math.abs(a[2]) < 1e-6
+    );
+    expect(onSeam.length).toBeGreaterThan(0);
+  });
+
+  it('draws only box edges and hole rims on a drilled cube (no seams on the cut faces)', () => {
+    const base = cube(2, [0, 0, 0]);
+    const drill = new THREE.Mesh(new THREE.CylinderGeometry(0.4, 0.4, 4, 48));
+    drill.updateMatrixWorld(true);
+    const result = evaluateBoolean(base, drill, 'subtract', new THREE.MeshStandardMaterial());
+    expect(result).not.toBeNull();
+    const edges = result?.children[0] as THREE.LineSegments;
+    const segments = segmentsOf(edges.geometry);
+    expect(segments.length).toBeGreaterThan(12);
+    const onFeature = (p: number[]) => {
+      const atFace = p.filter((c) => Math.abs(Math.abs(c) - 1) < 1e-3).length;
+      const onRim = Math.abs(Math.hypot(p[0], p[2]) - 0.4) < 1e-2 && Math.abs(Math.abs(p[1]) - 1) < 1e-3;
+      return atFace >= 2 || onRim;
+    };
+    for (const [a, b] of segments) {
+      const mid = a.map((v, i) => (v + b[i]) / 2);
+      expect(onFeature(a) && onFeature(b) && onFeature(mid), JSON.stringify([a, b])).toBe(true);
+    }
+  });
+
+  it('keeps the evaluator normals (flat box faces stay axis-aligned)', () => {
+    const base = cube(2, [0, 0, 0]);
+    const drill = new THREE.Mesh(new THREE.CylinderGeometry(0.4, 0.4, 4, 48));
+    drill.updateMatrixWorld(true);
+    const result = evaluateBoolean(base, drill, 'subtract', new THREE.MeshStandardMaterial());
+    const geometry = result?.geometry as THREE.BufferGeometry;
+    const position = geometry.getAttribute('position');
+    const normal = geometry.getAttribute('normal');
+    // Every vertex on the top face (y = 1, off the hole rim) faces straight up.
+    for (let i = 0; i < position.count; i++) {
+      const onTop = Math.abs(position.getY(i) - 1) < 1e-4;
+      const onRim = Math.abs(Math.hypot(position.getX(i), position.getZ(i)) - 0.4) < 1e-2;
+      if (!onTop || onRim) continue;
+      if (normal.getY(i) < 0.5) continue; // a side-face vertex sharing the top edge
+      expect(normal.getY(i)).toBeCloseTo(1, 3);
+    }
   });
 });

@@ -55,6 +55,18 @@ export interface GestureClassifierOptions {
   /** Pinch distance above which a pinch releases (hysteresis). Normalized units. */
   pinchReleaseThreshold?: number;
   /**
+   * Consecutive frames the pinch must hold (below `pinchStartThreshold`)
+   * before it engages — a one-frame thumb/index touch from a flickering or
+   * misdetected hand never becomes a pinch. Default 2.
+   */
+  pinchEnterFrames?: number;
+  /**
+   * A pinch cannot *start* with its center within this margin of the frame
+   * border (normalized units): hands half out of view / spurious detections
+   * at the edges are the main source of accidental pinches. Default 0.03.
+   */
+  pinchEdgeMargin?: number;
+  /**
    * EMA alpha applied to the pinch-distance signal before thresholding
    * (reduces flicker near the thresholds); `null` disables it.
    */
@@ -172,6 +184,8 @@ interface HandTrack {
   pinchStartPos: Vec3 | null;
   lastPinchCenter: Vec3 | null;
   pinchEma: EmaScalar | null;
+  /** Consecutive frames the pinch-start conditions have held (debounce). */
+  pinchCandidateFrames: number;
   /**
    * The pinch already finished a two-hand build (the lower hand released
    * first); it is ignored until released so it cannot start a new drawing.
@@ -218,6 +232,8 @@ export class GestureClassifier {
       GestureClassifierOptions,
       | 'pinchStartThreshold'
       | 'pinchReleaseThreshold'
+      | 'pinchEnterFrames'
+      | 'pinchEdgeMargin'
       | 'fistFoldRatio'
       | 'fistMinFoldedFingers'
       | 'fistThumbTuckRatio'
@@ -273,6 +289,8 @@ export class GestureClassifier {
   private extrudePrevY: number | null = null;
   /** Upper pinch (higher on screen) during the last dual-hand frame; null on a tie. */
   private extrudeUpperHand: Handedness | null = null;
+  /** Timestamp of the current two-hand build's `extrude_start`. */
+  private extrudeStartedAt = 0;
 
   private lastExtrudeDistance: number | null = null;
   private lastExtrudeScale: number | null = null;
@@ -300,6 +318,8 @@ export class GestureClassifier {
     this.options = {
       pinchStartThreshold: options.pinchStartThreshold ?? 0.045,
       pinchReleaseThreshold: options.pinchReleaseThreshold ?? 0.065,
+      pinchEnterFrames: options.pinchEnterFrames ?? 2,
+      pinchEdgeMargin: options.pinchEdgeMargin ?? 0.03,
       // `null` explicitly disables smoothing; `??` would swallow it.
       pinchDistanceSmoothing:
         options.pinchDistanceSmoothing !== undefined ? options.pinchDistanceSmoothing : 0.5,
@@ -448,6 +468,7 @@ export class GestureClassifier {
             ? new EmaScalar(this.options.pinchDistanceSmoothing)
             : null,
         pinchConsumed: false,
+        pinchCandidateFrames: 0,
         fistActive: false,
         fistFrames: 0,
         openFrames: 0,
@@ -550,7 +571,22 @@ export class GestureClassifier {
       shape.foldRatios[0] < this.options.fistFoldRatio;
 
     if (!track.pinchActive) {
-      if (dist < this.options.pinchStartThreshold && !fistLike) {
+      // Debounced, in-frame start: the pinch must hold for pinchEnterFrames
+      // and its center must sit inside the frame (not at the border).
+      const normalizedCenter = midpoint3(thumb.normalized, index.normalized);
+      const margin = this.options.pinchEdgeMargin;
+      const inFrame =
+        normalizedCenter.x > margin &&
+        normalizedCenter.x < 1 - margin &&
+        normalizedCenter.y > margin &&
+        normalizedCenter.y < 1 - margin;
+      if (dist < this.options.pinchStartThreshold && !fistLike && inFrame) {
+        track.pinchCandidateFrames++;
+      } else {
+        track.pinchCandidateFrames = 0;
+      }
+      if (track.pinchCandidateFrames >= this.options.pinchEnterFrames) {
+        track.pinchCandidateFrames = 0;
         track.pinchActive = true;
         track.pinchStartPos = center;
         track.lastPinchCenter = center;
@@ -735,7 +771,13 @@ export class GestureClassifier {
     ) {
       activePinches[0].pinchConsumed = true;
       activePinches = [];
-      events.push({ type: 'extrude_end', timestamp, mode: 'dual-hand', heightSet: false });
+      events.push({
+        type: 'extrude_end',
+        timestamp,
+        mode: 'dual-hand',
+        heightSet: false,
+        durationMs: timestamp - this.extrudeStartedAt,
+      });
       this.clearExtrudeReference();
       this.setState('IDLE', 'lower pinch released first (flat)', timestamp, events);
     }
@@ -820,6 +862,7 @@ export class GestureClassifier {
         timestamp,
         mode: this.extrudeMode ?? 'dual-hand',
         heightSet: this.extrudeMode === 'single-hand',
+        durationMs: timestamp - this.extrudeStartedAt,
       });
       this.clearExtrudeReference();
       this.setState('IDLE', 'extrusion released', timestamp, events);
@@ -1038,6 +1081,7 @@ export class GestureClassifier {
     if (this.state !== 'EXTRUDING') {
       this.setState('EXTRUDING', 'dual-hand pinch engaged', timestamp, events);
       events.push({ type: 'extrude_start', timestamp, mode: 'dual-hand' });
+      this.extrudeStartedAt = timestamp;
       this.extrudeMode = 'dual-hand';
       this.extrudeSingleHand = null;
       this.extrudeHeight = 0;

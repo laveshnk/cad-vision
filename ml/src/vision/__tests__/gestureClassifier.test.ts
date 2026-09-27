@@ -9,6 +9,7 @@ const TEST_OPTIONS = {
   pinchStartThreshold: 0.045,
   pinchReleaseThreshold: 0.065,
   pinchDistanceSmoothing: null,
+  pinchEnterFrames: 1,
   fistEnterFrames: 1,
   fistExitFrames: 1,
   orbitOpenPalmGraceFrames: 3,
@@ -182,6 +183,59 @@ describe('GestureClassifier — pinch / draw', () => {
     result = classifier.process([makeHand('Right', { pinchDist: 0.08 })], (t += 100));
     expect(typesOf(result.events)).toEqual(['pinch_end', 'state_change']);
     expect(classifier.currentState).toBe('IDLE');
+  });
+});
+
+describe('GestureClassifier — accidental pinch guards', () => {
+  const GUARDED = { ...TEST_OPTIONS, pinchEnterFrames: 2, pinchEdgeMargin: 0.03 };
+
+  it('ignores a one-frame pinch blip; engages after pinchEnterFrames', () => {
+    const classifier = new GestureClassifier(GUARDED);
+    let t = 0;
+    // A single pinched frame (flicker / misdetection) never starts a pinch.
+    expect(typesOf(classifier.process([makeHand('Right', { pinchDist: 0.03 })], (t += 100)).events)).toEqual([]);
+    expect(typesOf(classifier.process([makeHand('Right')], (t += 100)).events)).toEqual([]);
+    expect(classifier.currentState).toBe('IDLE');
+    // Two consecutive pinched frames do.
+    classifier.process([makeHand('Right', { pinchDist: 0.03 })], (t += 100));
+    const result = classifier.process([makeHand('Right', { pinchDist: 0.03 })], (t += 100));
+    expect(typesOf(result.events)).toContain('pinch_start');
+  });
+
+  it('never starts a pinch at the frame border (hand half out of view)', () => {
+    const classifier = new GestureClassifier(GUARDED);
+    let t = 0;
+    // Pinch center at x ≈ 0.99 (right border): held for many frames, no start.
+    for (let i = 0; i < 5; i++) {
+      const events = classifier.process([makeHand('Right', { pinchDist: 0.03, dx: 0.49 })], (t += 100)).events;
+      expect(typesOf(events)).not.toContain('pinch_start');
+    }
+    // Moving the same pinch into the frame engages it.
+    classifier.process([makeHand('Right', { pinchDist: 0.03, dx: 0.3 })], (t += 100));
+    const result = classifier.process([makeHand('Right', { pinchDist: 0.03, dx: 0.3 })], (t += 100));
+    expect(typesOf(result.events)).toContain('pinch_start');
+  });
+
+  it('keeps an engaged pinch when it drifts to the border (only the start is guarded)', () => {
+    const classifier = new GestureClassifier(GUARDED);
+    let t = 0;
+    classifier.process([makeHand('Right', { pinchDist: 0.03 })], (t += 100));
+    classifier.process([makeHand('Right', { pinchDist: 0.03 })], (t += 100));
+    const result = classifier.process([makeHand('Right', { pinchDist: 0.03, dx: 0.49 })], (t += 100));
+    expect(typesOf(result.events)).not.toContain('pinch_end');
+    expect(typesOf(result.events)).toContain('pinch_drag');
+  });
+
+  it('reports how long a two-hand build lasted on extrude_end', () => {
+    const classifier = new GestureClassifier(TEST_OPTIONS);
+    const both = (pinch: number) => [
+      makeHand('Left', { pinchDist: pinch, dx: -0.2 }),
+      makeHand('Right', { pinchDist: pinch, dx: 0.2 }),
+    ];
+    classifier.process(both(0.03), 1000);
+    classifier.process(both(0.03), 1100);
+    const result = classifier.process(both(0.2), 1400);
+    expect(result.events.find((e) => e.type === 'extrude_end')).toMatchObject({ durationMs: 400 });
   });
 });
 
@@ -722,6 +776,7 @@ describe('GestureClassifier — robust fist detection', () => {
       pinchStartThreshold: 0.045,
       pinchReleaseThreshold: 0.065,
       pinchDistanceSmoothing: null,
+      pinchEnterFrames: 1,
     });
     let t = 0;
     let result = classifier.process([makeHand('Right', { fist: true })], (t += 100));

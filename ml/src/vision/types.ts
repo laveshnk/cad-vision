@@ -191,6 +191,12 @@ export interface ExtrudeEndEvent {
    * the upper one was still held — consumers treat that as a flat build.
    */
   heightSet: boolean;
+  /**
+   * How long the build lasted (ms since its `extrude_start`). Consumers can
+   * drop implausibly short builds — a stray / misdetected hand that pinched
+   * for an instant, rather than a deliberate two-hand build.
+   */
+  durationMs: number;
 }
 
 export interface OrbitStartEvent {

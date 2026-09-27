@@ -20,18 +20,18 @@
  * index tip over the button for `dwellMs`; a ring marks a pointing
  * fingertip. Pinches, fists and open palms never press a toggle button, so
  * moving, editing or building objects can't switch modes / shapes by
- * accident. Two dedicated surfaces are pinch-activated instead: the trash
- * bin icon in the bottom-right corner (`onTrashRequest`) and the spatial
- * confirmation dialog's targets.
+ * accident. The trash bin icon in the bottom-right corner (`onTrashRequest`)
+ * also accepts a fresh pinch.
  *
  * Destructive actions never open browser popups or DOM modals: the trash bin
  * (a scene clear) and the selection's Delete button open an in-vision
  * spatial dialog on this canvas — two spatial targets,
- * `[ CONFIRM (Pinch) ]` and `[ CANCEL (Open Palm) ]`. Confirming is a fresh
- * pinch that closes over the confirm target, a mouse click, or holding the
- * "OK" gesture (thumb + index loop, other fingers extended) for
- * `confirmHoldMs`; canceling is an open palm held briefly or simply moving
- * every hand away. While the dialog is open every other overlay interaction
+ * `[ CONFIRM (Hold) ]` and `[ CANCEL (Hold) ]`. Confirming is a pointing
+ * fingertip held on the confirm target (or the "OK" gesture — thumb + index
+ * loop, other fingers extended — held anywhere) for `confirmHoldMs`, the
+ * same wait as the color wheel lock and the Delete button, or a mouse
+ * click; a pinch never confirms instantly. Canceling is a pointing hold on
+ * the cancel target, an open palm held briefly, or moving every hand away. While the dialog is open every other overlay interaction
  * is frozen and the host freezes the scene (see `confirmActive`).
  *
  * The live stats (MODE / STATE / FPS / HANDS) are *not* drawn here — the host
@@ -429,8 +429,10 @@ export interface DebugOverlayOptions<S extends string = string> {
   /** The dialog was dismissed without confirming (open palm / hand away). */
   onCancelRequest?: (intent: OverlayConfirmIntent) => void;
   /**
-   * Holding the "OK" gesture (thumb + index loop, other fingers extended)
-   * anywhere for this long confirms the dialog. Default 1000.
+   * Hold time (ms) that answers the dialog: a pointing fingertip on the
+   * confirm / cancel target, or the "OK" gesture (thumb + index loop, other
+   * fingers extended) held anywhere, confirms after this long. Match it to
+   * the host's other hold-to-act timings. Default 1200.
    */
   confirmHoldMs?: number;
   /**
@@ -538,6 +540,8 @@ export class DebugOverlay<S extends string = string> {
   private openIntent: OverlayConfirmIntent | null = null;
   private confirmRects: { confirm: ButtonRect; cancel: ButtonRect } | null = null;
   private confirmOkElapsed = 0;
+  /** Pointing-hold time on the cancel target. */
+  private confirmCancelElapsed = 0;
   private confirmPalmElapsed = 0;
   private confirmNoHandFrames = 0;
   private confirmOpenedAgo = 0;
@@ -587,7 +591,7 @@ export class DebugOverlay<S extends string = string> {
     this.trashDwellMs = options.trashDwellMs ?? 600;
     this.onConfirmRequest = options.onConfirmRequest ?? null;
     this.onCancelRequest = options.onCancelRequest ?? null;
-    this.confirmHoldMs = options.confirmHoldMs ?? 1000;
+    this.confirmHoldMs = options.confirmHoldMs ?? 1200;
     this.confirmPalmCancelMs = options.confirmPalmCancelMs ?? 350;
     this.confirmHandLossFrames = options.confirmHandLossFrames ?? 12;
     this.onBooleanToolRequest = options.onBooleanToolRequest ?? null;
@@ -635,6 +639,7 @@ export class DebugOverlay<S extends string = string> {
     if (this.openIntent !== null) return;
     this.openIntent = intent;
     this.confirmOkElapsed = 0;
+    this.confirmCancelElapsed = 0;
     this.confirmPalmElapsed = 0;
     this.confirmNoHandFrames = 0;
     this.confirmOpenedAgo = 0;
@@ -649,6 +654,7 @@ export class DebugOverlay<S extends string = string> {
     this.openIntent = null;
     this.confirmRects = null;
     this.confirmOkElapsed = 0;
+    this.confirmCancelElapsed = 0;
     this.confirmPalmElapsed = 0;
     this.confirmNoHandFrames = 0;
     this.confirmOpenedAgo = 0;
@@ -749,7 +755,7 @@ export class DebugOverlay<S extends string = string> {
     const dt = this.frameDt(frame);
     if (dialogOpen) {
       this.drawConfirmDialog(cssWidth, cssHeight);
-      this.updateConfirmInteraction(frame, dt);
+      this.updateConfirmInteraction(frame, view, dt);
     } else {
       this.updateModeInteraction(frame, view, dt);
       this.updateConstraintInteraction(frame, view, dt);
@@ -1742,7 +1748,7 @@ export class DebugOverlay<S extends string = string> {
    *   triggered the dialog releases into an open hand — or simply moving
    *   every hand away for `confirmHandLossFrames` frames.
    */
-  private updateConfirmInteraction(frame: FrameEvent, dt: number): void {
+  private updateConfirmInteraction(frame: FrameEvent, view: ViewTransform, dt: number): void {
     this.confirmOpenedAgo += dt;
     if (frame.hands.length === 0) {
       this.confirmNoHandFrames++;
@@ -1753,8 +1759,21 @@ export class DebugOverlay<S extends string = string> {
     } else {
       this.confirmNoHandFrames = 0;
     }
-    // Confirm: hold the OK gesture.
-    if (frame.hands.some((hand) => hand.okGesture)) {
+    // Pointing fingertips on the targets (same hold model as the color
+    // wheel lock and the Delete button — nothing answers instantly).
+    const rects = this.confirmRects;
+    let onConfirm = false;
+    let onCancel = false;
+    if (rects) {
+      for (const hand of frame.hands) {
+        if (!hand.pointing) continue;
+        const tip = this.toCanvas(hand, INDEX_TIP, view);
+        if (this.inRect(rects.confirm, tip.x, tip.y)) onConfirm = true;
+        else if (this.inRect(rects.cancel, tip.x, tip.y)) onCancel = true;
+      }
+    }
+    // Confirm: hold on the confirm target, or hold the OK gesture.
+    if (onConfirm || frame.hands.some((hand) => hand.okGesture)) {
       this.confirmOkElapsed += dt;
       if (this.confirmOkElapsed >= this.confirmHoldMs) {
         this.answerConfirm();
@@ -1762,6 +1781,16 @@ export class DebugOverlay<S extends string = string> {
       }
     } else {
       this.confirmOkElapsed = 0;
+    }
+    // Cancel: hold on the cancel target.
+    if (onCancel) {
+      this.confirmCancelElapsed += dt;
+      if (this.confirmCancelElapsed >= this.confirmHoldMs) {
+        this.answerCancel();
+        return;
+      }
+    } else {
+      this.confirmCancelElapsed = 0;
     }
     // Cancel: an open palm held briefly (after the post-open grace).
     if (frame.hands.some((hand) => hand.openPalm) && this.confirmOpenedAgo >= 600) {
@@ -1775,12 +1804,11 @@ export class DebugOverlay<S extends string = string> {
   }
 
   /**
-   * Fresh-pinch UI activation: only a pinch that *closes* over a button
-   * activates it — a pinch drag sweeping across the trash bin or a dialog
-   * target never triggers anything. While the dialog is open the pinches
-   * may only answer it (the confirm target); otherwise they may fire the
-   * trash bin. The previous frame's `pinchActive` per hand provides the
-   * edge detection.
+   * Fresh-pinch UI activation: only a pinch that *closes* over the trash bin
+   * fires it — a pinch drag sweeping across it never triggers anything.
+   * While the confirmation dialog is open pinches do nothing (it is answered
+   * by a hold, never instantly). The previous frame's `pinchActive` per hand
+   * provides the edge detection.
    */
   private updatePinchUi(frame: FrameEvent, view: ViewTransform): void {
     for (const hand of frame.hands) {
@@ -1794,22 +1822,18 @@ export class DebugOverlay<S extends string = string> {
       const index = this.toCanvas(hand, INDEX_TIP, view);
       const cx = (thumb.x + index.x) / 2;
       const cy = (thumb.y + index.y) / 2;
-      if (this.openIntent !== null) {
-        const rects = this.confirmRects;
-        if (rects && this.inRect(rects.confirm, cx, cy)) this.answerConfirm();
-      } else {
-        const trash = this.trashRect;
-        if (trash && this.inRect(trash, cx, cy)) this.requestTrash();
-      }
+      if (this.openIntent !== null) continue; // the dialog needs a hold
+      const trash = this.trashRect;
+      if (trash && this.inRect(trash, cx, cy)) this.requestTrash();
     }
   }
 
   /**
    * The in-vision spatial confirmation dialog: a translucent scrim + card
    * centered on the camera view with two spatial targets —
-   * `[ CONFIRM (Pinch) ]` (danger red) and `[ CANCEL (Open Palm) ]` (calm
-   * blue). The OK-hold progress fills the confirm target's bottom edge; the
-   * open-palm cancel progress fills the cancel target's. No DOM modals, no
+   * `[ CONFIRM (Hold) ]` (danger red) and `[ CANCEL (Hold) ]` (calm blue).
+   * The confirm hold progress fills the confirm target's bottom edge; the
+   * cancel hold / open-palm progress fills the cancel target's. No DOM modals, no
    * browser popups — the hands stay visible underneath.
    */
   private drawConfirmDialog(cssWidth: number, cssHeight: number): void {
@@ -1828,9 +1852,9 @@ export class DebugOverlay<S extends string = string> {
     const titleSize = Math.max(10, Math.round(13 * scale));
     const hintSize = Math.max(8, Math.round(9 * scale));
     const title = CONFIRM_TITLES[intent];
-    const hint = 'PINCH / HOLD OK — PALM OR AWAY CANCELS';
-    const confirmLabel = '[ CONFIRM (Pinch) ]';
-    const cancelLabel = '[ CANCEL (Open Palm) ]';
+    const hint = 'POINT & HOLD — PALM OR AWAY CANCELS';
+    const confirmLabel = '[ CONFIRM (Hold) ]';
+    const cancelLabel = '[ CANCEL (Hold) ]';
 
     // Lay out: title / hint / two side-by-side targets inside the card.
     const targetWidth = (cardWidth - pad * 2 - gap) / 2;
@@ -1881,7 +1905,7 @@ export class DebugOverlay<S extends string = string> {
     ctx.font = `${hintSize}px ui-monospace, monospace`;
     ctx.fillText(hint, cssWidth / 2, cardY + pad + titleSize + gap + hintSize / 2);
 
-    // Confirm target (danger red) with the OK-hold progress fill.
+    // Confirm target (danger red) with the hold progress fill.
     ctx.fillStyle = DIALOG_CONFIRM_FILL;
     ctx.fillRect(confirmRect.x, confirmRect.y, confirmRect.width, confirmRect.height);
     ctx.lineWidth = 2;
@@ -1927,8 +1951,12 @@ export class DebugOverlay<S extends string = string> {
       cancelRect.x + cancelRect.width / 2,
       cancelRect.y + cancelRect.height / 2
     );
-    if (this.confirmPalmCancelMs > 0 && this.confirmPalmElapsed > 0) {
-      const progress = Math.min(1, this.confirmPalmElapsed / this.confirmPalmCancelMs);
+    const cancelProgress = Math.max(
+      this.confirmPalmCancelMs > 0 ? this.confirmPalmElapsed / this.confirmPalmCancelMs : 0,
+      this.confirmHoldMs > 0 ? this.confirmCancelElapsed / this.confirmHoldMs : 0
+    );
+    if (cancelProgress > 0) {
+      const progress = Math.min(1, cancelProgress);
       ctx.fillStyle = DIALOG_CANCEL_STROKE;
       ctx.fillRect(
         cancelRect.x + 2,
