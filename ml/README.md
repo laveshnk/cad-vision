@@ -1,4 +1,4 @@
-# CAD Vision — Gesture-Driven CAD Workbench (`ml/`)
+# Starfleet aCADemy — Gesture-Driven CAD Workbench (`ml/`)
 
 Self-contained TypeScript application that turns webcam hand tracking into an
 interactive CAD tool. The MediaPipe-based gesture engine emits **normalized CAD
@@ -40,6 +40,7 @@ serving over the network needs HTTPS.
 src/
 ├── main.ts                    # app orchestrator: vision events → CAD + UI wiring
 ├── styles.css                 # light theme; full-bleed viewport, camera thumbnail, glass toolbar
+├── assets/logo.png            # Starfleet aCADemy emblem (toolbar logo + favicon)
 ├── cad/
 │   ├── CadScene.ts            # Three.js viewport: camera rig, lights, grid, orbit
 │   ├── CadBuilder.ts          # gesture-driven primitives, selection, CSG booleans, STL export
@@ -397,8 +398,8 @@ cancel target. The pinch that triggered the dialog stays
 and while the dialog is open the scene below is frozen. There is no
 `window.confirm()` and no DOM modal anywhere in the delete / clear flows.
 
-**Dimensions (cm).** A ruler toggle at the right end of the camera view's
-mode bar (every mode; the same pointing hold as the mode buttons, or a mouse click —
+**Dimensions (cm).** A ruler toggle in the bottom-right corner of the camera
+view (every mode; the same pointing hold as the mode buttons, or a mouse click —
 the finger must leave the button before it can toggle again) and the
 toolbar's **Dimensions** button (kept in sync) show a measurement chip
 above every solid in the 3D view: cube / cuboid → `L` (along X), `W`

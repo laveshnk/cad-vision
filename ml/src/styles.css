@@ -48,6 +48,7 @@ body {
 
 .toolbar-brand {
   display: flex;
+  white-space: nowrap;
   align-items: center;
   gap: 8px;
   font-size: 14px;
@@ -55,8 +56,11 @@ body {
   letter-spacing: 0.04em;
 }
 
-.toolbar-brand svg {
-  color: var(--accent);
+.toolbar-logo {
+  width: 30px;
+  height: 30px;
+  border-radius: 7px;
+  flex: none;
 }
 
 .toolbar-group {

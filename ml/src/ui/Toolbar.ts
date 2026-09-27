@@ -10,6 +10,11 @@
  * UI-only module — no vision or CAD imports.
  */
 
+import logoUrl from '../assets/logo.png';
+
+/** Site name shown in the toolbar brand. */
+const BRAND_NAME = 'Starfleet aCADemy';
+
 export interface ToolbarCallbacks {
   onExportStl?: () => void;
   /** Request webcam + hand tracking to start. */
@@ -22,7 +27,6 @@ export interface ToolbarCallbacks {
 
 /** Lucide-style stroke icons (currentColor). */
 const ICONS = {
-  logo: '<path d="M12 2 2 7l10 5 10-5-10-5Z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>',
   export:
     '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/>',
   camera:
@@ -89,7 +93,13 @@ export class Toolbar {
 
     const brand = document.createElement('span');
     brand.className = 'toolbar-brand';
-    brand.innerHTML = `${icon('logo')}<span>CAD&nbsp;Vision</span>`;
+    const logo = document.createElement('img');
+    logo.className = 'toolbar-logo';
+    logo.src = logoUrl;
+    logo.alt = '';
+    const name = document.createElement('span');
+    name.textContent = BRAND_NAME;
+    brand.append(logo, name);
     this.root.appendChild(brand);
 
     const cameraGroup = document.createElement('div');

@@ -461,8 +461,8 @@ export interface DebugOverlayOptions<S extends string = string> {
    */
   onUngroupRequest?: () => void;
   /**
-   * Called with the new state when the dimensions (ruler) toggle at the
-   * right end of the mode bar is activated — pointing dwell or mouse click,
+   * Called with the new state when the dimensions (ruler) toggle in the
+   * bottom-right corner of the camera view is activated — pointing dwell or mouse click,
    * in every mode. The button is only drawn when this callback is set.
    */
   onDimensionsToggle?: (visible: boolean) => void;
@@ -564,7 +564,7 @@ export class DebugOverlay<S extends string = string> {
   private readonly ungroupDwell = new DwellClock();
   private readonly onUngroupRequest: (() => void) | null;
   /**
-   * Dimensions toggle (ruler, right end of the mode bar): rect, dwell clock
+   * Dimensions toggle (ruler, bottom-right corner): rect, dwell clock
    * and a latch so a fingertip left resting on it cannot flip it back — the
    * hand must leave the button before the next toggle.
    */
@@ -765,6 +765,7 @@ export class DebugOverlay<S extends string = string> {
     // Hidden while the confirmation dialog is open — the scene is frozen.
     if (frame.mode === 'select' && !dialogOpen) this.drawSelectionHud(view, cssWidth);
     this.drawModeButtons(frame, cssWidth);
+    this.drawDimensionsButton(cssWidth, cssHeight);
     if (frame.mode === 'select' && !dialogOpen) {
       this.drawConstraintButtons(cssWidth);
       this.drawBooleanButtons(cssWidth);
@@ -1426,10 +1427,7 @@ export class DebugOverlay<S extends string = string> {
     const ctx = this.ctx;
     const scale = this.fontScale(cssWidth);
     const { margin, gap, height } = this.barMetrics(cssWidth);
-    // The dimensions toggle (a square as tall as the bar) takes the right end.
-    const toggleRoom = this.onDimensionsToggle ? height + gap : 0;
-    const width =
-      (cssWidth - margin * 2 - toggleRoom - gap * (MODE_BUTTONS.length - 1)) / MODE_BUTTONS.length;
+    const width = (cssWidth - margin * 2 - gap * (MODE_BUTTONS.length - 1)) / MODE_BUTTONS.length;
 
     this.buttonRects = [];
     ctx.textAlign = 'center';
@@ -1459,11 +1457,10 @@ export class DebugOverlay<S extends string = string> {
     });
     ctx.textAlign = 'left';
     ctx.textBaseline = 'alphabetic';
-    this.drawDimensionsButton(cssWidth);
   }
 
   /* ------------------------------------------------------------------ */
-  /* Dimensions toggle (every mode, right end of the mode bar)           */
+  /* Dimensions toggle (every mode, bottom-right corner)                */
   /* ------------------------------------------------------------------ */
 
   private toggleDimensions(): void {
@@ -1485,14 +1482,18 @@ export class DebugOverlay<S extends string = string> {
     }
   }
 
-  /** Square ruler toggle: inverted while dimensions are shown. */
-  private drawDimensionsButton(cssWidth: number): void {
+  /**
+   * Square ruler toggle in the bottom-right corner (same size as the other
+   * icon buttons): inverted while dimensions are shown.
+   */
+  private drawDimensionsButton(cssWidth: number, cssHeight: number): void {
     if (!this.onDimensionsToggle) {
       this.dimensionsRect = null;
       return;
     }
-    const { margin, height } = this.barMetrics(cssWidth);
-    const rect = { x: cssWidth - margin - height, y: margin, width: height, height };
+    const { margin } = this.barMetrics(cssWidth);
+    const size = this.iconButtonSize(cssWidth);
+    const rect = { x: cssWidth - margin - size, y: cssHeight - margin - size, width: size, height: size };
     this.dimensionsRect = rect;
     let ink: string;
     if (this.dimensionsOn) {
@@ -1503,7 +1504,7 @@ export class DebugOverlay<S extends string = string> {
       this.drawIdleButton(rect, progress, 1.5);
       ink = progress !== null ? '#f8fafc' : '#cbd5e1';
     }
-    this.drawRulerIcon(rect.x + height / 2, rect.y + height / 2 - 1, height * 0.32, ink);
+    this.drawRulerIcon(rect.x + size / 2, rect.y + size / 2 - 1, size * 0.3, ink);
   }
 
   /** Ruler line icon (body + graduation ticks), centered at (cx, cy), half-size r. */
