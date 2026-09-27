@@ -14,8 +14,8 @@ import { FilesetResolver, HandLandmarker } from '@mediapipe/tasks-vision';
 import type { Handedness, RawHand } from './types';
 
 /** Default CDN fallbacks used when local assets are missing. */
-export const DEFAULT_WASM_CDN = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10/wasm';
-export const DEFAULT_MODEL_CDN =
+const DEFAULT_WASM_CDN = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10/wasm';
+const DEFAULT_MODEL_CDN =
   'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
 
 export interface HandTrackerOptions {

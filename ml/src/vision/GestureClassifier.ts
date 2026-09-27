@@ -375,11 +375,6 @@ export class GestureClassifier {
     this.rotationFist = null;
   }
 
-  /** Whether fists currently drive the host's selected object. */
-  get objectRotationEnabled(): boolean {
-    return this.objectRotation;
-  }
-
   /** Active interaction mode (VIEW / SELECT / CREATE). */
   get currentMode(): InteractionMode {
     return this.mode;

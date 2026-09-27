@@ -63,7 +63,7 @@ export interface HandShape {
  * size (MediaPipe's z uses the same scale as x). Falls back to normalized
  * coordinates when no pixel size is available.
  */
-export function isotropicPoints(hand: HandFrame): Vec3[] {
+function isotropicPoints(hand: HandFrame): Vec3[] {
   let sx = 0;
   let sy = 0;
   for (const lm of hand.landmarks) {

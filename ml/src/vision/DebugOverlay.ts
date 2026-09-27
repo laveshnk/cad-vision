@@ -64,6 +64,7 @@ import type {
   HandSnapshot,
   InteractionMode,
 } from './types';
+import { DwellClock } from './DwellClock';
 
 const THUMB_TIP = 4;
 const INDEX_TIP = 8;
@@ -74,19 +75,6 @@ export interface SkeletonConnection {
   start: number;
   end: number;
 }
-
-/**
- * State color-coding: green = pinch/draw, cyan = select, blue = orbit,
- * purple = zoom, yellow = idle.
- */
-export const STATE_COLORS: Record<GestureState, string> = {
-  IDLE: '#facc15', // yellow
-  DRAWING_BASE: '#22c55e', // green
-  SELECTING: '#06b6d4', // cyan
-  EXTRUDING: '#f97316', // orange
-  ORBITING: '#3b82f6', // blue
-  ZOOMING: '#a855f7', // purple
-};
 
 interface HandStyle {
   skeleton: string;
@@ -509,15 +497,11 @@ export class DebugOverlay<S extends string = string> {
   private readonly selectionHud: SelectionHudProvider | null;
   /** Last rendered button rects (CSS px) — hit targets for mouse + finger. */
   private buttonRects: ButtonRect[] = [];
-  /** Button the index tip is dwelling over (-1 = none). */
-  private dwellTarget = -1;
-  private dwellElapsed = 0;
+  private readonly modeDwell = new DwellClock();
   private lastFrameTimestamp: number | null = null;
   /** Last rendered constraint-button rects (CSS px); empty outside SELECT mode. */
   private constraintRects: ButtonRect[] = [];
-  /** Constraint toggle the index tip is dwelling over (-1 = none). */
-  private constraintDwellTarget = -1;
-  private constraintDwellElapsed = 0;
+  private readonly constraintDwell = new DwellClock();
   /** Visual + authoritative overlay state of the drag constraint (host mirrors it). */
   private dragConstraint: DragConstraint = 'xz';
   private readonly shapes: ReadonlyArray<OverlayShape<S>>;
@@ -526,16 +510,13 @@ export class DebugOverlay<S extends string = string> {
   private activeShapeId: S | null;
   /** Last rendered shape-button rects (CSS px); empty outside CREATE mode. */
   private shapeRects: ButtonRect[] = [];
-  /** Shape button the index tip is dwelling over (-1 = none). */
-  private shapeDwellTarget = -1;
-  private shapeDwellElapsed = 0;
+  private readonly shapeDwell = new DwellClock();
   /**
    * In-vision trash bin (bottom-right): last rendered rect (null = hidden,
    * e.g. while the confirmation dialog is open) + its dwell clock.
    */
   private trashRect: ButtonRect | null = null;
-  private trashDwellElapsed = 0;
-  private trashDwelling = false;
+  private readonly trashDwell = new DwellClock();
   /** Trash dwell threshold (ms) — slower than a mode button (destructive). */
   private readonly trashDwellMs: number;
   private readonly onTrashRequest: (() => void) | null;
@@ -562,8 +543,7 @@ export class DebugOverlay<S extends string = string> {
    * the armed tool (host mirrors it) and the X-cross trigger debounce.
    */
   private booleanRects: ButtonRect[] = [];
-  private booleanDwellTarget = -1;
-  private booleanDwellElapsed = 0;
+  private readonly booleanDwell = new DwellClock();
   private armedBooleanTool: OverlayBooleanTool | null = null;
   private xCrossFrames = 0;
   private xCrossFired = false;
@@ -573,8 +553,7 @@ export class DebugOverlay<S extends string = string> {
   private readonly booleanState: (() => OverlayBooleanState | null) | null;
   /** EDIT-mode UNGROUP action button (one-shot; below the Boolean toggles). */
   private ungroupRect: ButtonRect | null = null;
-  private ungroupDwelling = false;
-  private ungroupDwellElapsed = 0;
+  private readonly ungroupDwell = new DwellClock();
   private readonly onUngroupRequest: (() => void) | null;
   /** Last rendered mirrored cover transform (device-space UI hit tests). */
   private lastView: ViewTransform | null = null;
@@ -618,11 +597,6 @@ export class DebugOverlay<S extends string = string> {
   /** Highlighted CREATE-mode shape. */
   get activeShape(): S | null {
     return this.activeShapeId;
-  }
-
-  /** Highlight a shape button (e.g. when the host changes the shape itself). */
-  setActiveShape(shape: S): void {
-    this.activeShapeId = shape;
   }
 
   /** Whether the in-vision spatial confirmation dialog is currently open. */
@@ -688,7 +662,7 @@ export class DebugOverlay<S extends string = string> {
       this.requestTrash();
       return;
     }
-    const boolean = this.hitBooleanButton(event.offsetX, event.offsetY);
+    const boolean = this.hitRects(this.booleanRects, event.offsetX, event.offsetY);
     if (boolean >= 0) {
       this.requestBoolean(boolean);
       return;
@@ -698,17 +672,17 @@ export class DebugOverlay<S extends string = string> {
       this.requestUngroup();
       return;
     }
-    const shape = this.hitShapeButton(event.offsetX, event.offsetY);
+    const shape = this.hitRects(this.shapeRects, event.offsetX, event.offsetY);
     if (shape >= 0) {
       this.requestShape(shape);
       return;
     }
-    const constraint = this.hitConstraintButton(event.offsetX, event.offsetY);
+    const constraint = this.hitRects(this.constraintRects, event.offsetX, event.offsetY);
     if (constraint >= 0) {
       this.requestConstraint(constraint);
       return;
     }
-    const index = this.hitButton(event.offsetX, event.offsetY);
+    const index = this.hitRects(this.buttonRects, event.offsetX, event.offsetY);
     if (index >= 0) this.requestMode(index);
   };
 
@@ -726,12 +700,12 @@ export class DebugOverlay<S extends string = string> {
     const trash = this.trashRect;
     const hovering =
       (trash !== null && this.inRect(trash, event.offsetX, event.offsetY)) ||
-      this.hitBooleanButton(event.offsetX, event.offsetY) >= 0 ||
+      this.hitRects(this.booleanRects, event.offsetX, event.offsetY) >= 0 ||
       (this.ungroupRect !== null && this.canUngroupNow() &&
         this.inRect(this.ungroupRect, event.offsetX, event.offsetY)) ||
-      this.hitButton(event.offsetX, event.offsetY) >= 0 ||
-      this.hitConstraintButton(event.offsetX, event.offsetY) >= 0 ||
-      this.hitShapeButton(event.offsetX, event.offsetY) >= 0;
+      this.hitRects(this.buttonRects, event.offsetX, event.offsetY) >= 0 ||
+      this.hitRects(this.constraintRects, event.offsetX, event.offsetY) >= 0 ||
+      this.hitRects(this.shapeRects, event.offsetX, event.offsetY) >= 0;
     this.canvas.style.cursor = hovering ? 'pointer' : 'default';
   };
 
@@ -858,10 +832,10 @@ export class DebugOverlay<S extends string = string> {
     const trash = this.trashRect;
     const rects = this.confirmRects;
     return (
-      this.hitButton(px, py) >= 0 ||
-      this.hitConstraintButton(px, py) >= 0 ||
-      this.hitShapeButton(px, py) >= 0 ||
-      this.hitBooleanButton(px, py) >= 0 ||
+      this.hitRects(this.buttonRects, px, py) >= 0 ||
+      this.hitRects(this.constraintRects, px, py) >= 0 ||
+      this.hitRects(this.shapeRects, px, py) >= 0 ||
+      this.hitRects(this.booleanRects, px, py) >= 0 ||
       (this.ungroupRect !== null && this.inRect(this.ungroupRect, px, py)) ||
       (trash !== null && this.inRect(trash, px, py)) ||
       (rects !== null &&
@@ -872,6 +846,77 @@ export class DebugOverlay<S extends string = string> {
   /** Whether a CSS-pixel point lies inside a button rectangle. */
   private inRect(rect: ButtonRect, px: number, py: number): boolean {
     return px >= rect.x && px <= rect.x + rect.width && py >= rect.y && py <= rect.y + rect.height;
+  }
+
+  /** Index of the first rect containing the CSS-pixel point, or -1. */
+  private hitRects(rects: ReadonlyArray<ButtonRect | null>, px: number, py: number): number {
+    return rects.findIndex((rect) => rect !== null && this.inRect(rect, px, py));
+  }
+
+  /**
+   * The button a *pointing* hand's index tip (landmark 8) rests on — the
+   * first hit among the frame's hands — or -1. Pinches never press buttons.
+   */
+  private pointedButton(
+    frame: FrameEvent,
+    view: ViewTransform,
+    rects: ReadonlyArray<ButtonRect | null>
+  ): number {
+    for (const hand of frame.hands) {
+      if (!hand.pointing) continue;
+      const tip = this.toCanvas(hand, INDEX_TIP, view);
+      const index = this.hitRects(rects, tip.x, tip.y);
+      if (index >= 0) return index;
+    }
+    return -1;
+  }
+
+  /**
+   * Chrome of a non-active overlay button: dark glass fill + outline, and a
+   * dwell progress bar along the bottom edge while `progress` is non-null.
+   */
+  private drawIdleButton(
+    rect: ButtonRect,
+    progress: number | null,
+    idleLineWidth: number,
+    idleStroke = 'rgba(148, 163, 184, 0.55)',
+    progressFill = '#38bdf8'
+  ): void {
+    const ctx = this.ctx;
+    const { x, y, width, height } = rect;
+    const dwelling = progress !== null;
+    ctx.fillStyle = dwelling ? 'rgba(15, 23, 42, 0.85)' : 'rgba(15, 23, 42, 0.6)';
+    ctx.fillRect(x, y, width, height);
+    ctx.lineWidth = dwelling ? 2 : idleLineWidth;
+    ctx.strokeStyle = dwelling ? '#e2e8f0' : idleStroke;
+    ctx.strokeRect(x + 1, y + 1, width - 2, height - 2);
+    if (dwelling) {
+      ctx.fillStyle = progressFill;
+      ctx.fillRect(x + 2, y + height - 5, (width - 4) * progress, 3);
+    }
+  }
+
+  /**
+   * Chrome of the active (inverted) toggle: solid light fill, dark outline
+   * and a high-contrast indicator bar `barInset` px above the bottom edge.
+   */
+  private drawActiveButton(
+    rect: ButtonRect,
+    barInset: number,
+    barThickness: number,
+    stroke = '#0f172a',
+    bar = '#0284c7',
+    lineWidth = 2
+  ): void {
+    const ctx = this.ctx;
+    const { x, y, width, height } = rect;
+    ctx.fillStyle = '#f8fafc';
+    ctx.fillRect(x, y, width, height);
+    ctx.lineWidth = lineWidth;
+    ctx.strokeStyle = stroke;
+    ctx.strokeRect(x + 1, y + 1, width - 2, height - 2);
+    ctx.fillStyle = bar;
+    ctx.fillRect(x + 3, y + height - barInset, width - 6, barThickness);
   }
 
   /**
@@ -1305,14 +1350,6 @@ export class DebugOverlay<S extends string = string> {
   /* Mode switcher buttons (top edge of the overlay)                    */
   /* ------------------------------------------------------------------ */
 
-  /** CSS-pixel hit test against the last rendered mode buttons. */
-  private hitButton(px: number, py: number): number {
-    for (let i = 0; i < this.buttonRects.length; i++) {
-      const r = this.buttonRects[i];
-      if (px >= r.x && px <= r.x + r.width && py >= r.y && py <= r.y + r.height) return i;
-    }
-    return -1;
-  }
 
   private requestMode(index: number): void {
     this.onModeRequest?.(MODE_BUTTONS[index]);
@@ -1335,28 +1372,9 @@ export class DebugOverlay<S extends string = string> {
    * sweeps across the bar never switches modes.
    */
   private updateModeInteraction(frame: FrameEvent, view: ViewTransform, dt: number): void {
-    let dwellTarget = -1;
-    for (const hand of frame.hands) {
-      if (!hand.pointing) continue; // only a pointing hand presses buttons
-      const tip = this.toCanvas(hand, INDEX_TIP, view);
-      const index = this.hitButton(tip.x, tip.y);
-      if (index < 0) continue;
-      if (dwellTarget < 0) dwellTarget = index;
-    }
-
-    // Dwell clock from frame timestamps; capped so a stalled camera feed
-    // cannot complete a dwell in one jump.
-    if (dwellTarget !== this.dwellTarget) {
-      this.dwellTarget = dwellTarget;
-      this.dwellElapsed = 0;
-    } else if (dwellTarget >= 0 && dt > 0) {
-      this.dwellElapsed += dt;
-    }
-    if (this.dwellTarget >= 0 && this.dwellElapsed >= this.dwellMs) {
-      this.requestMode(this.dwellTarget);
-      this.dwellTarget = -1;
-      this.dwellElapsed = 0;
-    }
+    const target = this.pointedButton(frame, view, this.buttonRects);
+    const fired = this.modeDwell.update(target, dt, this.dwellMs);
+    if (fired >= 0) this.requestMode(fired);
   }
 
   /**
@@ -1386,29 +1404,14 @@ export class DebugOverlay<S extends string = string> {
         ctx.font = `bold ${fontSize}px ui-monospace, monospace`;
       }
 
-      const active = frame.mode === mode;
-      if (active) {
-        ctx.fillStyle = '#f8fafc'; // solid inverted background
-        ctx.fillRect(x, margin, width, height);
-        ctx.lineWidth = 2;
-        ctx.strokeStyle = '#0f172a';
-        ctx.strokeRect(x + 1, margin + 1, width - 2, height - 2);
-        ctx.fillStyle = '#0284c7'; // high-contrast indicator bar
-        ctx.fillRect(x + 3, margin + height - 7, width - 6, 4);
+      const rect = { x, y: margin, width, height };
+      if (frame.mode === mode) {
+        this.drawActiveButton(rect, 7, 4);
         ctx.fillStyle = '#0f172a';
       } else {
-        const dwelling = this.dwellTarget === i;
-        ctx.fillStyle = dwelling ? 'rgba(15, 23, 42, 0.85)' : 'rgba(15, 23, 42, 0.6)';
-        ctx.fillRect(x, margin, width, height);
-        ctx.lineWidth = dwelling ? 2 : 1.5;
-        ctx.strokeStyle = dwelling ? '#e2e8f0' : 'rgba(148, 163, 184, 0.55)';
-        ctx.strokeRect(x + 1, margin + 1, width - 2, height - 2);
-        if (dwelling && this.dwellMs > 0) {
-          const progress = Math.min(1, this.dwellElapsed / this.dwellMs);
-          ctx.fillStyle = '#38bdf8';
-          ctx.fillRect(x + 2, margin + height - 5, (width - 4) * progress, 3);
-        }
-        ctx.fillStyle = dwelling ? '#f8fafc' : '#cbd5e1';
+        const progress = this.modeDwell.progress(i, this.dwellMs);
+        this.drawIdleButton(rect, progress, 1.5);
+        ctx.fillStyle = progress !== null ? '#f8fafc' : '#cbd5e1';
       }
       ctx.fillText(label, x + width / 2, margin + height / 2);
     });
@@ -1420,14 +1423,6 @@ export class DebugOverlay<S extends string = string> {
   /* Drag-constraint toggles (EDIT mode, below [ EDIT ])                 */
   /* ------------------------------------------------------------------ */
 
-  /** CSS-pixel hit test against the last rendered constraint buttons. */
-  private hitConstraintButton(px: number, py: number): number {
-    for (let i = 0; i < this.constraintRects.length; i++) {
-      const r = this.constraintRects[i];
-      if (px >= r.x && px <= r.x + r.width && py >= r.y && py <= r.y + r.height) return i;
-    }
-    return -1;
-  }
 
   private requestConstraint(index: number): void {
     const constraint = CONSTRAINT_BUTTONS[index];
@@ -1439,34 +1434,12 @@ export class DebugOverlay<S extends string = string> {
   /**
    * Finger interaction with the constraint stack: the same pointing-dwell
    * model as the mode bar, active only while the buttons are visible
-   * (SELECT mode).
+   * (EDIT mode; the rects are empty otherwise).
    */
   private updateConstraintInteraction(frame: FrameEvent, view: ViewTransform, dt: number): void {
-    if (frame.mode !== 'select') {
-      this.constraintDwellTarget = -1;
-      this.constraintDwellElapsed = 0;
-      return;
-    }
-    let dwellTarget = -1;
-    for (const hand of frame.hands) {
-      if (!hand.pointing) continue; // only a pointing hand presses buttons
-      const tip = this.toCanvas(hand, INDEX_TIP, view);
-      const index = this.hitConstraintButton(tip.x, tip.y);
-      if (index < 0) continue;
-      if (dwellTarget < 0) dwellTarget = index;
-    }
-
-    if (dwellTarget !== this.constraintDwellTarget) {
-      this.constraintDwellTarget = dwellTarget;
-      this.constraintDwellElapsed = 0;
-    } else if (dwellTarget >= 0 && dt > 0) {
-      this.constraintDwellElapsed += dt;
-    }
-    if (this.constraintDwellTarget >= 0 && this.constraintDwellElapsed >= this.dwellMs) {
-      this.requestConstraint(this.constraintDwellTarget);
-      this.constraintDwellTarget = -1;
-      this.constraintDwellElapsed = 0;
-    }
+    const target = this.pointedButton(frame, view, this.constraintRects);
+    const fired = this.constraintDwell.update(target, dt, this.dwellMs);
+    if (fired >= 0) this.requestConstraint(fired);
   }
 
   /**
@@ -1508,40 +1481,25 @@ export class DebugOverlay<S extends string = string> {
    * same dwell progress bar as the mode buttons.
    */
   private drawConstraintButtons(cssWidth: number): void {
-    const ctx = this.ctx;
     const { margin, gap, height, width, top } = this.editStackMetrics(cssWidth);
 
     this.constraintRects = [];
     CONSTRAINT_BUTTONS.forEach((constraint, i) => {
       const x = margin;
       const y = top + i * (height + gap);
-      this.constraintRects.push({ x, y, width, height });
+      const rect = { x, y, width, height };
+      this.constraintRects.push(rect);
 
-      const active = this.dragConstraint === constraint;
-      if (active) {
-        ctx.fillStyle = '#f8fafc'; // solid inverted background
-        ctx.fillRect(x, y, width, height);
-        ctx.lineWidth = 2;
-        ctx.strokeStyle = '#0f172a';
-        ctx.strokeRect(x + 1, y + 1, width - 2, height - 2);
-        ctx.fillStyle = '#0284c7'; // high-contrast indicator bar
-        ctx.fillRect(x + 3, y + height - 6, width - 6, 3);
-        ctx.fillStyle = '#0f172a';
+      let ink: string;
+      if (this.dragConstraint === constraint) {
+        this.drawActiveButton(rect, 6, 3);
+        ink = '#0f172a';
       } else {
-        const dwelling = this.constraintDwellTarget === i;
-        ctx.fillStyle = dwelling ? 'rgba(15, 23, 42, 0.85)' : 'rgba(15, 23, 42, 0.6)';
-        ctx.fillRect(x, y, width, height);
-        ctx.lineWidth = dwelling ? 2 : 1;
-        ctx.strokeStyle = dwelling ? '#e2e8f0' : 'rgba(148, 163, 184, 0.55)';
-        ctx.strokeRect(x + 1, y + 1, width - 2, height - 2);
-        if (dwelling && this.dwellMs > 0) {
-          const progress = Math.min(1, this.constraintDwellElapsed / this.dwellMs);
-          ctx.fillStyle = '#38bdf8';
-          ctx.fillRect(x + 2, y + height - 5, (width - 4) * progress, 3);
-        }
-        ctx.fillStyle = dwelling ? '#f8fafc' : '#cbd5e1';
+        const progress = this.constraintDwell.progress(i, this.dwellMs);
+        this.drawIdleButton(rect, progress, 1);
+        ink = progress !== null ? '#f8fafc' : '#cbd5e1';
       }
-      this.drawEditIcon(constraint, x + width / 2, y + height / 2 - 1, width * 0.3, ctx.fillStyle as string);
+      this.drawEditIcon(constraint, x + width / 2, y + height / 2 - 1, width * 0.3, ink);
     });
   }
 
@@ -1549,13 +1507,6 @@ export class DebugOverlay<S extends string = string> {
   /* CSG Boolean tool toggles (SELECT mode, below the constraints)      */
   /* ------------------------------------------------------------------ */
 
-  /** CSS-pixel hit test against the last rendered Boolean tool buttons. */
-  private hitBooleanButton(px: number, py: number): number {
-    for (let i = 0; i < this.booleanRects.length; i++) {
-      if (this.inRect(this.booleanRects[i], px, py)) return i;
-    }
-    return -1;
-  }
 
   /**
    * Activate a Boolean toggle: mutually exclusive (arming the other tool
@@ -1579,8 +1530,7 @@ export class DebugOverlay<S extends string = string> {
    */
   private updateBooleanInteraction(frame: FrameEvent, view: ViewTransform, dt: number): void {
     if (frame.mode !== 'select') {
-      this.booleanDwellTarget = -1;
-      this.booleanDwellElapsed = 0;
+      this.booleanDwell.reset();
       this.xCrossFrames = 0;
       this.xCrossFired = false;
       return;
@@ -1597,25 +1547,9 @@ export class DebugOverlay<S extends string = string> {
       this.xCrossFired = false;
     }
     // Pointing dwell on the toggles.
-    let dwellTarget = -1;
-    for (const hand of frame.hands) {
-      if (!hand.pointing) continue; // only a pointing hand presses buttons
-      const tip = this.toCanvas(hand, INDEX_TIP, view);
-      const index = this.hitBooleanButton(tip.x, tip.y);
-      if (index < 0) continue;
-      if (dwellTarget < 0) dwellTarget = index;
-    }
-    if (dwellTarget !== this.booleanDwellTarget) {
-      this.booleanDwellTarget = dwellTarget;
-      this.booleanDwellElapsed = 0;
-    } else if (dwellTarget >= 0 && dt > 0) {
-      this.booleanDwellElapsed += dt;
-    }
-    if (this.booleanDwellTarget >= 0 && this.booleanDwellElapsed >= this.dwellMs) {
-      this.requestBoolean(this.booleanDwellTarget);
-      this.booleanDwellTarget = -1;
-      this.booleanDwellElapsed = 0;
-    }
+    const target = this.pointedButton(frame, view, this.booleanRects);
+    const fired = this.booleanDwell.update(target, dt, this.dwellMs);
+    if (fired >= 0) this.requestBoolean(fired);
   }
 
   /**
@@ -1626,7 +1560,6 @@ export class DebugOverlay<S extends string = string> {
    * armed button glows amber: the operation is ready to fire.
    */
   private drawBooleanButtons(cssWidth: number): void {
-    const ctx = this.ctx;
     const { margin, gap, height, width, top } = this.editStackMetrics(cssWidth);
     const booleanTop = top + CONSTRAINT_BUTTONS.length * (height + gap);
     const state = this.booleanState?.() ?? null;
@@ -1635,35 +1568,22 @@ export class DebugOverlay<S extends string = string> {
     BOOLEAN_BUTTONS.forEach((tool, i) => {
       const x = margin;
       const y = booleanTop + i * (height + gap);
-      this.booleanRects.push({ x, y, width, height });
+      const rect = { x, y, width, height };
+      this.booleanRects.push(rect);
 
-      const active = this.armedBooleanTool === tool;
-      const ready = active && state !== null && state.clash;
-      if (active) {
-        ctx.fillStyle = '#f8fafc'; // solid inverted background
-        ctx.fillRect(x, y, width, height);
-        ctx.lineWidth = ready ? 2.5 : 2;
-        ctx.strokeStyle = ready ? BOOLEAN_READY_STROKE : '#0f172a';
-        ctx.strokeRect(x + 1, y + 1, width - 2, height - 2);
-        // Ready-to-run cue: amber indicator bar (a clash is live).
-        ctx.fillStyle = ready ? BOOLEAN_READY_STROKE : '#0284c7';
-        ctx.fillRect(x + 3, y + height - 6, width - 6, 3);
-        ctx.fillStyle = ready ? BOOLEAN_READY_INK : '#0f172a';
+      let ink: string;
+      if (this.armedBooleanTool === tool) {
+        // Ready-to-run cue: amber outline + indicator bar (a clash is live).
+        const ready = state !== null && state.clash;
+        if (ready) this.drawActiveButton(rect, 6, 3, BOOLEAN_READY_STROKE, BOOLEAN_READY_STROKE, 2.5);
+        else this.drawActiveButton(rect, 6, 3);
+        ink = ready ? BOOLEAN_READY_INK : '#0f172a';
       } else {
-        const dwelling = this.booleanDwellTarget === i;
-        ctx.fillStyle = dwelling ? 'rgba(15, 23, 42, 0.85)' : 'rgba(15, 23, 42, 0.6)';
-        ctx.fillRect(x, y, width, height);
-        ctx.lineWidth = dwelling ? 2 : 1;
-        ctx.strokeStyle = dwelling ? '#e2e8f0' : 'rgba(148, 163, 184, 0.55)';
-        ctx.strokeRect(x + 1, y + 1, width - 2, height - 2);
-        if (dwelling && this.dwellMs > 0) {
-          const progress = Math.min(1, this.booleanDwellElapsed / this.dwellMs);
-          ctx.fillStyle = '#38bdf8';
-          ctx.fillRect(x + 2, y + height - 5, (width - 4) * progress, 3);
-        }
-        ctx.fillStyle = dwelling ? '#f8fafc' : '#cbd5e1';
+        const progress = this.booleanDwell.progress(i, this.dwellMs);
+        this.drawIdleButton(rect, progress, 1);
+        ink = progress !== null ? '#f8fafc' : '#cbd5e1';
       }
-      this.drawEditIcon(tool, x + width / 2, y + height / 2 - 1, width * 0.3, ctx.fillStyle as string);
+      this.drawEditIcon(tool, x + width / 2, y + height / 2 - 1, width * 0.3, ink);
     });
   }
 
@@ -1771,32 +1691,14 @@ export class DebugOverlay<S extends string = string> {
   }
 
   private requestUngroup(): void {
-    this.ungroupDwelling = false;
-    this.ungroupDwellElapsed = 0;
+    this.ungroupDwell.reset();
     if (this.canUngroupNow()) this.onUngroupRequest?.();
   }
 
   /** Pointing dwell on UNGROUP (only while the selection is a union). */
   private updateUngroupInteraction(frame: FrameEvent, view: ViewTransform, dt: number): void {
-    const rect = this.ungroupRect;
-    let hovering = false;
-    if (rect && this.canUngroupNow()) {
-      for (const hand of frame.hands) {
-        if (!hand.pointing) continue;
-        const tip = this.toCanvas(hand, INDEX_TIP, view);
-        if (this.inRect(rect, tip.x, tip.y)) {
-          hovering = true;
-          break;
-        }
-      }
-    }
-    if (hovering !== this.ungroupDwelling) {
-      this.ungroupDwelling = hovering;
-      this.ungroupDwellElapsed = 0;
-    } else if (hovering && dt > 0) {
-      this.ungroupDwellElapsed += dt;
-    }
-    if (hovering && this.ungroupDwellElapsed >= this.dwellMs) this.requestUngroup();
+    const target = this.canUngroupNow() ? this.pointedButton(frame, view, [this.ungroupRect]) : -1;
+    if (this.ungroupDwell.update(target, dt, this.dwellMs) >= 0) this.requestUngroup();
   }
 
   /**
@@ -1805,28 +1707,16 @@ export class DebugOverlay<S extends string = string> {
    * union; a pointing dwell fills its progress bar.
    */
   private drawUngroupButton(cssWidth: number): void {
-    const ctx = this.ctx;
     const { margin, gap, height, width, top } = this.editStackMetrics(cssWidth);
     const x = margin;
     const y = top + (CONSTRAINT_BUTTONS.length + BOOLEAN_BUTTONS.length) * (height + gap);
-    this.ungroupRect = { x, y, width, height };
+    const rect = { x, y, width, height };
+    this.ungroupRect = rect;
     const enabled = this.canUngroupNow();
-    const dwelling = enabled && this.ungroupDwelling;
-    ctx.fillStyle = dwelling ? 'rgba(15, 23, 42, 0.85)' : 'rgba(15, 23, 42, 0.6)';
-    ctx.fillRect(x, y, width, height);
-    ctx.lineWidth = dwelling ? 2 : 1;
-    ctx.strokeStyle = dwelling
-      ? '#e2e8f0'
-      : enabled
-        ? 'rgba(148, 163, 184, 0.55)'
-        : 'rgba(148, 163, 184, 0.2)';
-    ctx.strokeRect(x + 1, y + 1, width - 2, height - 2);
-    if (dwelling && this.dwellMs > 0) {
-      const progress = Math.min(1, this.ungroupDwellElapsed / this.dwellMs);
-      ctx.fillStyle = '#38bdf8';
-      ctx.fillRect(x + 2, y + height - 5, (width - 4) * progress, 3);
-    }
-    const ink = dwelling ? '#f8fafc' : enabled ? '#cbd5e1' : 'rgba(148, 163, 184, 0.35)';
+    const progress = enabled ? this.ungroupDwell.progress(0, this.dwellMs) : null;
+    this.drawIdleButton(rect, progress, 1, enabled ? undefined : 'rgba(148, 163, 184, 0.2)');
+    const ink =
+      progress !== null ? '#f8fafc' : enabled ? '#cbd5e1' : 'rgba(148, 163, 184, 0.35)';
     this.drawEditIcon('ungroup', x + width / 2, y + height / 2 - 1, width * 0.3, ink);
   }
 
@@ -1836,8 +1726,7 @@ export class DebugOverlay<S extends string = string> {
 
   /** Fire the trash request (pointing dwell / mouse click). */
   private requestTrash(): void {
-    this.trashDwelling = false;
-    this.trashDwellElapsed = 0;
+    this.trashDwell.reset();
     this.onTrashRequest?.();
   }
 
@@ -1847,30 +1736,8 @@ export class DebugOverlay<S extends string = string> {
    * whole scene through the confirmation dialog).
    */
   private updateTrashInteraction(frame: FrameEvent, view: ViewTransform, dt: number): void {
-    const trash = this.trashRect;
-    if (!trash) {
-      this.trashDwelling = false;
-      this.trashDwellElapsed = 0;
-      return;
-    }
-    let hovering = false;
-    for (const hand of frame.hands) {
-      if (!hand.pointing) continue; // only a pointing hand dwells here
-      const tip = this.toCanvas(hand, INDEX_TIP, view);
-      if (this.inRect(trash, tip.x, tip.y)) {
-        hovering = true;
-        break;
-      }
-    }
-    if (hovering !== this.trashDwelling) {
-      this.trashDwelling = hovering;
-      this.trashDwellElapsed = 0;
-    } else if (hovering && dt > 0) {
-      this.trashDwellElapsed += dt;
-    }
-    if (hovering && this.trashDwellElapsed >= this.trashDwellMs) {
-      this.requestTrash();
-    }
+    const target = this.pointedButton(frame, view, [this.trashRect]);
+    if (this.trashDwell.update(target, dt, this.trashDwellMs) >= 0) this.requestTrash();
   }
 
   /**
@@ -1882,25 +1749,16 @@ export class DebugOverlay<S extends string = string> {
    * is open.
    */
   private drawTrashButton(cssWidth: number): void {
-    const ctx = this.ctx;
     const size = this.iconButtonSize(cssWidth);
     const { margin, gap, height: barHeight } = this.barMetrics(cssWidth);
     const x = margin;
     const y = margin + barHeight + gap;
-    this.trashRect = { x, y, width: size, height: size };
+    const rect = { x, y, width: size, height: size };
+    this.trashRect = rect;
 
-    const dwelling = this.trashDwelling;
-    ctx.fillStyle = dwelling ? 'rgba(15, 23, 42, 0.85)' : 'rgba(15, 23, 42, 0.6)';
-    ctx.fillRect(x, y, size, size);
-    ctx.lineWidth = dwelling ? 2 : 1.5;
-    ctx.strokeStyle = dwelling ? '#e2e8f0' : TRASH_STROKE;
-    ctx.strokeRect(x + 1, y + 1, size - 2, size - 2);
-    this.drawTrashIcon(x + size / 2, y + size / 2, size * 0.3, dwelling ? '#f8fafc' : TRASH_INK);
-    if (dwelling && this.trashDwellMs > 0) {
-      const progress = Math.min(1, this.trashDwellElapsed / this.trashDwellMs);
-      ctx.fillStyle = TRASH_PROGRESS_FILL;
-      ctx.fillRect(x + 2, y + size - 5, (size - 4) * progress, 3);
-    }
+    const progress = this.trashDwell.progress(0, this.trashDwellMs);
+    this.drawIdleButton(rect, progress, 1.5, TRASH_STROKE, TRASH_PROGRESS_FILL);
+    this.drawTrashIcon(x + size / 2, y + size / 2, size * 0.3, progress !== null ? '#f8fafc' : TRASH_INK);
   }
 
   /** Recycle-bin line icon (lid + can + slats), centered at (cx, cy), half-size r. */
@@ -2164,14 +2022,6 @@ export class DebugOverlay<S extends string = string> {
   /* Shape picker (CREATE mode, row below the mode bar)                 */
   /* ------------------------------------------------------------------ */
 
-  /** CSS-pixel hit test against the last rendered shape buttons. */
-  private hitShapeButton(px: number, py: number): number {
-    for (let i = 0; i < this.shapeRects.length; i++) {
-      const r = this.shapeRects[i];
-      if (px >= r.x && px <= r.x + r.width && py >= r.y && py <= r.y + r.height) return i;
-    }
-    return -1;
-  }
 
   private requestShape(index: number): void {
     const shape = this.shapes[index];
@@ -2185,31 +2035,9 @@ export class DebugOverlay<S extends string = string> {
    * the mode bar, active only while the row is visible (CREATE).
    */
   private updateShapeInteraction(frame: FrameEvent, view: ViewTransform, dt: number): void {
-    if (frame.mode !== 'create') {
-      this.shapeDwellTarget = -1;
-      this.shapeDwellElapsed = 0;
-      return;
-    }
-    let dwellTarget = -1;
-    for (const hand of frame.hands) {
-      if (!hand.pointing) continue; // only a pointing hand presses buttons
-      const tip = this.toCanvas(hand, INDEX_TIP, view);
-      const index = this.hitShapeButton(tip.x, tip.y);
-      if (index < 0) continue;
-      if (dwellTarget < 0) dwellTarget = index;
-    }
-
-    if (dwellTarget !== this.shapeDwellTarget) {
-      this.shapeDwellTarget = dwellTarget;
-      this.shapeDwellElapsed = 0;
-    } else if (dwellTarget >= 0 && dt > 0) {
-      this.shapeDwellElapsed += dt;
-    }
-    if (this.shapeDwellTarget >= 0 && this.shapeDwellElapsed >= this.dwellMs) {
-      this.requestShape(this.shapeDwellTarget);
-      this.shapeDwellTarget = -1;
-      this.shapeDwellElapsed = 0;
-    }
+    const target = this.pointedButton(frame, view, this.shapeRects);
+    const fired = this.shapeDwell.update(target, dt, this.dwellMs);
+    if (fired >= 0) this.requestShape(fired);
   }
 
   /**
@@ -2231,31 +2059,16 @@ export class DebugOverlay<S extends string = string> {
 
     this.shapes.forEach((shape, i) => {
       const y = top + i * (size + gap);
-      this.shapeRects.push({ x, y, width: size, height: size });
-      const active = this.activeShapeId === shape.id;
+      const rect = { x, y, width: size, height: size };
+      this.shapeRects.push(rect);
       let ink: string;
-      if (active) {
-        ctx.fillStyle = '#f8fafc'; // solid inverted background
-        ctx.fillRect(x, y, size, size);
-        ctx.lineWidth = 2;
-        ctx.strokeStyle = '#0f172a';
-        ctx.strokeRect(x + 1, y + 1, size - 2, size - 2);
-        ctx.fillStyle = '#0284c7'; // high-contrast indicator bar
-        ctx.fillRect(x + 3, y + size - 5, size - 6, 3);
+      if (this.activeShapeId === shape.id) {
+        this.drawActiveButton(rect, 5, 3);
         ink = '#0f172a';
       } else {
-        const dwelling = this.shapeDwellTarget === i;
-        ctx.fillStyle = dwelling ? 'rgba(15, 23, 42, 0.85)' : 'rgba(15, 23, 42, 0.6)';
-        ctx.fillRect(x, y, size, size);
-        ctx.lineWidth = dwelling ? 2 : 1.5;
-        ctx.strokeStyle = dwelling ? '#e2e8f0' : 'rgba(148, 163, 184, 0.55)';
-        ctx.strokeRect(x + 1, y + 1, size - 2, size - 2);
-        if (dwelling && this.dwellMs > 0) {
-          const progress = Math.min(1, this.shapeDwellElapsed / this.dwellMs);
-          ctx.fillStyle = '#38bdf8';
-          ctx.fillRect(x + 2, y + size - 5, (size - 4) * progress, 3);
-        }
-        ink = dwelling ? '#f8fafc' : '#cbd5e1';
+        const progress = this.shapeDwell.progress(i, this.dwellMs);
+        this.drawIdleButton(rect, progress, 1.5);
+        ink = progress !== null ? '#f8fafc' : '#cbd5e1';
       }
       if (shape.icon) {
         this.drawShapeIcon(shape.icon, x + size / 2, y + size / 2 - 1, size * 0.3, ink);

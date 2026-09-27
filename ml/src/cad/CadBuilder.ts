@@ -364,19 +364,6 @@ export class CadBuilder {
     return this.tool;
   }
 
-  get objectCount(): number {
-    return this.committed.length;
-  }
-
-  get hasActiveBuild(): boolean {
-    return this.build !== null;
-  }
-
-  /** Number of currently selected meshes (0 or 1). */
-  get selectedCount(): number {
-    return this.selected ? 1 : 0;
-  }
-
   /** Committed meshes (read-only view) — consumed by the AR mirror. */
   get committedMeshes(): readonly THREE.Mesh[] {
     return this.committed;
@@ -801,11 +788,6 @@ export class CadBuilder {
     this.selectionRotationAnchor = null;
     this.rotating = false;
     if (this.rotationRing) this.rotationRing.visible = false;
-  }
-
-  /** Whether an open-palm rotation gesture is currently running. */
-  get isRotating(): boolean {
-    return this.rotating;
   }
 
   /* ------------------------------------------------------------------ */

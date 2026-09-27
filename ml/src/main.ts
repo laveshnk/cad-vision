@@ -35,19 +35,16 @@
  * and resized via its corner grip (`ThumbResizer`).
  */
 
-import { GestureEngine } from './vision/GestureEngine';
-import { DebugOverlay, MODE_LABELS } from './vision/DebugOverlay';
+import { DebugOverlay, GestureEngine, MODE_LABELS } from './vision';
 import type {
   FrameEvent,
   GestureSignalEvent,
   Handedness,
-} from './vision/types';
-import type {
   OverlayConfirmIntent,
   OverlayHudDisc,
   OverlayHudRect,
   OverlaySelectionHud,
-} from './vision/DebugOverlay';
+} from './vision';
 import { CadScene } from './cad/CadScene';
 import { CadBuilder, type CadTool } from './cad/CadBuilder';
 import { buildArSceneFrame } from './cad/ArMirror';
@@ -206,7 +203,7 @@ const toolbar = new Toolbar(toolbarRoot, {
 // timed hover lock; the bridge below feeds it viewport-local pixels (the
 // same space the camera-view disc maps to) and applies the picked hex
 // through CadBuilder.setSelectedColor.
-const colorWheel = new ColorWheel(viewport, { dwellMs: HOLD_TO_ACT_MS, headless: true });
+const colorWheel = new ColorWheel(viewport, { dwellMs: HOLD_TO_ACT_MS });
 
 /** Color-wheel zoom while a pointing fingertip hovers it (camera view). */
 const WHEEL_HOVER_ZOOM = 2;

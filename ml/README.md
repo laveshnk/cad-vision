@@ -48,7 +48,7 @@ src/
 │   └── ArMirror.ts            # plain-data AR projection of grid + meshes for the overlay
 ├── ui/
 │   ├── Toolbar.ts             # CAD toolbar: camera toggle, Export STL
-│   ├── ColorWheel.ts          # floating HSL color wheel + timed hover lock (dwell tracker)
+│   ├── ColorWheel.ts          # headless HSL color-wheel model: placement, picking, timed hover lock
 │   ├── SelectionMenu.ts       # floating selection HUD (Delete action, EDIT mode)
 │   ├── MetricsBar.ts          # boxy monospace stats bar under the camera view
 │   ├── hitTest.ts             # root-local DOM hit-tests for the floating overlays
@@ -65,6 +65,7 @@ src/
     ├── GestureClassifier.ts   # pinch/fist/orbit/zoom detection + finite state machine
     ├── GestureEngine.ts       # facade: pipeline + event emitter
     ├── DebugOverlay.ts        # 2D canvas renderer (landmarks, skeleton, in-vision UI)
+    ├── DwellClock.ts          # shared hover-to-press dwell timer for the overlay buttons
     └── index.ts               # public API barrel
 ```
 
@@ -272,7 +273,7 @@ build:
    axis, with a compass ring (dashed circle + yaw needle) rendered around
    the object in both the 3D viewport and the AR mirror. An
    **HSL color wheel** appears **in the camera view only** (the 3D view
-   draws none — `ColorWheel` runs headless as the picking model), pinned
+   draws none — `ColorWheel` is a DOM-free picking model), pinned
    at mid-height on the right edge of the part of the webcam image the
    camera view shows (a 16:9 webcam loses its sides in the 4:3 view —
    `DebugOverlay.visibleDeviceRect`). Mid-height matters: a fingertip low
@@ -546,7 +547,7 @@ The `<canvas id="overlay">` (pure Canvas 2D) mirrors the feed and draws:
 ## Tests
 
 ```bash
-npm test        # vitest — coordinates, filters, handedness stabilizer, path straightener, classifier/FSM (+ pose snapshots), CSG booleanOps, color-wheel math / dwell tracker unit tests
+npm test        # vitest — coordinates, filters, handedness stabilizer, path straightener, classifier/FSM (+ pose snapshots), overlay dwell clock, CSG booleanOps, color-wheel math / dwell tracker unit tests
 npm run build   # tsc --noEmit + vite production build
 ```
 
