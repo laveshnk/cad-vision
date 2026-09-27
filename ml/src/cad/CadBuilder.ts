@@ -92,7 +92,24 @@
 import * as THREE from 'three';
 import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js';
 import type { CadScene } from './CadScene';
+import { AxisLock } from './axisLock';
 import { boxesClash, evaluateBoolean, overlapBox, worldBounds, type BooleanOperation } from './booleanOps';
+
+/** World up: the fist-rotation yaw axis. */
+const WORLD_Y = new THREE.Vector3(0, 1, 0);
+
+/** Lowest world-space Y over a mesh's actual vertices (exact, unlike an AABB of a rotated box). */
+function worldBottom(mesh: THREE.Mesh): number {
+  const position = mesh.geometry.getAttribute('position');
+  if (!position) return mesh.position.y;
+  const vertex = new THREE.Vector3();
+  let bottom = Infinity;
+  for (let i = 0; i < position.count; i++) {
+    vertex.fromBufferAttribute(position, i).applyMatrix4(mesh.matrixWorld);
+    if (vertex.y < bottom) bottom = vertex.y;
+  }
+  return bottom;
+}
 
 export type CadTool = 'box' | 'cuboid' | 'cylinder' | 'sphere';
 
@@ -150,6 +167,22 @@ export interface CadBuilderOptions {
   dragElevationScale?: number;
   /** Highest allowed mesh center height while drag-lifting (world units). */
   dragMaxHeight?: number;
+  /**
+   * Allow the legacy single-hand footprint drawing (one pinch raycast onto
+   * the floor starts a build). Off by default: a single stray / misdetected
+   * pinch would drop objects in random spots — building takes the
+   * deliberate two-hand gesture. Default false.
+   */
+  singleHandFootprint?: boolean;
+  /**
+   * EDIT mode fist rotation: radians of object rotation per device-space
+   * unit of fist travel (left / right → vertical axis, up / down → the
+   * camera's horizontal axis). Default 2.5 (a fist sweep across a third of
+   * the view ≈ 95°).
+   */
+  fistRotateSpeed?: number;
+  /** Per-axis fist delta (device units) below which rotation ignores jitter. */
+  fistRotateDeadzone?: number;
   /**
    * SELECT mode: a pinch must be held this long (ms) before it starts moving
    * the picked mesh, so a quick pinch only selects it. Default 300.
@@ -261,7 +294,11 @@ export class CadBuilder {
     grabHeight: number;
     /** Lift-plane hit height at the last anchor ('y' constraint), or null. */
     liftStartY: number | null;
+    /** The mesh was already selected at pinch start: a tap deselects it. */
+    toggleOnTap: boolean;
   } | null = null;
+  /** One-axis-at-a-time filter for fist rotation (see `AxisLock`). */
+  private readonly fistAxisLock = new AxisLock();
   /** Scratch plane for grab-height / lift raycasts. */
   private readonly dragPlane = new THREE.Plane();
   /** Active SELECT-mode drag constraint: ground plane ('xz') or Y axis ('y'). */
@@ -310,6 +347,9 @@ export class CadBuilder {
       groundRadius: options.groundRadius ?? 16,
       dragElevationScale: options.dragElevationScale ?? 3,
       dragMaxHeight: options.dragMaxHeight ?? 5,
+      singleHandFootprint: options.singleHandFootprint ?? false,
+      fistRotateSpeed: options.fistRotateSpeed ?? 2.5,
+      fistRotateDeadzone: options.fistRotateDeadzone ?? 0.0015,
       dragHoldMs: options.dragHoldMs ?? 300,
       previewColor: options.previewColor ?? 0x0284c7,
       bodyColor: options.bodyColor ?? 0x3f3f46,
@@ -368,6 +408,7 @@ export class CadBuilder {
 
   /** Pinch engaged at device coords (x, y): lock Point A, spawn a preview. */
   onPinchStart(x: number, y: number): void {
+    if (!this.options.singleHandFootprint) return; // two-hand builds only
     if (this.build) return; // pending build: this pinch is likely extrude prep
     this.startBuild(this.groundPoint(x, y), 'footprint', false);
   }
@@ -583,12 +624,15 @@ export class CadBuilder {
       this.deselect();
       return false;
     }
+    const wasSelected = this.selected === mesh;
     this.select(mesh);
     // Lock the pinch offset relative to the mesh origin at the grabbed
     // surface point's height, plus the vertical (lift) anchor: the mesh may
     // never sink below the ground plane.
-    const bottom = mesh.geometry.boundingBox?.min.y ?? 0;
-    const minY = -bottom;
+    // Floor clamp from the *world* bounds, so a tilted (fist-rotated) mesh
+    // is clamped by its real lowest point.
+    mesh.updateMatrixWorld(true);
+    const minY = mesh.position.y - worldBottom(mesh);
     const drag = {
       offsetX: 0,
       offsetZ: 0,
@@ -602,6 +646,7 @@ export class CadBuilder {
       moving: false,
       grabHeight: hits[0].point.y - mesh.position.y,
       liftStartY: null,
+      toggleOnTap: wasSelected,
     };
     this.selectionDrag = drag;
     this.reanchorDrag(mesh, drag);
@@ -899,13 +944,16 @@ export class CadBuilder {
     const result = evaluateBoolean(base, tool, op, material);
     if (!result) return false;
 
-    // Swap the result in at the base's scene-graph slot; both operands go.
-    const slot = this.committed.indexOf(base);
+    // Swap the result in at the base's slot; both operands go. (Replace the
+    // base first, then drop the tool — splicing first would shift the base's
+    // index and leave the disposed base behind as an invisible, pickable,
+    // exportable ghost.)
     this.root.remove(base, tool);
-    const toolIndex = this.committed.indexOf(tool);
-    if (toolIndex >= 0) this.committed.splice(toolIndex, 1);
+    const slot = this.committed.indexOf(base);
     if (slot >= 0) this.committed[slot] = result;
     else this.committed.push(result);
+    const toolIndex = this.committed.indexOf(tool);
+    if (toolIndex >= 0) this.committed.splice(toolIndex, 1);
     this.root.add(result);
     disposeMesh(base);
     disposeMesh(tool);
@@ -988,8 +1036,82 @@ export class CadBuilder {
     this.endRotateSelection();
   }
 
+  /**
+   * The picking pinch was released (EDIT mode). A quick pinch (a tap — it
+   * never started moving) on a mesh that was *already* selected toggles the
+   * selection off; any other release just ends the drag and keeps the
+   * selection (a first tap selects, a hold-and-drag moves).
+   */
+  releasePick(): void {
+    const drag = this.selectionDrag;
+    if (drag && !drag.moving && drag.toggleOnTap) this.deselect();
+    else this.endDrag();
+  }
+
+  /**
+   * Fist rotation of the selection (EDIT mode), one axis at a time
+   * (`AxisLock`): each fist gesture picks its axis from its dominant
+   * direction and sticks to it — no free tumbling with every wobble:
+   * - mostly **left / right** → spin about the vertical (world Y) axis — the
+   *   side facing you follows the fist;
+   * - mostly **up / down** → tip about the camera's horizontal (screen-X)
+   *   axis — the side facing you tips up / down with the fist, from any
+   *   camera angle.
+   * The lock clears when the fist holds still briefly or the gesture ends
+   * (`endFistRotation`).
+   * Deltas are device units (`fistRotateSpeed` radians per unit; jitter
+   * below `fistRotateDeadzone` per axis is dropped). The mesh turns about
+   * its own center (world AABB center), and its lowest point keeps its
+   * height (measured on the actual vertices), so it neither sinks into nor
+   * creeps up off the floor as you turn it back and forth.
+   */
+  rotateSelectionBy(deltaX: number, deltaY: number): void {
+    const mesh = this.selected;
+    if (!mesh || !Number.isFinite(deltaX) || !Number.isFinite(deltaY)) return;
+    const { fistRotateSpeed: speed, fistRotateDeadzone: deadzone } = this.options;
+    const locked = this.fistAxisLock.update(deltaX, deltaY);
+    const yaw = Math.abs(locked.deltaX) < deadzone ? 0 : locked.deltaX * speed;
+    const pitch = Math.abs(locked.deltaY) < deadzone ? 0 : -locked.deltaY * speed;
+    if (yaw === 0 && pitch === 0) return;
+
+    mesh.updateMatrixWorld(true);
+    const bottomBefore = worldBottom(mesh);
+    const pivot = worldBounds(mesh, this.scratchBoxA).getCenter(new THREE.Vector3());
+    // Screen-horizontal axis: the camera's right vector (horizontal, since
+    // the orbit camera always keeps world-up).
+    const camera = this.scene.camera;
+    camera.updateMatrixWorld();
+    const right = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0).setY(0);
+    if (right.lengthSq() < 1e-8) right.set(1, 0, 0);
+    right.normalize();
+
+    const turn = new THREE.Quaternion();
+    if (yaw !== 0) turn.multiply(new THREE.Quaternion().setFromAxisAngle(WORLD_Y, yaw));
+    if (pitch !== 0) turn.premultiply(new THREE.Quaternion().setFromAxisAngle(right, pitch));
+    // Rotate about the pivot: orientation and position together.
+    mesh.position.sub(pivot).applyQuaternion(turn).add(pivot);
+    mesh.quaternion.premultiply(turn);
+    mesh.updateMatrixWorld(true);
+
+    // Keep the lowest point where it was (never below the floor).
+    const lift = Math.max(0, bottomBefore) - worldBottom(mesh);
+    if (lift !== 0) {
+      mesh.position.y += lift;
+      mesh.updateMatrixWorld(true);
+    }
+    this.syncSelectionOutline();
+    if (this.rotating) this.updateRotationRing();
+    this.updateClash();
+  }
+
+  /** The fist gesture ended: the next fist picks its rotation axis afresh. */
+  endFistRotation(): void {
+    this.fistAxisLock.reset();
+  }
+
   /** Clear the selection and remove its outline highlight. */
   deselect(): void {
+    this.fistAxisLock.reset(); // a new selection starts a fresh rotation axis
     this.hideSelectionOutline();
     this.selected = null;
     this.selectionDrag = null;

@@ -55,6 +55,18 @@ export interface GestureClassifierOptions {
   /** Pinch distance above which a pinch releases (hysteresis). Normalized units. */
   pinchReleaseThreshold?: number;
   /**
+   * Consecutive frames the pinch must hold (below `pinchStartThreshold`)
+   * before it engages — a one-frame thumb/index touch from a flickering or
+   * misdetected hand never becomes a pinch. Default 2.
+   */
+  pinchEnterFrames?: number;
+  /**
+   * A pinch cannot *start* with its center within this margin of the frame
+   * border (normalized units): hands half out of view / spurious detections
+   * at the edges are the main source of accidental pinches. Default 0.03.
+   */
+  pinchEdgeMargin?: number;
+  /**
    * EMA alpha applied to the pinch-distance signal before thresholding
    * (reduces flicker near the thresholds); `null` disables it.
    */
@@ -172,6 +184,8 @@ interface HandTrack {
   pinchStartPos: Vec3 | null;
   lastPinchCenter: Vec3 | null;
   pinchEma: EmaScalar | null;
+  /** Consecutive frames the pinch-start conditions have held (debounce). */
+  pinchCandidateFrames: number;
   /**
    * The pinch already finished a two-hand build (the lower hand released
    * first); it is ignored until released so it cannot start a new drawing.
@@ -218,6 +232,8 @@ export class GestureClassifier {
       GestureClassifierOptions,
       | 'pinchStartThreshold'
       | 'pinchReleaseThreshold'
+      | 'pinchEnterFrames'
+      | 'pinchEdgeMargin'
       | 'fistFoldRatio'
       | 'fistMinFoldedFingers'
       | 'fistThumbTuckRatio'
@@ -262,6 +278,13 @@ export class GestureClassifier {
   private zoomTurnEngaged = false;
   /** Two-fist sub-gesture last frame: both fists zooming, or one moving the camera. */
   private zoomSubMode: 'zoom' | 'move' | null = null;
+  /**
+   * Fists drive the host's selected object instead of the camera (EDIT mode
+   * with a selection; set by the host via `setObjectRotation`).
+   */
+  private objectRotation = false;
+  /** Which fist drove the last two-fist object-rotation frame. */
+  private rotationFist: Handedness | null = null;
   private lastZoomDistance: number | null = null;
   private lastZoomScale: number | null = null;
 
@@ -273,6 +296,8 @@ export class GestureClassifier {
   private extrudePrevY: number | null = null;
   /** Upper pinch (higher on screen) during the last dual-hand frame; null on a tie. */
   private extrudeUpperHand: Handedness | null = null;
+  /** Timestamp of the current two-hand build's `extrude_start`. */
+  private extrudeStartedAt = 0;
 
   private lastExtrudeDistance: number | null = null;
   private lastExtrudeScale: number | null = null;
@@ -300,6 +325,8 @@ export class GestureClassifier {
     this.options = {
       pinchStartThreshold: options.pinchStartThreshold ?? 0.045,
       pinchReleaseThreshold: options.pinchReleaseThreshold ?? 0.065,
+      pinchEnterFrames: options.pinchEnterFrames ?? 2,
+      pinchEdgeMargin: options.pinchEdgeMargin ?? 0.03,
       // `null` explicitly disables smoothing; `??` would swallow it.
       pinchDistanceSmoothing:
         options.pinchDistanceSmoothing !== undefined ? options.pinchDistanceSmoothing : 0.5,
@@ -332,6 +359,25 @@ export class GestureClassifier {
 
   get currentState(): GestureState {
     return this.state;
+  }
+
+  /**
+   * Route fist gestures to the host's selected object (true) or the camera
+   * (false, default). While on: one fist emits `orbit` movement deltas with
+   * no wrist-roll and no path straightening (raw, live palm motion — the
+   * host turns the object: up / down → screen-horizontal axis, left / right
+   * → vertical axis); two fists never zoom — the faster-moving fist drives
+   * the rotation, and when both move about equally fast the right hand wins.
+   */
+  setObjectRotation(enabled: boolean): void {
+    if (this.objectRotation === enabled) return;
+    this.objectRotation = enabled;
+    this.rotationFist = null;
+  }
+
+  /** Whether fists currently drive the host's selected object. */
+  get objectRotationEnabled(): boolean {
+    return this.objectRotation;
   }
 
   /** Active interaction mode (VIEW / SELECT / CREATE). */
@@ -424,7 +470,10 @@ export class GestureClassifier {
    * through the straightener and return the change in straightened position.
    */
   private straightenCameraDelta(raw: Vec2): Vec2 {
-    if (!this.cameraPath) return raw;
+    // Rotating a selected object needs the live, unfiltered fist motion:
+    // straightening delays and re-aims it (fine for a camera glide, wrong
+    // for a direct "grab and turn").
+    if (!this.cameraPath || this.objectRotation) return raw;
     this.rawCameraPath = { x: this.rawCameraPath.x + raw.x, y: this.rawCameraPath.y + raw.y };
     const out = this.cameraPath.update(this.rawCameraPath);
     const delta = { x: out.x - this.lastCameraOut.x, y: out.y - this.lastCameraOut.y };
@@ -448,6 +497,7 @@ export class GestureClassifier {
             ? new EmaScalar(this.options.pinchDistanceSmoothing)
             : null,
         pinchConsumed: false,
+        pinchCandidateFrames: 0,
         fistActive: false,
         fistFrames: 0,
         openFrames: 0,
@@ -550,7 +600,22 @@ export class GestureClassifier {
       shape.foldRatios[0] < this.options.fistFoldRatio;
 
     if (!track.pinchActive) {
-      if (dist < this.options.pinchStartThreshold && !fistLike) {
+      // Debounced, in-frame start: the pinch must hold for pinchEnterFrames
+      // and its center must sit inside the frame (not at the border).
+      const normalizedCenter = midpoint3(thumb.normalized, index.normalized);
+      const margin = this.options.pinchEdgeMargin;
+      const inFrame =
+        normalizedCenter.x > margin &&
+        normalizedCenter.x < 1 - margin &&
+        normalizedCenter.y > margin &&
+        normalizedCenter.y < 1 - margin;
+      if (dist < this.options.pinchStartThreshold && !fistLike && inFrame) {
+        track.pinchCandidateFrames++;
+      } else {
+        track.pinchCandidateFrames = 0;
+      }
+      if (track.pinchCandidateFrames >= this.options.pinchEnterFrames) {
+        track.pinchCandidateFrames = 0;
         track.pinchActive = true;
         track.pinchStartPos = center;
         track.lastPinchCenter = center;
@@ -735,7 +800,13 @@ export class GestureClassifier {
     ) {
       activePinches[0].pinchConsumed = true;
       activePinches = [];
-      events.push({ type: 'extrude_end', timestamp, mode: 'dual-hand', heightSet: false });
+      events.push({
+        type: 'extrude_end',
+        timestamp,
+        mode: 'dual-hand',
+        heightSet: false,
+        durationMs: timestamp - this.extrudeStartedAt,
+      });
       this.clearExtrudeReference();
       this.setState('IDLE', 'lower pinch released first (flat)', timestamp, events);
     }
@@ -769,7 +840,9 @@ export class GestureClassifier {
         if (this.orbitHand) {
           const raw = subtract3(track.palmCenter, track.prevPalmCenter);
           const delta = this.straightenCameraDelta({ x: raw.x, y: raw.y });
-          const deltaRoll = this.rollDelta(track);
+          // Wrist roll turns the camera; it is ignored while the fist
+          // rotates a selected object (only up / down / left / right count).
+          const deltaRoll = this.objectRotation ? 0 : this.rollDelta(track);
           this.lastOrbitDelta = { x: delta.x, y: delta.y };
           events.push({
             type: 'orbit',
@@ -820,6 +893,7 @@ export class GestureClassifier {
         timestamp,
         mode: this.extrudeMode ?? 'dual-hand',
         heightSet: this.extrudeMode === 'single-hand',
+        durationMs: timestamp - this.extrudeStartedAt,
       });
       this.clearExtrudeReference();
       this.setState('IDLE', 'extrusion released', timestamp, events);
@@ -940,8 +1014,34 @@ export class GestureClassifier {
     const aMoving = a.speedEma > this.options.zoomMoveSpeed;
     const bMoving = b.speedEma > this.options.zoomMoveSpeed;
 
+    if (this.objectRotation && aMoving && bMoving) {
+      // Object rotation: never zoom — the faster fist drives; when both move
+      // about equally fast (within 25 %), the right hand wins.
+      const faster =
+        a.speedEma > b.speedEma * 1.25 ? a : b.speedEma > a.speedEma * 1.25 ? b : null;
+      const driver = faster ?? (a.handedness === 'Right' ? a : b);
+      if (this.zoomSubMode !== 'move' || this.rotationFist !== driver.handedness) {
+        this.resetCameraPath();
+      }
+      this.zoomSubMode = 'move';
+      this.rotationFist = driver.handedness;
+      const raw = subtract3(driver.palmCenter, driver.prevPalmCenter);
+      const delta = this.straightenCameraDelta({ x: raw.x, y: raw.y });
+      this.lastOrbitDelta = { x: delta.x, y: delta.y };
+      events.push({
+        type: 'orbit',
+        timestamp,
+        hand: driver.handedness,
+        deltaX: delta.x,
+        deltaY: delta.y,
+        deltaRoll: 0,
+      });
+      this.lastZoomDistance = distance;
+      return;
+    }
     if (aMoving !== bMoving) {
-      // Only one fist moving: it moves the camera like a single fist.
+      // Only one fist moving: it moves the camera (or, with object rotation
+      // on, turns the selected object) like a single fist.
       if (this.zoomSubMode !== 'move') this.resetCameraPath();
       this.zoomSubMode = 'move';
       const moving = aMoving ? a : b;
@@ -1038,6 +1138,7 @@ export class GestureClassifier {
     if (this.state !== 'EXTRUDING') {
       this.setState('EXTRUDING', 'dual-hand pinch engaged', timestamp, events);
       events.push({ type: 'extrude_start', timestamp, mode: 'dual-hand' });
+      this.extrudeStartedAt = timestamp;
       this.extrudeMode = 'dual-hand';
       this.extrudeSingleHand = null;
       this.extrudeHeight = 0;

@@ -5,33 +5,34 @@
  * and pinch indicators. Pure Canvas 2D — no WebGL.
  *
  * Along the top edge it renders the interaction-mode switcher ([ VIEW ],
- * [ SELECT ], [ CREATE ]): boxy, mutually exclusive toggle buttons reported
- * through the `onModeRequest` callback. In SELECT mode a second stack of
- * mutually exclusive toggles, [ XZ PLANE ] (default) and
- * [ Y AXIS (ELEVATE) ], sits vertically below the mode bar in the top-left
- * corner (`onDragConstraintRequest`), followed by the CSG Boolean tool
- * toggles `[ SUBTRACT (Cut Hole) ]` / `[ UNION (Merge) ]`
- * (`onBooleanToolRequest`); in CREATE mode a column of shape icon buttons
- * (cube / cuboid / cylinder / sphere, from the `shapes` option) is stacked
- * vertically down the right edge instead (`onShapeRequest`).
+ * [ EDIT ], [ CREATE ] — the `select` mode is labeled EDIT): boxy, mutually
+ * exclusive toggle buttons reported through the `onModeRequest` callback.
+ * Each mode's options sit under its own button. In VIEW mode the trash bin
+ * sits below [ VIEW ] (`onTrashRequest`). In EDIT mode a stack of mutually
+ * exclusive toggles, [ XZ PLANE ] (default) and [ Y AXIS ], sits vertically
+ * below [ EDIT ] (`onDragConstraintRequest`), followed by the CSG Boolean
+ * tool toggles `[ SUBTRACT ]` / `[ UNION ]` (`onBooleanToolRequest`). In
+ * CREATE mode a column of shape icon buttons (cube / cuboid / cylinder /
+ * sphere, from the `shapes` option) is stacked down the right edge, under
+ * [ CREATE ] (`onShapeRequest`).
  *
  * Every button responds to a mouse click or to a **pointing** hand (index
  * finger up, other fingers curled — `HandSnapshot.pointing`) holding its
  * index tip over the button for `dwellMs`; a ring marks a pointing
  * fingertip. Pinches, fists and open palms never press a toggle button, so
  * moving, editing or building objects can't switch modes / shapes by
- * accident. Two dedicated surfaces are pinch-activated instead: the trash
- * bin icon in the bottom-right corner (`onTrashRequest`) and the spatial
- * confirmation dialog's targets.
+ * accident — including the VIEW-mode trash bin (`onTrashRequest`), which
+ * clears the scene through the confirmation dialog below.
  *
  * Destructive actions never open browser popups or DOM modals: the trash bin
  * (a scene clear) and the selection's Delete button open an in-vision
  * spatial dialog on this canvas — two spatial targets,
- * `[ CONFIRM (Pinch) ]` and `[ CANCEL (Open Palm) ]`. Confirming is a fresh
- * pinch that closes over the confirm target, a mouse click, or holding the
- * "OK" gesture (thumb + index loop, other fingers extended) for
- * `confirmHoldMs`; canceling is an open palm held briefly or simply moving
- * every hand away. While the dialog is open every other overlay interaction
+ * `[ CONFIRM (Hold) ]` and `[ CANCEL (Hold) ]`. Confirming is a pointing
+ * fingertip held on the confirm target (or the "OK" gesture — thumb + index
+ * loop, other fingers extended — held anywhere) for `confirmHoldMs`, the
+ * same wait as the color wheel lock and the Delete button, or a mouse
+ * click; a pinch never confirms instantly. Canceling is a pointing hold on
+ * the cancel target, an open palm held briefly, or moving every hand away. While the dialog is open every other overlay interaction
  * is frozen and the host freezes the scene (see `confirmActive`).
  *
  * The live stats (MODE / STATE / FPS / HANDS) are *not* drawn here — the host
@@ -141,12 +142,6 @@ export type DragConstraint = 'xz' | 'y';
  * `'union'` merges both solids into one continuous body.
  */
 export type OverlayBooleanTool = 'subtract' | 'union';
-
-/** Labels for the SELECT-mode Boolean tool toggles, top to bottom. */
-const BOOLEAN_LABELS: Record<OverlayBooleanTool, string> = {
-  subtract: '[ SUBTRACT (Cut Hole) ]',
-  union: '[ UNION (Merge) ]',
-};
 
 /** The Boolean tool toggles, top to bottom (below the constraint stack). */
 const BOOLEAN_BUTTONS: readonly OverlayBooleanTool[] = ['subtract', 'union'];
@@ -404,10 +399,10 @@ export interface DebugOverlayOptions<S extends string = string> {
    */
   arScene?: ArSceneProvider;
   /**
-   * SELECT-mode selection HUD: mirrors the color-wheel disc outline and the
-   * Delete button (device-space plain data + dwell progress) onto this
-   * canvas, so users can visually align their hands with the viewport's
-   * floating controls. Supplied by the orchestrator; null skips the layer.
+   * SELECT-mode selection HUD: mirrors the color wheel (as its full live
+   * hue / saturation disc — pointing at a color here picks that color) and
+   * the Delete button (device-space plain data + dwell progress) onto this
+   * canvas, in sync with the viewport's controls. Supplied by the orchestrator; null skips the layer.
    */
   selectionHud?: SelectionHudProvider;
   /**
@@ -429,8 +424,10 @@ export interface DebugOverlayOptions<S extends string = string> {
   /** The dialog was dismissed without confirming (open palm / hand away). */
   onCancelRequest?: (intent: OverlayConfirmIntent) => void;
   /**
-   * Holding the "OK" gesture (thumb + index loop, other fingers extended)
-   * anywhere for this long confirms the dialog. Default 1000.
+   * Hold time (ms) that answers the dialog: a pointing fingertip on the
+   * confirm / cancel target, or the "OK" gesture (thumb + index loop, other
+   * fingers extended) held anywhere, confirms after this long. Match it to
+   * the host's other hold-to-act timings. Default 1200.
    */
   confirmHoldMs?: number;
   /**
@@ -477,17 +474,21 @@ interface ButtonRect {
   height: number;
 }
 
+/**
+ * User-facing mode names. The `select` mode is presented as **EDIT** (pick,
+ * move, recolor, delete, Boolean) — the id stays `select` in the API.
+ */
+export const MODE_LABELS: Record<InteractionMode, string> = {
+  view: 'VIEW',
+  select: 'EDIT',
+  create: 'CREATE',
+};
+
 /** Mode buttons, left to right, along the top edge of the overlay. */
 const MODE_BUTTONS: readonly InteractionMode[] = ['view', 'select', 'create'];
 
-/** SELECT-mode drag-constraint toggles, top to bottom (top-left corner). */
+/** SELECT-mode drag-constraint toggles, top to bottom (below [ EDIT ]). */
 const CONSTRAINT_BUTTONS: readonly DragConstraint[] = ['xz', 'y'];
-
-/** Constraint button labels, in CONSTRAINT_BUTTONS order. */
-const CONSTRAINT_LABELS: Record<DragConstraint, string> = {
-  xz: '[ XZ PLANE ]',
-  y: '[ Y AXIS (ELEVATE) ]',
-};
 
 export class DebugOverlay<S extends string = string> {
   private readonly canvas: HTMLCanvasElement;
@@ -538,6 +539,8 @@ export class DebugOverlay<S extends string = string> {
   private openIntent: OverlayConfirmIntent | null = null;
   private confirmRects: { confirm: ButtonRect; cancel: ButtonRect } | null = null;
   private confirmOkElapsed = 0;
+  /** Pointing-hold time on the cancel target. */
+  private confirmCancelElapsed = 0;
   private confirmPalmElapsed = 0;
   private confirmNoHandFrames = 0;
   private confirmOpenedAgo = 0;
@@ -546,12 +549,6 @@ export class DebugOverlay<S extends string = string> {
   private readonly confirmHandLossFrames: number;
   private readonly onConfirmRequest: ((intent: OverlayConfirmIntent) => void) | null;
   private readonly onCancelRequest: ((intent: OverlayConfirmIntent) => void) | null;
-  /**
-   * Fresh-pinch tracking (pinch-activated UI — trash + dialog targets): the
-   * previous frame's `pinchActive` per hand, so only a pinch that *closes*
-   * over a button activates it (a drag sweeping across never does).
-   */
-  private readonly pinchEngaged = new Map<string, boolean>();
   /**
    * SELECT-mode Boolean tool toggles: last rendered rects, the dwell clock,
    * the armed tool (host mirrors it) and the X-cross trigger debounce.
@@ -587,7 +584,7 @@ export class DebugOverlay<S extends string = string> {
     this.trashDwellMs = options.trashDwellMs ?? 600;
     this.onConfirmRequest = options.onConfirmRequest ?? null;
     this.onCancelRequest = options.onCancelRequest ?? null;
-    this.confirmHoldMs = options.confirmHoldMs ?? 1000;
+    this.confirmHoldMs = options.confirmHoldMs ?? 1200;
     this.confirmPalmCancelMs = options.confirmPalmCancelMs ?? 350;
     this.confirmHandLossFrames = options.confirmHandLossFrames ?? 12;
     this.onBooleanToolRequest = options.onBooleanToolRequest ?? null;
@@ -635,6 +632,7 @@ export class DebugOverlay<S extends string = string> {
     if (this.openIntent !== null) return;
     this.openIntent = intent;
     this.confirmOkElapsed = 0;
+    this.confirmCancelElapsed = 0;
     this.confirmPalmElapsed = 0;
     this.confirmNoHandFrames = 0;
     this.confirmOpenedAgo = 0;
@@ -649,6 +647,7 @@ export class DebugOverlay<S extends string = string> {
     this.openIntent = null;
     this.confirmRects = null;
     this.confirmOkElapsed = 0;
+    this.confirmCancelElapsed = 0;
     this.confirmPalmElapsed = 0;
     this.confirmNoHandFrames = 0;
     this.confirmOpenedAgo = 0;
@@ -743,13 +742,14 @@ export class DebugOverlay<S extends string = string> {
     }
     if (frame.mode === 'create' && !dialogOpen) this.drawShapeButtons(cssWidth);
     else this.shapeRects = [];
-    // The trash bin hides while the dialog is open (one question at a time).
-    if (!dialogOpen) this.drawTrashButton(cssWidth, cssHeight);
+    // The trash bin is a VIEW-mode control; it also hides while the dialog
+    // is open (one question at a time).
+    if (frame.mode === 'view' && !dialogOpen) this.drawTrashButton(cssWidth);
     else this.trashRect = null;
     const dt = this.frameDt(frame);
     if (dialogOpen) {
       this.drawConfirmDialog(cssWidth, cssHeight);
-      this.updateConfirmInteraction(frame, dt);
+      this.updateConfirmInteraction(frame, view, dt);
     } else {
       this.updateModeInteraction(frame, view, dt);
       this.updateConstraintInteraction(frame, view, dt);
@@ -757,10 +757,6 @@ export class DebugOverlay<S extends string = string> {
       this.updateBooleanInteraction(frame, view, dt);
       this.updateTrashInteraction(frame, view, dt);
     }
-    // Fresh pinches answer pinch-activated UI: the dialog targets while it
-    // is open, the trash bin otherwise. Runs every frame (the map must track
-    // pinch releases even while the dialog is open).
-    this.updatePinchUi(frame, view);
     this.drawPointerCursors(frame, view);
   }
 
@@ -794,6 +790,30 @@ export class DebugOverlay<S extends string = string> {
       ctx.fillStyle = 'rgba(56, 189, 248, 0.25)';
       ctx.fill();
     }
+  }
+
+  /**
+   * The part of the webcam frame actually visible in the camera view, in
+   * device space ([-1, 1], +Y up). The video is cover-cropped into the view
+   * (a 16:9 webcam in a 4:3 view loses its left / right edges), so hosts
+   * placing controls that must show up in the camera view anchor them
+   * inside this rect. The whole frame until the first render.
+   */
+  visibleDeviceRect(): { minX: number; maxX: number; minY: number; maxY: number } {
+    const view = this.lastView;
+    const rect = this.canvas.getBoundingClientRect();
+    if (!view || view.dispW <= 0 || view.dispH <= 0 || rect.width <= 0) {
+      return { minX: -1, maxX: 1, minY: -1, maxY: 1 };
+    }
+    // Canvas CSS px → device (the overlay's own mirrored cover mapping).
+    const toX = (px: number) => ((px - view.ox) / view.dispW) * 2 - 1;
+    const toY = (py: number) => 1 - ((py - view.oy) / view.dispH) * 2;
+    return {
+      minX: Math.max(-1, toX(0)),
+      maxX: Math.min(1, toX(rect.width)),
+      minY: Math.max(-1, toY(rect.height)),
+      maxY: Math.min(1, toY(0)),
+    };
   }
 
   /**
@@ -1157,10 +1177,9 @@ export class DebugOverlay<S extends string = string> {
       const cy = ((1 - hud.wheel.y) / 2) * view.dispH;
       const rx = Math.max((hud.wheel.radiusX / 2) * view.dispW, 1);
       const ry = Math.max((hud.wheel.radiusY / 2) * view.dispH, 1);
+      this.drawHueDisc(cx, cy, rx, ry);
       ctx.beginPath();
       ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
-      ctx.fillStyle = HUD_WHEEL_FILL;
-      ctx.fill();
       ctx.lineWidth = 2;
       ctx.strokeStyle = HUD_WHEEL_STROKE;
       ctx.stroke();
@@ -1222,6 +1241,38 @@ export class DebugOverlay<S extends string = string> {
       }
     }
 
+    ctx.restore();
+  }
+
+  /**
+   * The color wheel's live hue / saturation disc, drawn into the camera
+   * view exactly where (and how) the 3D viewport's wheel maps: hue by angle
+   * (clockwise from +x on screen), saturation by radius, lightness 0.5 —
+   * fading linearly to gray at the center — so a pointing fingertip on a
+   * color here repaints the object with that same color. Falls back to a
+   * flat translucent disc without conic-gradient support.
+   */
+  private drawHueDisc(cx: number, cy: number, rx: number, ry: number): void {
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.scale(1, ry / rx); // circle of radius rx → the device-space ellipse
+    ctx.beginPath();
+    ctx.arc(0, 0, rx, 0, Math.PI * 2);
+    if (typeof ctx.createConicGradient === 'function') {
+      const hues = ctx.createConicGradient(0, 0, 0);
+      for (let i = 0; i <= 12; i++) hues.addColorStop(i / 12, `hsl(${i * 30}, 100%, 50%)`);
+      ctx.fillStyle = hues;
+      ctx.fill();
+      const saturation = ctx.createRadialGradient(0, 0, 0, 0, 0, rx);
+      saturation.addColorStop(0, 'rgb(128, 128, 128)');
+      saturation.addColorStop(1, 'rgba(128, 128, 128, 0)');
+      ctx.fillStyle = saturation;
+      ctx.fill();
+    } else {
+      ctx.fillStyle = HUD_WHEEL_FILL;
+      ctx.fill();
+    }
     ctx.restore();
   }
 
@@ -1301,7 +1352,7 @@ export class DebugOverlay<S extends string = string> {
     MODE_BUTTONS.forEach((mode, i) => {
       const x = margin + i * (width + gap);
       this.buttonRects.push({ x, y: margin, width, height });
-      const label = `[ ${mode.toUpperCase()} ]`;
+      const label = `[ ${MODE_LABELS[mode]} ]`;
       // Shrink the label to fit the button.
       let fontSize = Math.max(9, Math.round(13 * scale));
       ctx.font = `bold ${fontSize}px ui-monospace, monospace`;
@@ -1341,7 +1392,7 @@ export class DebugOverlay<S extends string = string> {
   }
 
   /* ------------------------------------------------------------------ */
-  /* Drag-constraint toggles (SELECT mode, top-left corner)             */
+  /* Drag-constraint toggles (EDIT mode, below [ EDIT ])                 */
   /* ------------------------------------------------------------------ */
 
   /** CSS-pixel hit test against the last rendered constraint buttons. */
@@ -1394,55 +1445,52 @@ export class DebugOverlay<S extends string = string> {
   }
 
   /**
-   * Shared layout of the top-left vertical stacks (drag constraints, then the
-   * CSG Boolean tools below them): margin / gap / button size + the top of
-   * the first stack (just under the mode bar).
+   * Shared layout of the EDIT-mode vertical stack (drag constraints, then the
+   * CSG Boolean tools below them), in the column directly under [ EDIT ]:
+   * left edge (`margin`) / gap / button size + the top of the first stack
+   * (just under the mode bar).
    */
-  private leftStackMetrics(cssWidth: number): {
+  private editStackMetrics(cssWidth: number): {
     margin: number;
     gap: number;
     height: number;
     width: number;
     top: number;
   } {
-    const scale = this.fontScale(cssWidth);
     const { margin, gap, height: barHeight } = this.barMetrics(cssWidth);
+    // EDIT options: a column of square icon buttons directly below
+    // [ VIEW ] (the trash bin's spot in VIEW mode — never shown together).
+    const size = this.iconButtonSize(cssWidth);
     return {
       margin,
       gap,
-      height: Math.max(20, Math.round(26 * scale)),
-      width: Math.min(Math.round((cssWidth - margin * 2) * 0.55), 190),
+      height: size,
+      width: size,
       top: margin + barHeight + gap,
     };
   }
 
+  /** Side length of the square icon buttons — trash bin, EDIT tools, shapes (CSS px). */
+  private iconButtonSize(cssWidth: number): number {
+    return Math.max(30, Math.round(42 * this.fontScale(cssWidth)));
+  }
+
   /**
-   * SELECT-mode drag-constraint toggles, stacked vertically in the top-left
-   * corner below the mode bar: `[ XZ PLANE ]` (default active) and
-   * `[ Y AXIS (ELEVATE) ]` — mutually exclusive, boxy industrial style
+   * EDIT-mode drag-constraint toggles, stacked vertically directly below
+   * [ EDIT ]: `[ XZ PLANE ]` (default active) and `[ Y AXIS ]` — mutually
+   * exclusive, boxy industrial style
    * (crisp border, monospace, inverted background when active) with the
    * same dwell progress bar as the mode buttons.
    */
   private drawConstraintButtons(cssWidth: number): void {
     const ctx = this.ctx;
-    const scale = this.fontScale(cssWidth);
-    const { margin, gap, height, width, top } = this.leftStackMetrics(cssWidth);
+    const { margin, gap, height, width, top } = this.editStackMetrics(cssWidth);
 
     this.constraintRects = [];
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
     CONSTRAINT_BUTTONS.forEach((constraint, i) => {
       const x = margin;
       const y = top + i * (height + gap);
       this.constraintRects.push({ x, y, width, height });
-      const label = CONSTRAINT_LABELS[constraint];
-      // Shrink the label to fit the button.
-      let fontSize = Math.max(9, Math.round(12 * scale));
-      ctx.font = `bold ${fontSize}px ui-monospace, monospace`;
-      while (fontSize > 7 && ctx.measureText(label).width > width - 8) {
-        fontSize -= 1;
-        ctx.font = `bold ${fontSize}px ui-monospace, monospace`;
-      }
 
       const active = this.dragConstraint === constraint;
       if (active) {
@@ -1468,10 +1516,8 @@ export class DebugOverlay<S extends string = string> {
         }
         ctx.fillStyle = dwelling ? '#f8fafc' : '#cbd5e1';
       }
-      ctx.fillText(label, x + width / 2, y + height / 2);
+      this.drawEditIcon(constraint, x + width / 2, y + height / 2 - 1, width * 0.3, ctx.fillStyle as string);
     });
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'alphabetic';
   }
 
   /* ------------------------------------------------------------------ */
@@ -1549,33 +1595,22 @@ export class DebugOverlay<S extends string = string> {
 
   /**
    * SELECT-mode CSG Boolean tool toggles, stacked below the drag-constraint
-   * toggles: `[ SUBTRACT (Cut Hole) ]` and `[ UNION (Merge) ]` — mutually
+   * toggles: `[ SUBTRACT ]` and `[ UNION ]` — mutually
    * exclusive, boxy, re-press disarms. While a tool is armed *and* the
    * selection intersects another mesh (live `booleanState` provider), the
    * armed button glows amber: the operation is ready to fire.
    */
   private drawBooleanButtons(cssWidth: number): void {
     const ctx = this.ctx;
-    const scale = this.fontScale(cssWidth);
-    const { margin, gap, height, width, top } = this.leftStackMetrics(cssWidth);
+    const { margin, gap, height, width, top } = this.editStackMetrics(cssWidth);
     const booleanTop = top + CONSTRAINT_BUTTONS.length * (height + gap);
     const state = this.booleanState?.() ?? null;
 
     this.booleanRects = [];
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
     BOOLEAN_BUTTONS.forEach((tool, i) => {
       const x = margin;
       const y = booleanTop + i * (height + gap);
       this.booleanRects.push({ x, y, width, height });
-      const label = BOOLEAN_LABELS[tool];
-      // Shrink the label to fit the button.
-      let fontSize = Math.max(9, Math.round(12 * scale));
-      ctx.font = `bold ${fontSize}px ui-monospace, monospace`;
-      while (fontSize > 7 && ctx.measureText(label).width > width - 8) {
-        fontSize -= 1;
-        ctx.font = `bold ${fontSize}px ui-monospace, monospace`;
-      }
 
       const active = this.armedBooleanTool === tool;
       const ready = active && state !== null && state.clash;
@@ -1603,17 +1638,96 @@ export class DebugOverlay<S extends string = string> {
         }
         ctx.fillStyle = dwelling ? '#f8fafc' : '#cbd5e1';
       }
-      ctx.fillText(label, x + width / 2, y + height / 2);
+      this.drawEditIcon(tool, x + width / 2, y + height / 2 - 1, width * 0.3, ctx.fillStyle as string);
     });
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'alphabetic';
+  }
+
+  /**
+   * Line icons for the EDIT-mode tools, centered at (cx, cy), half-size r:
+   * - `xz` — slide on the floor: a floor plane (parallelogram) with a
+   *   four-way move arrow;
+   * - `y` — lift / lower: a double-headed vertical arrow over the floor;
+   * - `subtract` — cut a hole: a square, a dashed circle biting its corner,
+   *   and a minus sign;
+   * - `union` — merge: an overlapping square + circle and a plus sign.
+   */
+  private drawEditIcon(
+    icon: DragConstraint | OverlayBooleanTool,
+    cx: number,
+    cy: number,
+    r: number,
+    ink: string
+  ): void {
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.strokeStyle = ink;
+    ctx.lineWidth = Math.max(1.5, r * 0.13);
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    const arrowHead = (x: number, y: number, dx: number, dy: number) => {
+      const h = r * 0.28;
+      ctx.moveTo(x, y);
+      ctx.lineTo(x - dx * h + dy * h * 0.7, y - dy * h - dx * h * 0.7);
+      ctx.moveTo(x, y);
+      ctx.lineTo(x - dx * h - dy * h * 0.7, y - dy * h + dx * h * 0.7);
+    };
+    ctx.beginPath();
+    if (icon === 'xz') {
+      // Floor plane in perspective.
+      ctx.moveTo(cx - r * 0.55, cy - r * 0.45);
+      ctx.lineTo(cx + r, cy - r * 0.45);
+      ctx.lineTo(cx + r * 0.55, cy + r * 0.45);
+      ctx.lineTo(cx - r, cy + r * 0.45);
+      ctx.closePath();
+      ctx.stroke();
+      // Four-way move arrow on the plane.
+      ctx.beginPath();
+      ctx.moveTo(cx - r * 0.55, cy);
+      ctx.lineTo(cx + r * 0.55, cy);
+      ctx.moveTo(cx + r * 0.12, cy - r * 0.3);
+      ctx.lineTo(cx - r * 0.12, cy + r * 0.3);
+      arrowHead(cx + r * 0.55, cy, 1, 0);
+      arrowHead(cx - r * 0.55, cy, -1, 0);
+      arrowHead(cx + r * 0.12, cy - r * 0.3, 0.37, -0.93);
+      arrowHead(cx - r * 0.12, cy + r * 0.3, -0.37, 0.93);
+    } else if (icon === 'y') {
+      // Floor line + vertical double arrow.
+      ctx.moveTo(cx - r * 0.8, cy + r);
+      ctx.lineTo(cx + r * 0.8, cy + r);
+      ctx.moveTo(cx, cy - r);
+      ctx.lineTo(cx, cy + r * 0.62);
+      arrowHead(cx, cy - r, 0, -1);
+      arrowHead(cx, cy + r * 0.62, 0, 1);
+    } else {
+      // Square + circle overlapping its top-right corner, with a sign.
+      ctx.rect(cx - r * 0.95, cy - r * 0.55, r * 1.35, r * 1.35);
+      ctx.stroke();
+      ctx.beginPath();
+      if (icon === 'subtract') ctx.setLineDash([r * 0.2, r * 0.16]);
+      ctx.arc(cx + r * 0.42, cy - r * 0.5, r * 0.55, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      // Sign in the lower-right, outside both shapes.
+      const gx = cx + r * 0.72;
+      const gy = cy + r * 0.62;
+      const g = r * 0.28;
+      ctx.moveTo(gx - g, gy);
+      ctx.lineTo(gx + g, gy);
+      if (icon === 'union') {
+        ctx.moveTo(gx, gy - g);
+        ctx.lineTo(gx, gy + g);
+      }
+    }
+    ctx.stroke();
+    ctx.restore();
   }
 
   /* ------------------------------------------------------------------ */
-  /* In-vision trash bin (bottom-right corner)                          */
+  /* In-vision trash bin (top-left, below [ VIEW ])                      */
   /* ------------------------------------------------------------------ */
 
-  /** Fire the trash request (dwell / fresh pinch / mouse click). */
+  /** Fire the trash request (pointing dwell / mouse click). */
   private requestTrash(): void {
     this.trashDwelling = false;
     this.trashDwellElapsed = 0;
@@ -1653,19 +1767,19 @@ export class DebugOverlay<S extends string = string> {
   }
 
   /**
-   * In-vision trash bin: a boxy recycle-bin icon button in the bottom-right
-   * corner of the camera view (danger-tinted, matching the Delete HUD). A
-   * pointing dwell fills a progress bar along its bottom edge; a fresh
-   * pinch that closes over the icon (see `updatePinchUi`) activates it
-   * immediately. Hidden while the confirmation dialog is open.
+   * In-vision trash bin (VIEW mode only): a boxy recycle-bin icon button in
+   * the top-left corner, directly below the [ VIEW ] mode button (danger-tinted, matching
+   * the Delete HUD). Only a pointing index fingertip held on it (or a mouse
+   * click) activates it — a pointing dwell fills a progress bar along its
+   * bottom edge; pinches never fire it. Hidden while the confirmation dialog
+   * is open.
    */
-  private drawTrashButton(cssWidth: number, cssHeight: number): void {
+  private drawTrashButton(cssWidth: number): void {
     const ctx = this.ctx;
-    const scale = this.fontScale(cssWidth);
-    const size = Math.max(30, Math.round(42 * scale));
-    const margin = Math.round(8 * scale);
-    const x = cssWidth - margin - size;
-    const y = cssHeight - margin - size;
+    const size = this.iconButtonSize(cssWidth);
+    const { margin, gap, height: barHeight } = this.barMetrics(cssWidth);
+    const x = margin;
+    const y = margin + barHeight + gap;
     this.trashRect = { x, y, width: size, height: size };
 
     const dwelling = this.trashDwelling;
@@ -1734,15 +1848,16 @@ export class DebugOverlay<S extends string = string> {
 
   /**
    * Dialog gestures, per frame while open:
-   * - **Confirm**: hold the "OK" gesture (thumb + index loop, middle /
-   *   ring / pinky extended) for `confirmHoldMs` anywhere in view. (A pinch
-   *   on the confirm target is handled by `updatePinchUi`.)
-   * - **Cancel**: an open palm held for `confirmPalmCancelMs` — suppressed
+   * - **Confirm**: a pointing index fingertip held on the confirm target, or
+   *   the "OK" gesture (thumb + index loop, middle / ring / pinky extended)
+   *   held anywhere in view, for `confirmHoldMs`. Pinches never answer it.
+   * - **Cancel**: a pointing hold on the cancel target (`confirmHoldMs`), or
+   *   an open palm held for `confirmPalmCancelMs` — suppressed
    *   during the first moments after opening, because the pinch that
    *   triggered the dialog releases into an open hand — or simply moving
    *   every hand away for `confirmHandLossFrames` frames.
    */
-  private updateConfirmInteraction(frame: FrameEvent, dt: number): void {
+  private updateConfirmInteraction(frame: FrameEvent, view: ViewTransform, dt: number): void {
     this.confirmOpenedAgo += dt;
     if (frame.hands.length === 0) {
       this.confirmNoHandFrames++;
@@ -1753,8 +1868,21 @@ export class DebugOverlay<S extends string = string> {
     } else {
       this.confirmNoHandFrames = 0;
     }
-    // Confirm: hold the OK gesture.
-    if (frame.hands.some((hand) => hand.okGesture)) {
+    // Pointing fingertips on the targets (same hold model as the color
+    // wheel lock and the Delete button — nothing answers instantly).
+    const rects = this.confirmRects;
+    let onConfirm = false;
+    let onCancel = false;
+    if (rects) {
+      for (const hand of frame.hands) {
+        if (!hand.pointing) continue;
+        const tip = this.toCanvas(hand, INDEX_TIP, view);
+        if (this.inRect(rects.confirm, tip.x, tip.y)) onConfirm = true;
+        else if (this.inRect(rects.cancel, tip.x, tip.y)) onCancel = true;
+      }
+    }
+    // Confirm: hold on the confirm target, or hold the OK gesture.
+    if (onConfirm || frame.hands.some((hand) => hand.okGesture)) {
       this.confirmOkElapsed += dt;
       if (this.confirmOkElapsed >= this.confirmHoldMs) {
         this.answerConfirm();
@@ -1762,6 +1890,16 @@ export class DebugOverlay<S extends string = string> {
       }
     } else {
       this.confirmOkElapsed = 0;
+    }
+    // Cancel: hold on the cancel target.
+    if (onCancel) {
+      this.confirmCancelElapsed += dt;
+      if (this.confirmCancelElapsed >= this.confirmHoldMs) {
+        this.answerCancel();
+        return;
+      }
+    } else {
+      this.confirmCancelElapsed = 0;
     }
     // Cancel: an open palm held briefly (after the post-open grace).
     if (frame.hands.some((hand) => hand.openPalm) && this.confirmOpenedAgo >= 600) {
@@ -1775,41 +1913,11 @@ export class DebugOverlay<S extends string = string> {
   }
 
   /**
-   * Fresh-pinch UI activation: only a pinch that *closes* over a button
-   * activates it — a pinch drag sweeping across the trash bin or a dialog
-   * target never triggers anything. While the dialog is open the pinches
-   * may only answer it (the confirm target); otherwise they may fire the
-   * trash bin. The previous frame's `pinchActive` per hand provides the
-   * edge detection.
-   */
-  private updatePinchUi(frame: FrameEvent, view: ViewTransform): void {
-    for (const hand of frame.hands) {
-      const key = hand.handedness;
-      const wasEngaged = this.pinchEngaged.get(key) ?? false;
-      const engaged = hand.pinchActive;
-      this.pinchEngaged.set(key, engaged);
-      if (wasEngaged || !engaged) continue; // only a fresh pinch counts
-      // Pinch center (thumb + index tips) in canvas CSS px.
-      const thumb = this.toCanvas(hand, THUMB_TIP, view);
-      const index = this.toCanvas(hand, INDEX_TIP, view);
-      const cx = (thumb.x + index.x) / 2;
-      const cy = (thumb.y + index.y) / 2;
-      if (this.openIntent !== null) {
-        const rects = this.confirmRects;
-        if (rects && this.inRect(rects.confirm, cx, cy)) this.answerConfirm();
-      } else {
-        const trash = this.trashRect;
-        if (trash && this.inRect(trash, cx, cy)) this.requestTrash();
-      }
-    }
-  }
-
-  /**
    * The in-vision spatial confirmation dialog: a translucent scrim + card
    * centered on the camera view with two spatial targets —
-   * `[ CONFIRM (Pinch) ]` (danger red) and `[ CANCEL (Open Palm) ]` (calm
-   * blue). The OK-hold progress fills the confirm target's bottom edge; the
-   * open-palm cancel progress fills the cancel target's. No DOM modals, no
+   * `[ CONFIRM (Hold) ]` (danger red) and `[ CANCEL (Hold) ]` (calm blue).
+   * The confirm hold progress fills the confirm target's bottom edge; the
+   * cancel hold / open-palm progress fills the cancel target's. No DOM modals, no
    * browser popups — the hands stay visible underneath.
    */
   private drawConfirmDialog(cssWidth: number, cssHeight: number): void {
@@ -1828,9 +1936,9 @@ export class DebugOverlay<S extends string = string> {
     const titleSize = Math.max(10, Math.round(13 * scale));
     const hintSize = Math.max(8, Math.round(9 * scale));
     const title = CONFIRM_TITLES[intent];
-    const hint = 'PINCH / HOLD OK — PALM OR AWAY CANCELS';
-    const confirmLabel = '[ CONFIRM (Pinch) ]';
-    const cancelLabel = '[ CANCEL (Open Palm) ]';
+    const hint = 'POINT & HOLD — PALM OR AWAY CANCELS';
+    const confirmLabel = '[ CONFIRM (Hold) ]';
+    const cancelLabel = '[ CANCEL (Hold) ]';
 
     // Lay out: title / hint / two side-by-side targets inside the card.
     const targetWidth = (cardWidth - pad * 2 - gap) / 2;
@@ -1881,7 +1989,7 @@ export class DebugOverlay<S extends string = string> {
     ctx.font = `${hintSize}px ui-monospace, monospace`;
     ctx.fillText(hint, cssWidth / 2, cardY + pad + titleSize + gap + hintSize / 2);
 
-    // Confirm target (danger red) with the OK-hold progress fill.
+    // Confirm target (danger red) with the hold progress fill.
     ctx.fillStyle = DIALOG_CONFIRM_FILL;
     ctx.fillRect(confirmRect.x, confirmRect.y, confirmRect.width, confirmRect.height);
     ctx.lineWidth = 2;
@@ -1927,8 +2035,12 @@ export class DebugOverlay<S extends string = string> {
       cancelRect.x + cancelRect.width / 2,
       cancelRect.y + cancelRect.height / 2
     );
-    if (this.confirmPalmCancelMs > 0 && this.confirmPalmElapsed > 0) {
-      const progress = Math.min(1, this.confirmPalmElapsed / this.confirmPalmCancelMs);
+    const cancelProgress = Math.max(
+      this.confirmPalmCancelMs > 0 ? this.confirmPalmElapsed / this.confirmPalmCancelMs : 0,
+      this.confirmHoldMs > 0 ? this.confirmCancelElapsed / this.confirmHoldMs : 0
+    );
+    if (cancelProgress > 0) {
+      const progress = Math.min(1, cancelProgress);
       ctx.fillStyle = DIALOG_CANCEL_STROKE;
       ctx.fillRect(
         cancelRect.x + 2,
@@ -2005,7 +2117,8 @@ export class DebugOverlay<S extends string = string> {
     const ctx = this.ctx;
     const scale = this.fontScale(cssWidth);
     const { margin, gap, height: barHeight } = this.barMetrics(cssWidth);
-    const size = Math.max(24, Math.round(36 * scale));
+    // Same square size as the EDIT tool / trash icon buttons.
+    const size = this.iconButtonSize(cssWidth);
     const x = cssWidth - margin - size;
     const top = margin + barHeight + gap;
 

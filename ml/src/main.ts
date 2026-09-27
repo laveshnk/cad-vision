@@ -12,9 +12,10 @@
  *
  * Interaction modes (VIEW / SELECT / CREATE) are picked on the vision
  * overlay's button bar and gate the gesture routing below: pinches are inert
- * in VIEW, pick / drag / recolor / delete meshes in SELECT (a floating color
- * wheel + Delete HUD follow the selection; a pointing fingertip sweeps the
- * wheel and a 1.2 s hover locks the color; deletion is confirmation-gated),
+ * in VIEW, pick / drag / recolor / delete meshes in SELECT (a Delete HUD
+ * follows the selection and a color wheel sits mid-right; a pointing
+ * fingertip sweeps the wheel and a 1.2 s hover locks the color; deletion is
+ * confirmation-gated),
  * and build primitives in CREATE. SELECT also carries the CSG Boolean tools
  * (`[ SUBTRACT ]` / `[ UNION ]` overlay toggles + the secondary-hand X-cross
  * trigger; a live world-AABB clash indicator marks intersecting solids).
@@ -22,9 +23,10 @@
  *
  * Destructive actions are confirmed in-vision only: the overlay's trash bin
  * (scene clear) and every delete trigger open a spatial confirmation dialog
- * drawn on the camera canvas — `[ CONFIRM (Pinch) ]` / `[ CANCEL (Open
- * Palm) ]` — answered by a pinch on the target, a held OK gesture, an open
- * palm or moving the hands away. No window.confirm(), no DOM modals. While
+ * drawn on the camera canvas — `[ CONFIRM (Hold) ]` / `[ CANCEL (Hold) ]` —
+ * answered by a pointing hold on a target (or a held OK gesture) for
+ * `HOLD_TO_ACT_MS`, the same wait as the color wheel lock and the Delete
+ * button, or cancelled by an open palm / moving the hands away. No window.confirm(), no DOM modals. While
  * it is open (`overlay.confirmActive`) every scene gesture is frozen.
  *
  * The live stats (mode / state / FPS / hands) render in the DOM metrics bar
@@ -34,7 +36,7 @@
  */
 
 import { GestureEngine } from './vision/GestureEngine';
-import { DebugOverlay } from './vision/DebugOverlay';
+import { DebugOverlay, MODE_LABELS } from './vision/DebugOverlay';
 import type {
   FrameEvent,
   GestureSignalEvent,
@@ -91,6 +93,10 @@ const engine = new GestureEngine({
   classifier: {
     pinchStartThreshold: 0.045,
     pinchReleaseThreshold: 0.065,
+    // Accidental-pinch guards: a pinch must hold 2 frames and cannot start
+    // at the frame border (stray / half-visible hands in the corners).
+    pinchEnterFrames: 2,
+    pinchEdgeMargin: 0.03,
     pinchDistanceSmoothing: 0.5,
     fistFoldRatio: 0.9,
     fistMinFoldedFingers: 4,
@@ -116,7 +122,18 @@ const cadScene = new CadScene(viewport);
 const builder = new CadBuilder(cadScene);
 
 /* ---- Vision overlay ---- */
+/**
+ * One hold-to-act wait (ms) shared by the SELECT-mode touch UI: locking a
+ * color on the wheel, the Delete button, and answering the delete / clear
+ * confirmation dialog all take the same pointing hold.
+ */
+const HOLD_TO_ACT_MS = 1200;
+
+/** Shortest two-hand build (ms) that is committed; quicker ones are discarded. */
+const MIN_BUILD_MS = 400;
+
 const overlay = new DebugOverlay<CadTool>(canvas, {
+  confirmHoldMs: HOLD_TO_ACT_MS,
   // Mode switcher on the vision overlay: the button bar (mouse click, finger
   // dwell or pinch) requests engine mode changes; the engine feeds the
   // active mode back through the per-frame event, which renders the button.
@@ -178,16 +195,23 @@ const toolbar = new Toolbar(toolbarRoot, {
   onCameraStop: () => stopCamera(),
 });
 
-// Floating HSL color wheel (SELECT mode): pure UI mounted into the CAD
-// viewport — the bridge below feeds it viewport-local pixels and applies
-// the picked hex through CadBuilder.setSelectedColor.
-const colorWheel = new ColorWheel(viewport);
+// HSL color wheel (EDIT mode), headless: nothing is drawn in the 3D view —
+// the wheel lives in the camera view (the overlay draws it from this
+// model's center / radius). The model keeps the geometry, hue picking and
+// timed hover lock; the bridge below feeds it viewport-local pixels (the
+// same space the camera-view disc maps to) and applies the picked hex
+// through CadBuilder.setSelectedColor.
+const colorWheel = new ColorWheel(viewport, { dwellMs: HOLD_TO_ACT_MS, headless: true });
+
+/** Color-wheel zoom while a pointing fingertip hovers it (camera view). */
+const WHEEL_HOVER_ZOOM = 2;
 
 // Floating selection HUD (SELECT mode): a Delete action anchored below the
 // selection's screen projection. Deletion is destructive, so every trigger
 // routes through the in-vision spatial confirmation dialog below before
 // the mesh is removed.
 const selectionMenu = new SelectionMenu(viewport, {
+  dwellMs: HOLD_TO_ACT_MS,
   onDeleteRequest: () => requestDeleteSelection(),
 });
 
@@ -297,7 +321,9 @@ engine.onPinchEnd((e) => {
     // Only the grabbing hand's release ends the drag — hand 2 releasing a
     // color-confirming pinch must not drop the held object.
     if (selectHand === null || e.hand === selectHand) {
-      builder.endDrag();
+      // A tap on the already-selected object deselects it; a first tap
+      // selects (the selection persists); a hold-and-drag just drops it.
+      builder.releasePick();
       selectHand = null;
     }
   } else {
@@ -320,20 +346,34 @@ engine.onExtrude((e) => builder.onExtrude(e));
 // Releasing the last pinch (or a fist / zoom transition) commits the pending
 // build as a solid mesh.
 // Flat when both pinches let go together or the lower one let go first.
+// A two-hand build shorter than MIN_BUILD_MS is a stray / misdetected hand
+// pinching for an instant, not a deliberate build: discard it.
 engine.on('extrude_end', (event) => {
-  if (event.type === 'extrude_end') builder.commit({ flat: !event.heightSet });
+  if (event.type !== 'extrude_end') return;
+  if (event.durationMs < MIN_BUILD_MS) builder.cancel();
+  else builder.commit({ flat: !event.heightSet });
 });
 engine.on('orbit_start', (event) => {
   if (event.type === 'orbit_start') builder.commit();
 });
+// A fist gesture ended: the next fist rotation chooses its axis afresh.
+engine.on('orbit_end', () => builder.endFistRotation());
+engine.on('zoom_end', () => builder.endFistRotation());
 engine.on('zoom_start', (event) => {
   if (event.type === 'zoom_start') builder.commit();
 });
 
-// Camera move: one fist orbits the view around the locked origin (the camera
+// Fist move. With an object selected in EDIT mode the fist turns the object
+// (up / down → world X axis, left / right → world Y axis; with two fists the
+// faster one drives, right hand on a tie — see setObjectRotation below).
+// Otherwise one fist orbits the view around the locked origin (the camera
 // never pans) — the scene follows the hand, and rolling the wrist (twisting
 // the fist like a doorknob) turns the scene with the twist.
 engine.onOrbit((e) => {
+  if (fistRotatesObject()) {
+    builder.rotateSelectionBy(e.deltaX, e.deltaY);
+    return;
+  }
   cadScene.onOrbit({ deltaX: e.deltaX, deltaY: e.deltaY });
   if (e.deltaRoll !== 0) cadScene.onRotate({ deltaAngle: e.deltaRoll });
 });
@@ -353,7 +393,7 @@ engine.on('state_change', (event) => {
   const change = event as { to: string; reason: string };
   statusOutput.dataset.state = change.to;
   statusOutput.title = `${change.to} — ${change.reason}`;
-  setStatus(`Mode: ${engine.mode.toUpperCase()} — State: ${change.to} (${change.reason})`);
+  setStatus(`Mode: ${MODE_LABELS[engine.mode]} — State: ${change.to} (${change.reason})`);
 });
 
 // A mode switch aborts any in-flight build / selection drag so the new mode
@@ -369,24 +409,32 @@ engine.on('mode_change', (event) => {
   colorPicked = false;
   lastSelectionStamp = null;
   statusOutput.dataset.mode = event.to;
-  setStatus(`Mode: ${event.to.toUpperCase()} — State: ${engine.state}`);
+  setStatus(`Mode: ${MODE_LABELS[event.to]} — State: ${engine.state}`);
 });
 
 // Debug overlay: re-render on every processed frame; the SELECT-mode
-// selection UI rides along — color wheel + Delete HUD re-anchored beside the
-// selection's live screen projection, with the pointing index fingertip
+// selection UI rides along — the Delete HUD re-anchored beside the
+// selection's live screen projection, the color wheel pinned mid-right of
+// the reachable area, with the pointing index fingertip
 // driving the timed hover color lock. The selection UI updates *before* the
 // overlay renders so the thumbnail HUD (wheel outline + Delete mirror) is
 // drawn from the same frame's geometry, never a frame stale. The stats bar
 // below the camera view tracks the same frame (mode / state / FPS / hands).
+/** Whether fists currently turn the selected object instead of the camera. */
+function fistRotatesObject(): boolean {
+  return engine.mode === 'select' && builder.selectedMesh !== null && !overlay.confirmActive;
+}
+
 engine.on('frame', (event) => {
   if (event.type !== 'frame') return;
+  // Fists drive the selection (not the camera) while one is selected in EDIT.
+  engine.setObjectRotation(fistRotatesObject());
   // Hand coords live in the webcam frame: keep the scene's interaction
   // camera at the webcam aspect (true AR proportions, aligned picking).
   if (event.video.height > 0) cadScene.setInteractionAspect(event.video.width / event.video.height);
   updateSelectionUi(event);
   metricsBar.update({
-    mode: event.mode.toUpperCase(),
+    mode: MODE_LABELS[event.mode],
     state: event.state,
     fps: event.fps,
     hands: event.hands.length,
@@ -403,8 +451,8 @@ engine.setMode('view');
  * Delete flow (SELECT mode): every trigger — the selection HUD's Delete
  * button (mouse or pinch), or the Delete / Backspace keys — routes through
  * the in-vision spatial confirmation dialog; the mesh is only removed when
- * the dialog is answered with Confirm (pinch on the target, OK-gesture
- * hold, mouse click or Enter).
+ * the dialog is answered with Confirm (a pointing hold on the target or an
+ * OK-gesture hold, a mouse click or Enter).
  */
 function requestDeleteSelection(): void {
   if (overlay.confirmActive) return;
@@ -458,9 +506,10 @@ function cancelDestructive(): void {
 }
 
 /**
- * SELECT-mode selection UI: the color wheel + Delete HUD float beside the
- * selected mesh's live screen projection (they track drags and camera
- * orbits). A *pointing* index fingertip is the live color cursor — hues
+ * SELECT-mode selection UI: the Delete HUD floats beside the selected
+ * mesh's live screen projection (it tracks drags and camera orbits); the
+ * color wheel is pinned at mid-height on the right edge of the reachable,
+ * visible area (`showColorWheelAtSide`). A *pointing* index fingertip is the live color cursor — hues
  * repaint the mesh as it sweeps — and dwelling on one color slice for 1.2 s
  * locks the color in: it is applied and saved to the object, the wheel
  * disappears, and the interaction resets (the wheel re-arms once the
@@ -500,8 +549,18 @@ function updateSelectionUi(frame: FrameEvent): void {
     selectionMenu.show(anchor.x, anchor.y);
     return;
   }
-  colorWheel.show(anchor.x, anchor.y);
+  showColorWheelAtSide();
   selectionMenu.show(anchor.x, anchor.y);
+  // Enlarge the (camera-view) wheel while the fingertip hovers it: picking
+  // follows the zoomed disc, and the center stays put (room is reserved),
+  // so the hue under the finger doesn't jump. Hysteresis comes for free —
+  // once enlarged, the finger has the bigger disc to stay inside.
+  const center = colorWheel.center;
+  const hovering =
+    point !== null &&
+    center !== null &&
+    Math.hypot(point.x - center.x, point.y - center.y) <= colorWheel.radius;
+  colorWheel.setZoom(hovering ? WHEEL_HOVER_ZOOM : 1);
   if (!point) {
     colorWheel.advanceDwell(null, dtMs); // hover lost: the dwell clock resets
     return;
@@ -517,6 +576,26 @@ function updateSelectionUi(frame: FrameEvent): void {
     return;
   }
   if (hex) builder.setSelectedColor(hex); // live preview while sweeping
+}
+
+/**
+ * Pin the color wheel at mid-height on the right edge of the part of the
+ * webcam view that is both hand-reachable and visible in the camera view
+ * (`overlay.visibleDeviceRect()`, mapped into the viewport). Mid-height
+ * matters: a pointing fingertip low in the frame drags the wrist and palm
+ * out of view and the hand tracker loses the hand — a bottom-corner wheel
+ * could never be pointed at. The camera view draws the same wheel (small,
+ * live-synced) at the same spot, and pointing at a color there picks it.
+ */
+function showColorWheelAtSide(): void {
+  const width = viewportElement.clientWidth;
+  const height = viewportElement.clientHeight;
+  const visible = overlay.visibleDeviceRect();
+  const edge = cadScene.deviceToCanvas(visible.maxX, (visible.minY + visible.maxY) / 2, width, height);
+  // Room for the hover-enlarged disc, so the center never moves on zoom.
+  const baseRadius = colorWheel.radius / colorWheel.zoomFactor;
+  const inset = baseRadius * WHEEL_HOVER_ZOOM + 16;
+  colorWheel.showAt(Math.min(width, edge.x) - inset, edge.y);
 }
 
 /**

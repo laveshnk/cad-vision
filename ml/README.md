@@ -10,8 +10,8 @@ consume them. The camera renders as a floating video-call-style thumbnail
 the full-bleed 3D viewport, with a live stats bar mounted directly underneath
 the camera view.
 
-Three interaction modes — **VIEW** (camera navigation only), **SELECT**
-(pick / drag / recolor meshes) and **CREATE** (build primitives) — are
+Three interaction modes — **VIEW** (camera navigation only), **EDIT**
+(pick / drag / recolor meshes; mode id `select` in the API) and **CREATE** (build primitives) — are
 switched with a
 button bar on the camera overlay (mouse click, or a **pointing** hand — index
 finger up, other fingers curled — holding its fingertip on a button)
@@ -49,7 +49,7 @@ src/
 ├── ui/
 │   ├── Toolbar.ts             # CAD toolbar: camera toggle, Export STL
 │   ├── ColorWheel.ts          # floating HSL color wheel + timed hover lock (dwell tracker)
-│   ├── SelectionMenu.ts       # floating selection HUD (Delete action, SELECT mode)
+│   ├── SelectionMenu.ts       # floating selection HUD (Delete action, EDIT mode)
 │   ├── MetricsBar.ts          # boxy monospace stats bar under the camera view
 │   ├── hitTest.ts             # root-local DOM hit-tests for the floating overlays
 │   ├── ThumbDragger.ts        # camera-window drag handle (outer frame only)
@@ -76,7 +76,7 @@ HandTracker (raw MediaPipe hands)
   → HandSmootherBank     EMA over all 21 landmarks, per-hand identity
   → coordinates          normalized / pixel / device spaces
   → GestureClassifier    mode-partitioned FSM: IDLE | DRAWING_BASE | SELECTING |
-                         EXTRUDING | ORBITING | ZOOMING (VIEW / SELECT / CREATE)
+                         EXTRUDING | ORBITING | ZOOMING (VIEW / EDIT / CREATE)
   → listeners            typed events + per-frame debug event
 ```
 
@@ -126,7 +126,7 @@ starts in `'view'`):
 | Mode | Pinches | Camera gestures (fist orbit / two-fist zoom) |
 | ---- | ------- | -------------------------------------------- |
 | **VIEW** | inert — no `pinch_*` / `extrude_*` events, never a build state, cannot veto orbit / zoom | live |
-| **SELECT** | `pinch_start` raycasts against committed meshes (pick + highlight, empty ground deselects); `pinch_drag` drags the selected mesh under the active constraint toggle — `[ XZ PLANE ]` slides it across the ground (elevation locked) and `[ Y AXIS ]` maps vertical hand travel to a lift / lower; with the pinch held, an **open palm** on the other hand emits `select_rotate` yaw deltas (compass ring around the object); dragging one mesh into another shows the **clash indicator** and the `[ SUBTRACT ]` / `[ UNION ]` Boolean tools can cut a hole or merge the solids; the vision overlay mirrors the 3D scene as a translucent AR layer; FSM state `SELECTING` | live |
+| **EDIT** | `pinch_start` raycasts against committed meshes (pick + highlight, empty ground deselects); `pinch_drag` drags the selected mesh under the active constraint toggle — `[ XZ PLANE ]` slides it across the ground (elevation locked) and `[ Y AXIS ]` maps vertical hand travel to a lift / lower; with the pinch held, an **open palm** on the other hand emits `select_rotate` yaw deltas (compass ring around the object); dragging one mesh into another shows the **clash indicator** and the `[ SUBTRACT ]` / `[ UNION ]` Boolean tools can cut a hole or merge the solids; the vision overlay mirrors the 3D scene as a translucent AR layer; FSM state `SELECTING` | live |
 | **CREATE** | full build gesture set (below) | live |
 
 A mode switch force-releases in-flight pinches (synthetic `pinch_end`) and
@@ -140,7 +140,7 @@ reflected on the overlay's button bar and in the per-frame event's `mode`.
 | **Extrude (single-hand)** | while EXTRUDING with one pinch: vertical drag of landmark 8 | `extrude` (`deltaHeight`, `cumulativeHeight`, +Y up) |
 | **Camera move (one fist)** | a *real* closed fist, not just curled fingers (`handShape.ts`): all 4 fingertips folded into the palm — `dist(tip, wrist) < 0.9 · dist(MCP, wrist)`, which rejects claw / hook curls and half-curls — and the thumb tucked over the fingers (thumb tip within 0.75 × palm size of an index / middle / ring knuckle, rejecting a thumbs-up); all ratios, so size / distance / rotation invariant. Needs 3 consecutive frames (app default); once held, thresholds relax by `fistHoldSlack` and one finger may loosen. Only engaged from IDLE with no active pinch, and a pinch never engages from a fist. Palm-center motion is reported as deltas, **straightened** by `PathStraightener` so the camera travels in straight segments instead of copying hand wiggle (see below); the app orbits the camera around the locked origin so the scene follows the fist (fist right → camera swings left, fist up → camera swings lower). **Wrist roll** — twisting the fist like a doorknob, measured as the rotation of the knuckle line (index MCP → pinky MCP) around the wrist → middle-MCP axis — turns the scene around the vertical axis with the twist; reported only after the twist exceeds `rollEngageAngle` (0.15 rad ≈ 9°) per fist, per-frame jitter under `rollDeadzone` dropped | `orbit_start`, `orbit` (`deltaX`, `deltaY` device units, `deltaRoll` radians), `orbit_end` |
 | **Zoom / turn (two fists)** | both hands closed fists (same test). Each fist counts as **moving** when its smoothed palm speed exceeds `zoomMoveSpeed` (0.004 video widths / frame). **Both moving** → zoom by the gap between them (aspect-corrected palm centers): apart → zoom in, together → zoom out; rotating them around each other (steering wheel) → `deltaAngle` (counter-clockwise on screen = +) turns the scene, after `zoomTurnEngageAngle` (0.12 rad ≈ 7°) so a straight pull doesn't rotate. **Only one moving** → that fist moves the camera exactly like a single fist (`orbit` deltas, straightened) and never zooms. **Neither moving** → nothing. The steadier fist is reported as the `anchor` (switches only when the other is below `zoomAnchorSwitchRatio` 0.5× its speed). Engaged from IDLE, or upgraded from a one-fist move when the second fist closes; ends on a pinch, a lost hand, or one hand open longer than `orbitOpenPalmGraceFrames` (then falls back to a one-fist move if the other fist is still closed) | `zoom_start`, `zoom` (`anchor`, `distance`, `scaleFactor = D / D₀`, `deltaScale = D / D_prev`, `deltaAngle`), `orbit` (one fist moving), `zoom_end` |
-| **Open-palm rotation (SELECT)** | while exactly one hand holds a pinch, the *other* hand shows an open palm: all four fingertips extended past their own PIP joints (`dist(tip, wrist) > 1.0 · dist(PIP, wrist)` per finger) and the thumb held out (thumb-tip farther than `openPalmThumbTuckRatio` 0.6 × palm size from the nearest knuckle — the inverse of the fist thumb-tuck test). The palm's tilt (angle of the wrist → middle-MCP vector in the mirrored, aspect-corrected view) is tracked frame-to-frame, unwrapped across ±π and anchored at gesture start, so the app applies `selectedMesh.rotation.y = initialRotation + deltaRotation` and a re-opened palm never jumps the object. Ends — `select_rotate_end` — when the palm closes / starts pinching, the pinch releases, a hand is lost or the mode switches. Only in SELECT mode; elsewhere the same poses route to build / navigation gestures | `select_rotate` (`hand`, `palmHand`, cumulative `deltaRotation` radians), `select_rotate_end` (`palmHand`, `reason`) |
+| **Open-palm rotation (EDIT)** | while exactly one hand holds a pinch, the *other* hand shows an open palm: all four fingertips extended past their own PIP joints (`dist(tip, wrist) > 1.0 · dist(PIP, wrist)` per finger) and the thumb held out (thumb-tip farther than `openPalmThumbTuckRatio` 0.6 × palm size from the nearest knuckle — the inverse of the fist thumb-tuck test). The palm's tilt (angle of the wrist → middle-MCP vector in the mirrored, aspect-corrected view) is tracked frame-to-frame, unwrapped across ±π and anchored at gesture start, so the app applies `selectedMesh.rotation.y = initialRotation + deltaRotation` and a re-opened palm never jumps the object. Ends — `select_rotate_end` — when the palm closes / starts pinching, the pinch releases, a hand is lost or the mode switches. Only in EDIT mode; elsewhere the same poses route to build / navigation gestures | `select_rotate` (`hand`, `palmHand`, cumulative `deltaRotation` radians), `select_rotate_end` (`palmHand`, `reason`) |
 
 **Straight camera paths.** Building gestures (pinch, extrude) are live and
 unfiltered, but a camera that copies every hand tremor feels unsteady and can
@@ -195,8 +195,8 @@ camera overlay — mouse click, or **point** (index finger up, other fingers
 curled) and hold the fingertip on a button for 500 ms (a ring marks the
 pointing fingertip, a progress bar fills). Pinches, fists and open palms
 never press toggle buttons, so moving, editing or building can't switch modes or
-shapes by accident (the trash bin and the confirmation dialog's targets are
-the two pinch-activated surfaces). The app starts in **VIEW** and the active
+shapes by accident — the trash bin and the confirmation dialog's targets
+included (pointing only). The app starts in **VIEW** and the active
 mode is shown inverted with an indicator bar (and in the stats bar under the
 camera).
 In **CREATE** mode a column of shape icon buttons appears down the right edge
@@ -219,28 +219,47 @@ build:
    `EdgesGeometry` outlines (a fist / zoom also commits). Releasing the
    **lower** pinch first, or both at once, commits a **flat** plate
    (`flatHeight`, spheres unaffected).
-3. **Single-hand footprint (legacy)** — pinch and drag with one hand: the
-   pinch start raycasts onto the ground plane (`y = 0`) and dragging sets the
-   footprint (box: square, cuboid: corner-to-corner rectangle,
-   cylinder/sphere: center + radius). It is committed with the default height on the next build or
-   camera gesture; pinching the second hand before releasing replaces it
-   with a two-hand build.
-4. **Select, move, recolor & delete (SELECT mode)** — a quick pinch on a committed
+3. **No accidental builds** — only the deliberate two-hand gesture creates
+   an object. A single pinch in CREATE mode does nothing (the legacy
+   single-hand floor footprint is opt-in via `CadBuilder`'s
+   `singleHandFootprint`), a pinch must hold for 2 frames
+   (`pinchEnterFrames`) and cannot start within 3 % of the frame border
+   (`pinchEdgeMargin` — stray / half-visible hands in the corners), and a
+   two-hand build shorter than 0.4 s (`MIN_BUILD_MS`, from the
+   `extrude_end` event's `durationMs`) is discarded instead of committed.
+4. **Select, move, recolor & delete (EDIT mode)** — a quick pinch on a committed
    mesh **selects** it (a bright outline shell is drawn around it — the
    mesh's own material is never tinted; it stays selected after you let go).
-   To **move** it, pinch and *hold* (the mesh starts following after
+   A quick pinch on the **already-selected** object deselects it again
+   (toggle). To **rotate** the selected object, make a **fist** with one
+   hand and move it, like turning it in your hand — **one axis at a time**
+   (`AxisLock`): each fist gesture picks its axis from its dominant
+   direction and sticks to it, so hand wobble never tumbles the object.
+   Mostly left / right spins it about the vertical axis (the side facing
+   you follows the fist); mostly up / down tips it about the camera's
+   horizontal axis (the side facing you tips with the fist — from any
+   camera angle). The axis is chosen after 0.03 device units of travel (no
+   motion is lost) and frees up when the fist holds still for ~0.25 s or
+   the fist opens. Raw fist motion, no path
+   straightening (`fistRotateSpeed` 2.5 rad per device unit, per-axis
+   jitter under `fistRotateDeadzone` dropped); it turns about its own
+   center and its lowest point keeps its height (exact, vertex-based), so
+   it neither sinks into nor creeps off the floor. With both
+   hands fisted the faster-moving fist drives, and the right hand when both
+   move about equally fast; fists never zoom or orbit the camera while an
+   object is selected (`GestureEngine.setObjectRotation`). To **move** it, pinch and *hold* (the mesh starts following after
    `dragHoldMs`, 300 ms, so a quick pinch never nudges it), drag, and
    release to drop it. Dragging moves it under the active
-   **constraint toggle** (top-left of the vision overlay): `[ XZ PLANE ]`
+   **constraint toggle** (camera view, icon column below `[ VIEW ]`): `[ XZ PLANE ]`
    (default) slides it on a horizontal plane at the height of the point you
-   grabbed, with its elevation locked, while `[ Y AXIS (ELEVATE) ]` ignores
+   grabbed, with its elevation locked, while `[ Y AXIS ]` ignores
    horizontal drift and lifts / lowers it along a camera-facing vertical
    plane through the grab point (clamped so it never sinks below the floor).
    Either way the exact point you grabbed stays under your fingertip — in
    depth as well as sideways. Switching between the toggles mid-drag
    re-anchors, so the mesh never jerks or resets. Pinching empty ground
-   deselects (so does leaving SELECT mode), restoring the mesh's normal look
-   — the selection outline goes, a picked color stays. While in SELECT mode the camera thumbnail doubles as a live
+   deselects (so does leaving EDIT mode), restoring the mesh's normal look
+   — the selection outline goes, a picked color stays. While in EDIT mode the camera thumbnail doubles as a live
    **AR spatial mirror**: the ground grid (30 × 30 world units, 1-unit minor
    + stronger 5-unit major lines, off-canvas geometry culled) and every
    committed mesh are projected through the shared 3D camera and drawn as
@@ -248,9 +267,18 @@ build:
    with the viewport. Keep the pinch held and show an **open palm** with
    your other hand: tilting it spins the selection around the vertical
    axis, with a compass ring (dashed circle + yaw needle) rendered around
-   the object in both the 3D viewport and the AR mirror. A floating
-   **HSL color wheel** appears beside the selected mesh (tracking it
-   through drags and camera moves): **point** at the disc (index finger
+   the object in both the 3D viewport and the AR mirror. An
+   **HSL color wheel** appears **in the camera view only** (the 3D view
+   draws none — `ColorWheel` runs headless as the picking model), pinned
+   at mid-height on the right edge of the part of the webcam image the
+   camera view shows (a 16:9 webcam loses its sides in the 4:3 view —
+   `DebugOverlay.visibleDeviceRect`). Mid-height matters: a fingertip low
+   in the frame pulls the wrist and palm out of view and the tracker loses
+   the hand. The disc is small and **doubles in size while a pointing
+   fingertip hovers it** (centered in place, so the hue under the finger
+   doesn't jump; picking follows the enlarged disc) — hue by angle,
+   saturation by radius:
+   **point** at the disc (index finger
    up) — every hue under the fingertip repaints the mesh live (angle =
    hue, radius = saturation, wheel center = gray). This works after a
    quick select-pinch, or with your other hand while one hand holds the
@@ -276,16 +304,19 @@ build:
    and frees its geometry / material / edge overlays; Cancel leaves
    everything untouched. While the dialog is open the scene is frozen —
    gestures only answer the dialog. The same dialog guards the in-vision
-   **trash bin** (bottom-right of the camera view), which clears the whole
-   scene on Confirm: point your index fingertip at the bin and hold it
-   there for 600 ms, pinch directly over the icon, or click it.
-5. **CSG Booleans — cut a hole or merge (SELECT mode)** — with two committed
+   **trash bin** (VIEW mode: top-left of the camera view, directly below
+   `[ VIEW ]`),
+   which clears the whole scene on Confirm: point your index fingertip at
+   the bin and hold it there for 600 ms, or click it — then point at
+   `[ CONFIRM ]` or `[ CANCEL ]` and hold. Pinches never fire the bin or
+   answer the dialog.
+5. **CSG Booleans — cut a hole or merge (EDIT mode)** — with two committed
    meshes overlapping, drag the selected one into the other: while their
    world-space bounding boxes intersect (`box3.intersectsBox`), a
    **translucent amber clash indicator** fills the overlap volume and the
    armed Boolean button glows amber (ready to fire). The two mutually
    exclusive tool toggles sit in the left stack below the drag-constraint
-   toggles: `[ SUBTRACT (Cut Hole) ]` and `[ UNION (Merge) ]` — point at
+   toggles: `[ SUBTRACT ]` and `[ UNION ]` — point at
    one and hold (or click) to arm it; if a clash is already live the
    operation fires immediately. To fire while dragging (one hand holds the
    mesh), show an **X cross** with your free hand — index and pinky
@@ -295,7 +326,17 @@ build:
      `three-bvh-csg`): the base is replaced by the result mesh (fresh
      geometry with crisp regenerated `EdgesGeometry` edge lines, the
      base's frame and transform), and the cutter is removed
-     from the scene.
+     from the scene. The cutter is grown 0.1 % first: solids all rest on
+     the floor, so the operands' bottom faces are coplanar, which makes
+     BSP CSG leave slivers and stray fragments. Result edges come from
+     `creaseEdges` — it skips the T-junction seams CSG leaves inside flat
+     faces (collinear partner edges matched with a float-tolerant 1e-4 ×
+     size) and ignores degenerate triangles (collapsed edges / zero area,
+     whose normals are noise) so smooth or flat seams never show as fake
+     creases; tests audit several cuts (through-hole, sphere corner, side
+     bite, repeated cuts) for zero stray edges — and keep the base's edge color and the evaluator's normals, and
+     the result renders double-sided so T-junction pixel cracks never show
+     the floor through the solid.
    - **Union** fuses both solids into **one continuous body**
      (`ADDITION`), wearing the selected mesh's color, with unified edge
      lines replacing the two separate entities in the scene hierarchy.
@@ -303,7 +344,7 @@ build:
    shapes; the clash indicator refreshes live. A failed / empty CSG is a
    safe no-op (the scene is never half-edited). Committed results export
    with the rest of the scene as `model.stl`.
-6. **Orbit the camera** — make a fist and move it: the camera orbits the
+6. **Orbit the camera** — with nothing selected, make a fist and move it: the camera orbits the
    world origin and the scene follows your hand — fist right swings the
    camera left, fist up swings it lower — with damping (`CadScene.onOrbit`);
    open palm stops. The camera focus is **locked to `(0, 0, 0)`**: the view
@@ -324,13 +365,16 @@ build:
 — deleting the selected object (Delete button, keyboard) or clearing the
 whole scene (in-vision trash bin) — is confirmed *in vision*: a translucent
 scrim + centered card drawn on the camera canvas with two spatial targets,
-`[ CONFIRM (Pinch) ]` (danger red) and `[ CANCEL (Open Palm) ]` (calm blue).
-Confirm by pinching so the pinch *closes* over the confirm target, by
-clicking it, by pressing `Enter`, or by holding the **OK gesture** — thumb
-and index tips touching, middle / ring / pinky extended — anywhere in view
-for 1 second (an amber progress bar fills the target). Cancel by holding an
-**open palm** briefly, by moving every hand out of view, by `Escape`, or by
-clicking the cancel target. The pinch that triggered the dialog stays
+`[ CONFIRM (Hold) ]` (danger red) and `[ CANCEL (Hold) ]` (calm blue).
+Confirm by **pointing** at the confirm target and holding for 1.2 s — the
+same wait as locking a color on the wheel and pressing the Delete button
+(one shared `HOLD_TO_ACT_MS` in `main.ts`) — or by holding the **OK
+gesture** (thumb and index tips touching, middle / ring / pinky extended)
+anywhere in view for the same time, by clicking the target, or by pressing
+`Enter`; an amber progress bar fills the target. A pinch never confirms
+instantly. Cancel by a pointing hold on the cancel target, an **open palm**
+held briefly, moving every hand out of view, `Escape`, or clicking the
+cancel target. The pinch that triggered the dialog stays
 "engaged", so releasing it into an open hand can never instantly cancel —
 and while the dialog is open the scene below is frozen. There is no
 `window.confirm()` and no DOM modal anywhere in the delete / clear flows.
@@ -364,13 +408,13 @@ engine.onPinchEnd((e) => { /* e.endPos, e.delta */ });
 engine.onExtrude((e) => { /* e.mode, e.scaleFactor | e.deltaHeight */ });
 engine.onOrbit((e) => { /* e.deltaX, e.deltaY, e.deltaRoll (one fist) */ });
 engine.onZoom((e) => { /* e.anchor, e.deltaScale, e.deltaAngle, e.scaleFactor (two fists) */ });
-engine.onSelectRotate((e) => { /* e.hand, e.palmHand, e.deltaRotation (SELECT, open palm) */ });
+engine.onSelectRotate((e) => { /* e.hand, e.palmHand, e.deltaRotation (EDIT, open palm) */ });
 engine.onSelectRotateEnd((e) => { /* e.palmHand, e.reason */ });
 
 // Debug overlay / HUD data (fires once per processed frame):
 engine.on('frame', (frame) => { /* state, mode, hands, metrics, fps */ });
 
-// Interaction modes (VIEW / SELECT / CREATE):
+// Interaction modes (VIEW / EDIT / CREATE):
 engine.setMode('select');
 engine.on('mode_change', (event) => { /* event.from, event.to */ });
 
@@ -402,7 +446,7 @@ on-screen view), +Y up — ready to map into a CAD viewport.
   straightening (`cameraPath`: `startDistance`, `cornerDeviation`,
   `settleDistance`, `deadband`, or `null`), orbit
   open-palm grace, hand-loss grace frames, and open-palm detection for the
-  SELECT-mode rotation (`openPalmExtensionRatio` 1.0,
+  EDIT-mode rotation (`openPalmExtensionRatio` 1.0,
   `openPalmMinExtendedFingers` 4, `openPalmThumbTuckRatio` 0.6), and the
   pointing pose that presses overlay buttons (`pointingIndexRatio` 1.5,
   `pointingCurlRatio` 1.2, `pointingHoldSlack` 0.15,
@@ -420,19 +464,26 @@ on-screen view), +Y up — ready to map into a CAD viewport.
 The `<canvas id="overlay">` (pure Canvas 2D) mirrors the feed and draws:
 
 - the **mode switcher** along the top edge: three boxy, mutually exclusive
-  toggle buttons (`[ VIEW ] [ SELECT ] [ CREATE ]`) — the active one is
+  toggle buttons (`[ VIEW ] [ EDIT ] [ CREATE ]`) — the active one is
   inverted (solid light fill + high-contrast indicator bar). Activated by
   mouse click or a **pointing** hand (`HandSnapshot.pointing`: index up,
   middle / ring / pinky curled, no pinch; debounced) holding its index tip
   (landmark 8) on the button for 500 ms (ring cursor + progress bar), via
   `DebugOverlay`'s `onModeRequest` callback. Pinches never press buttons,
   so an object drag sweeping across the bar never switches modes;
-- in **SELECT mode**, a stack of two **drag-constraint toggles** below the
-  mode bar in the top-left corner: `[ XZ PLANE ]` (default) and
-  `[ Y AXIS (ELEVATE) ]` — same boxy style and pointing activation
+- mode options: the VIEW-mode trash bin and the EDIT-mode tools share the
+  left column below `[ VIEW ]` (never shown together); the CREATE-mode
+  shape icons run down the right edge (same square size as the EDIT tool
+  and trash icons). EDIT tools are square **icon**
+  buttons: floor plane with a 4-way arrow (XZ PLANE), vertical double arrow
+  (Y AXIS), square with a dashed bite and "−" (SUBTRACT), square + circle
+  with "+" (UNION);
+- in **EDIT mode**, two **drag-constraint toggles** at the top of that
+  column: `[ XZ PLANE ]` (default) and
+  `[ Y AXIS ]` — same boxy style and pointing activation
   (`onDragConstraintRequest`);
-- in **SELECT mode**, the two **CSG Boolean tool toggles** continue the left
-  stack: `[ SUBTRACT (Cut Hole) ]` and `[ UNION (Merge) ]` — mutually
+- in **EDIT mode**, the two **CSG Boolean tool toggles** continue the
+  same stack: `[ SUBTRACT ]` and `[ UNION ]` — mutually
   exclusive, re-press disarms (`onBooleanToolRequest` → arm, and fire when
   a clash is already live). While a tool is armed and the selection
   intersects another mesh (live `booleanState` provider), the armed button
@@ -443,7 +494,7 @@ The `<canvas id="overlay">` (pure Canvas 2D) mirrors the feed and draws:
   right edge (cube (default), cuboid, cylinder, sphere — from the `shapes`
   option, each with an `icon`; picks reported through `onShapeRequest` →
   `CadBuilder.setTool`) — same boxy style and pointing activation;
-- in **SELECT mode**, a live **AR spatial mirror**: the 3D ground grid and
+- in **EDIT mode**, a live **AR spatial mirror**: the 3D ground grid and
   every committed mesh are projected through the scene camera's
   webcam-aspect twin (`CadScene.interactionCamera` — same pose and vertical
   FOV, the webcam frame's aspect — + `ArMirror`) into the webcam image's
@@ -461,15 +512,14 @@ The `<canvas id="overlay">` (pure Canvas 2D) mirrors the feed and draws:
   (orange for EXTRUDING),
 - thumb↔index pinch line with live distance, dual-hand extrusion link with
   `D` and scale factor,
-- the **trash bin** (bottom-right corner): a boxy recycle-bin icon button
-  that clears the scene through the spatial confirmation
-  (`onTrashRequest`) — activated by a pointing index-tip dwell of 600 ms
-  (`trashDwellMs`, progress bar fills along its bottom edge), by a
-  *fresh* pinch that closes over the icon (a drag sweeping across never
-  triggers it), or by a mouse click. Hidden while the confirmation
-  dialog is open;
+- the **trash bin** (VIEW mode only, top-left, directly below `[ VIEW ]`):
+  a boxy recycle-bin icon button that clears
+  the scene through the spatial confirmation (`onTrashRequest`) — activated
+  only by a pointing index-tip dwell of 600 ms (`trashDwellMs`, progress
+  bar fills along its bottom edge) or a mouse click; pinches never fire
+  it. Hidden while the confirmation dialog is open;
 - the **spatial confirmation dialog**: scrim + centered card with the
-  `[ CONFIRM (Pinch) ]` / `[ CANCEL (Open Palm) ]` targets (see the
+  `[ CONFIRM (Hold) ]` / `[ CANCEL (Hold) ]` targets (see the
   workflow section). While it is open (`overlay.confirmActive` /
   `confirmIntent`), every other overlay interaction freezes; the host
   receives the answer through `onConfirmRequest` / `onCancelRequest`
