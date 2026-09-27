@@ -278,6 +278,13 @@ export class GestureClassifier {
   private zoomTurnEngaged = false;
   /** Two-fist sub-gesture last frame: both fists zooming, or one moving the camera. */
   private zoomSubMode: 'zoom' | 'move' | null = null;
+  /**
+   * Fists drive the host's selected object instead of the camera (EDIT mode
+   * with a selection; set by the host via `setObjectRotation`).
+   */
+  private objectRotation = false;
+  /** Which fist drove the last two-fist object-rotation frame. */
+  private rotationFist: Handedness | null = null;
   private lastZoomDistance: number | null = null;
   private lastZoomScale: number | null = null;
 
@@ -352,6 +359,24 @@ export class GestureClassifier {
 
   get currentState(): GestureState {
     return this.state;
+  }
+
+  /**
+   * Route fist gestures to the host's selected object (true) or the camera
+   * (false, default). While on: one fist emits `orbit` movement deltas with
+   * no wrist-roll (the host turns the object: up / down → X, left / right →
+   * Y); two fists never zoom — the faster-moving fist drives the rotation,
+   * and when both move about equally fast the right hand wins.
+   */
+  setObjectRotation(enabled: boolean): void {
+    if (this.objectRotation === enabled) return;
+    this.objectRotation = enabled;
+    this.rotationFist = null;
+  }
+
+  /** Whether fists currently drive the host's selected object. */
+  get objectRotationEnabled(): boolean {
+    return this.objectRotation;
   }
 
   /** Active interaction mode (VIEW / SELECT / CREATE). */
@@ -811,7 +836,9 @@ export class GestureClassifier {
         if (this.orbitHand) {
           const raw = subtract3(track.palmCenter, track.prevPalmCenter);
           const delta = this.straightenCameraDelta({ x: raw.x, y: raw.y });
-          const deltaRoll = this.rollDelta(track);
+          // Wrist roll turns the camera; it is ignored while the fist
+          // rotates a selected object (only up / down / left / right count).
+          const deltaRoll = this.objectRotation ? 0 : this.rollDelta(track);
           this.lastOrbitDelta = { x: delta.x, y: delta.y };
           events.push({
             type: 'orbit',
@@ -983,8 +1010,34 @@ export class GestureClassifier {
     const aMoving = a.speedEma > this.options.zoomMoveSpeed;
     const bMoving = b.speedEma > this.options.zoomMoveSpeed;
 
+    if (this.objectRotation && aMoving && bMoving) {
+      // Object rotation: never zoom — the faster fist drives; when both move
+      // about equally fast (within 25 %), the right hand wins.
+      const faster =
+        a.speedEma > b.speedEma * 1.25 ? a : b.speedEma > a.speedEma * 1.25 ? b : null;
+      const driver = faster ?? (a.handedness === 'Right' ? a : b);
+      if (this.zoomSubMode !== 'move' || this.rotationFist !== driver.handedness) {
+        this.resetCameraPath();
+      }
+      this.zoomSubMode = 'move';
+      this.rotationFist = driver.handedness;
+      const raw = subtract3(driver.palmCenter, driver.prevPalmCenter);
+      const delta = this.straightenCameraDelta({ x: raw.x, y: raw.y });
+      this.lastOrbitDelta = { x: delta.x, y: delta.y };
+      events.push({
+        type: 'orbit',
+        timestamp,
+        hand: driver.handedness,
+        deltaX: delta.x,
+        deltaY: delta.y,
+        deltaRoll: 0,
+      });
+      this.lastZoomDistance = distance;
+      return;
+    }
     if (aMoving !== bMoving) {
-      // Only one fist moving: it moves the camera like a single fist.
+      // Only one fist moving: it moves the camera (or, with object rotation
+      // on, turns the selected object) like a single fist.
       if (this.zoomSubMode !== 'move') this.resetCameraPath();
       this.zoomSubMode = 'move';
       const moving = aMoving ? a : b;

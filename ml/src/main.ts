@@ -315,7 +315,9 @@ engine.onPinchEnd((e) => {
     // Only the grabbing hand's release ends the drag — hand 2 releasing a
     // color-confirming pinch must not drop the held object.
     if (selectHand === null || e.hand === selectHand) {
-      builder.endDrag();
+      // A tap on the already-selected object deselects it; a first tap
+      // selects (the selection persists); a hold-and-drag just drops it.
+      builder.releasePick();
       selectHand = null;
     }
   } else {
@@ -352,10 +354,17 @@ engine.on('zoom_start', (event) => {
   if (event.type === 'zoom_start') builder.commit();
 });
 
-// Camera move: one fist orbits the view around the locked origin (the camera
+// Fist move. With an object selected in EDIT mode the fist turns the object
+// (up / down → world X axis, left / right → world Y axis; with two fists the
+// faster one drives, right hand on a tie — see setObjectRotation below).
+// Otherwise one fist orbits the view around the locked origin (the camera
 // never pans) — the scene follows the hand, and rolling the wrist (twisting
 // the fist like a doorknob) turns the scene with the twist.
 engine.onOrbit((e) => {
+  if (fistRotatesObject()) {
+    builder.rotateSelectionBy(e.deltaX, e.deltaY);
+    return;
+  }
   cadScene.onOrbit({ deltaX: e.deltaX, deltaY: e.deltaY });
   if (e.deltaRoll !== 0) cadScene.onRotate({ deltaAngle: e.deltaRoll });
 });
@@ -402,8 +411,15 @@ engine.on('mode_change', (event) => {
 // overlay renders so the thumbnail HUD (wheel outline + Delete mirror) is
 // drawn from the same frame's geometry, never a frame stale. The stats bar
 // below the camera view tracks the same frame (mode / state / FPS / hands).
+/** Whether fists currently turn the selected object instead of the camera. */
+function fistRotatesObject(): boolean {
+  return engine.mode === 'select' && builder.selectedMesh !== null && !overlay.confirmActive;
+}
+
 engine.on('frame', (event) => {
   if (event.type !== 'frame') return;
+  // Fists drive the selection (not the camera) while one is selected in EDIT.
+  engine.setObjectRotation(fistRotatesObject());
   // Hand coords live in the webcam frame: keep the scene's interaction
   // camera at the webcam aspect (true AR proportions, aligned picking).
   if (event.video.height > 0) cadScene.setInteractionAspect(event.video.width / event.video.height);
@@ -545,16 +561,20 @@ function updateSelectionUi(frame: FrameEvent): void {
 
 /**
  * Pin the color wheel in the bottom-left corner of the hand-reachable part
- * of the 3D viewport: the webcam frame's bottom-left corner (device
- * (-1, -1)) mapped into the viewport, inset by a margin. A fingertip can
- * only reach the webcam frame's footprint in the (wider) viewport, so this
- * is the lowest-left spot the finger can still sweep — and the camera
- * thumbnail's mirrored wheel lands in its bottom-left corner too.
+ * of the 3D viewport that is also visible in the camera view: the visible
+ * webcam area's bottom-left corner (`overlay.visibleDeviceRect()`) mapped
+ * into the viewport, inset by a margin. The camera view draws the same
+ * wheel (small, live-synced) in its own bottom-left corner, and pointing at
+ * a color there picks it — both are the same device-space spot.
  */
 function showColorWheelInCorner(): void {
   const width = viewportElement.clientWidth;
   const height = viewportElement.clientHeight;
-  const corner = cadScene.deviceToCanvas(-1, -1, width, height);
+  // The *visible* webcam area's corner: the camera view cover-crops the
+  // video (a 16:9 webcam loses its sides in the 4:3 view), so anchoring at
+  // the raw frame corner would put the camera view's wheel out of sight.
+  const visible = overlay.visibleDeviceRect();
+  const corner = cadScene.deviceToCanvas(visible.minX, visible.minY, width, height);
   const inset = colorWheel.radius + 16;
   colorWheel.showAt(Math.max(0, corner.x) + inset, Math.min(height, corner.y) - inset);
 }

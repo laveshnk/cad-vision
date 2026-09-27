@@ -102,6 +102,15 @@ export class GestureEngine {
    * transition events (synthetic pinch releases, state / mode changes) just
    * like a processed frame would. Switching to the current mode is a no-op.
    */
+  /**
+   * Route fist gestures to the host's selected object instead of the camera
+   * (see `GestureClassifier.setObjectRotation`). Hosts typically enable it
+   * while an object is selected in EDIT mode.
+   */
+  setObjectRotation(enabled: boolean): void {
+    this.classifier.setObjectRotation(enabled);
+  }
+
   setMode(mode: InteractionMode): void {
     const events = this.classifier.setMode(mode);
     for (const event of events) this.emit(event);

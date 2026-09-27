@@ -94,6 +94,10 @@ import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js';
 import type { CadScene } from './CadScene';
 import { boxesClash, evaluateBoolean, overlapBox, worldBounds, type BooleanOperation } from './booleanOps';
 
+/** World axes for fist rotation of the selection. */
+const WORLD_X = new THREE.Vector3(1, 0, 0);
+const WORLD_Y = new THREE.Vector3(0, 1, 0);
+
 export type CadTool = 'box' | 'cuboid' | 'cylinder' | 'sphere';
 
 /**
@@ -157,6 +161,11 @@ export interface CadBuilderOptions {
    * deliberate two-hand gesture. Default false.
    */
   singleHandFootprint?: boolean;
+  /**
+   * EDIT mode fist rotation: radians of object rotation per device-space
+   * unit of fist travel (up / down → world X, left / right → world Y).
+   */
+  fistRotateSpeed?: number;
   /**
    * SELECT mode: a pinch must be held this long (ms) before it starts moving
    * the picked mesh, so a quick pinch only selects it. Default 300.
@@ -268,6 +277,8 @@ export class CadBuilder {
     grabHeight: number;
     /** Lift-plane hit height at the last anchor ('y' constraint), or null. */
     liftStartY: number | null;
+    /** The mesh was already selected at pinch start: a tap deselects it. */
+    toggleOnTap: boolean;
   } | null = null;
   /** Scratch plane for grab-height / lift raycasts. */
   private readonly dragPlane = new THREE.Plane();
@@ -318,6 +329,7 @@ export class CadBuilder {
       dragElevationScale: options.dragElevationScale ?? 3,
       dragMaxHeight: options.dragMaxHeight ?? 5,
       singleHandFootprint: options.singleHandFootprint ?? false,
+      fistRotateSpeed: options.fistRotateSpeed ?? 3,
       dragHoldMs: options.dragHoldMs ?? 300,
       previewColor: options.previewColor ?? 0x0284c7,
       bodyColor: options.bodyColor ?? 0x3f3f46,
@@ -592,12 +604,15 @@ export class CadBuilder {
       this.deselect();
       return false;
     }
+    const wasSelected = this.selected === mesh;
     this.select(mesh);
     // Lock the pinch offset relative to the mesh origin at the grabbed
     // surface point's height, plus the vertical (lift) anchor: the mesh may
     // never sink below the ground plane.
-    const bottom = mesh.geometry.boundingBox?.min.y ?? 0;
-    const minY = -bottom;
+    // Floor clamp from the *world* bounds, so a tilted (fist-rotated) mesh
+    // is clamped by its real lowest point.
+    mesh.updateMatrixWorld(true);
+    const minY = mesh.position.y - worldBounds(mesh, new THREE.Box3()).min.y;
     const drag = {
       offsetX: 0,
       offsetZ: 0,
@@ -611,6 +626,7 @@ export class CadBuilder {
       moving: false,
       grabHeight: hits[0].point.y - mesh.position.y,
       liftStartY: null,
+      toggleOnTap: wasSelected,
     };
     this.selectionDrag = drag;
     this.reanchorDrag(mesh, drag);
@@ -998,6 +1014,44 @@ export class CadBuilder {
   endDrag(): void {
     this.selectionDrag = null;
     this.endRotateSelection();
+  }
+
+  /**
+   * The picking pinch was released (EDIT mode). A quick pinch (a tap — it
+   * never started moving) on a mesh that was *already* selected toggles the
+   * selection off; any other release just ends the drag and keeps the
+   * selection (a first tap selects, a hold-and-drag moves).
+   */
+  releasePick(): void {
+    const drag = this.selectionDrag;
+    if (drag && !drag.moving && drag.toggleOnTap) this.deselect();
+    else this.endDrag();
+  }
+
+  /**
+   * Fist rotation of the selection (EDIT mode): a fist moving up / down
+   * turns the mesh about the world X axis, left / right about the world Y
+   * axis (device-space deltas, `fistRotateSpeed` radians per unit). Applied
+   * on world axes (quaternion), so successive turns stay intuitive whatever
+   * the current orientation. The mesh is lifted if a tilt would push it
+   * through the floor.
+   */
+  rotateSelectionBy(deltaX: number, deltaY: number): void {
+    const mesh = this.selected;
+    if (!mesh || !Number.isFinite(deltaX) || !Number.isFinite(deltaY)) return;
+    const speed = this.options.fistRotateSpeed;
+    if (deltaX !== 0) mesh.rotateOnWorldAxis(WORLD_Y, deltaX * speed);
+    // Fist up tips the object's front face up (away from the viewer).
+    if (deltaY !== 0) mesh.rotateOnWorldAxis(WORLD_X, -deltaY * speed);
+    mesh.updateMatrixWorld(true);
+    const bounds = worldBounds(mesh, this.scratchBoxA);
+    if (bounds.min.y < 0) {
+      mesh.position.y -= bounds.min.y; // keep resting on / above the floor
+      mesh.updateMatrixWorld(true);
+    }
+    this.syncSelectionOutline();
+    if (this.rotating) this.updateRotationRing();
+    this.updateClash();
   }
 
   /** Clear the selection and remove its outline highlight. */

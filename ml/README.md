@@ -230,7 +230,14 @@ build:
 4. **Select, move, recolor & delete (EDIT mode)** — a quick pinch on a committed
    mesh **selects** it (a bright outline shell is drawn around it — the
    mesh's own material is never tinted; it stays selected after you let go).
-   To **move** it, pinch and *hold* (the mesh starts following after
+   A quick pinch on the **already-selected** object deselects it again
+   (toggle). To **rotate** the selected object, make a **fist** with one
+   hand and move it: up / down turns it about the world X axis, left /
+   right about the world Y axis (`fistRotateSpeed`, 3 rad per device unit;
+   a tilted object is lifted so it never sinks into the floor). With both
+   hands fisted the faster-moving fist drives, and the right hand when both
+   move about equally fast; fists never zoom or orbit the camera while an
+   object is selected (`GestureEngine.setObjectRotation`). To **move** it, pinch and *hold* (the mesh starts following after
    `dragHoldMs`, 300 ms, so a quick pinch never nudges it), drag, and
    release to drop it. Dragging moves it under the active
    **constraint toggle** (camera view, directly below `[ EDIT ]`): `[ XZ PLANE ]`
@@ -254,8 +261,10 @@ build:
    **HSL color wheel** appears pinned in the bottom-left corner of the
    hand-reachable area (the webcam frame's bottom-left corner mapped into
    the viewport — the literal viewport corner lies outside the finger's
-   reach). The camera view shows the **same live color disc** in its own
-   bottom-left corner — hue by angle, saturation by radius, exactly
+   reach, and inside the part of the webcam image the camera view actually
+   shows — a 16:9 webcam loses its sides in the 4:3 view, see
+   `DebugOverlay.visibleDeviceRect`). The camera view shows the **same live
+   color disc**, small, in its own bottom-left corner — hue by angle, saturation by radius, exactly
    aligned with the viewport wheel — so you can pick colors right there:
    **point** at the disc (index finger
    up) — every hue under the fingertip repaints the mesh live (angle =
@@ -323,7 +332,7 @@ build:
    shapes; the clash indicator refreshes live. A failed / empty CSG is a
    safe no-op (the scene is never half-edited). Committed results export
    with the rest of the scene as `model.stl`.
-6. **Orbit the camera** — make a fist and move it: the camera orbits the
+6. **Orbit the camera** — with nothing selected, make a fist and move it: the camera orbits the
    world origin and the scene follows your hand — fist right swings the
    camera left, fist up swings it lower — with damping (`CadScene.onOrbit`);
    open palm stops. The camera focus is **locked to `(0, 0, 0)`**: the view

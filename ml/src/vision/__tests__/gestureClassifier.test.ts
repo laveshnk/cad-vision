@@ -592,6 +592,64 @@ describe('GestureClassifier — two-fist zoom', () => {
   });
 });
 
+describe('GestureClassifier — fist rotation of a selected object', () => {
+  const twoFists = (leftDx: number, rightDx: number, leftDy = 0, rightDy = 0) => [
+    makeHand('Left', { fist: true, dx: leftDx, dy: leftDy }),
+    makeHand('Right', { fist: true, dx: rightDx, dy: rightDy }),
+  ];
+
+  it('two fists never zoom; the faster fist drives the rotation', () => {
+    const classifier = new GestureClassifier({ ...TEST_OPTIONS, cameraPath: null });
+    classifier.setObjectRotation(true);
+    let t = 0;
+    classifier.process(twoFists(-0.2, 0.2), (t += 100));
+    // Both move apart (would zoom), Left clearly faster.
+    let result = classifier.process(twoFists(-0.3, 0.22), (t += 100));
+    expect(typesOf(result.events)).not.toContain('zoom');
+    let orbit = result.events.find((e) => e.type === 'orbit');
+    expect(orbit).toMatchObject({ hand: 'Left', deltaRoll: 0 });
+    // Now Right clearly faster.
+    for (let i = 0; i < 4; i++) result = classifier.process(twoFists(-0.3, 0.22 + 0.1 * (i + 1)), (t += 100));
+    orbit = result.events.find((e) => e.type === 'orbit');
+    expect(orbit).toMatchObject({ hand: 'Right' });
+    expect(typesOf(result.events)).not.toContain('zoom');
+  });
+
+  it('picks the right hand when both fists move equally fast', () => {
+    const classifier = new GestureClassifier({ ...TEST_OPTIONS, cameraPath: null });
+    classifier.setObjectRotation(true);
+    let t = 0;
+    classifier.process(twoFists(-0.2, 0.2), (t += 100));
+    const result = classifier.process(twoFists(-0.2, 0.2, -0.1, -0.1), (t += 100)); // both up, same speed
+    const orbit = result.events.find((e) => e.type === 'orbit');
+    expect(orbit).toMatchObject({ hand: 'Right' });
+    // Raw -y image motion is +y (up) in device space: 0.1 * 2 = 0.2.
+    if (orbit?.type === 'orbit') expect(orbit.deltaY).toBeCloseTo(0.2);
+  });
+
+  it('a single fist reports no wrist roll while rotating an object', () => {
+    const classifier = new GestureClassifier({ ...TEST_OPTIONS, cameraPath: null });
+    classifier.setObjectRotation(true);
+    let t = 0;
+    classifier.process([makeHand('Right', { fist: true })], (t += 100));
+    for (const twist of [0.2, 0.4, 0.6]) {
+      const result = classifier.process([makeHand('Right', { fist: true, twist })], (t += 100));
+      const orbit = result.events.find((e) => e.type === 'orbit');
+      if (orbit?.type === 'orbit') expect(orbit.deltaRoll).toBe(0);
+    }
+  });
+
+  it('back to camera control (zoom) once object rotation is off', () => {
+    const classifier = new GestureClassifier(TEST_OPTIONS);
+    classifier.setObjectRotation(true);
+    classifier.setObjectRotation(false);
+    let t = 0;
+    classifier.process(twoFists(-0.2, 0.2), (t += 100));
+    const result = classifier.process(twoFists(-0.1, 0.1), (t += 100));
+    expect(typesOf(result.events)).toContain('zoom');
+  });
+});
+
 /** Pointing pose: index finger up, middle / ring / pinky folded, thumb tucked. */
 const POINT: HandSpec = { fist: true, extend: [5] };
 

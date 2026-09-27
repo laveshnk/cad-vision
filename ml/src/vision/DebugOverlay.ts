@@ -805,6 +805,30 @@ export class DebugOverlay<S extends string = string> {
   }
 
   /**
+   * The part of the webcam frame actually visible in the camera view, in
+   * device space ([-1, 1], +Y up). The video is cover-cropped into the view
+   * (a 16:9 webcam in a 4:3 view loses its left / right edges), so hosts
+   * placing controls that must show up in the camera view anchor them
+   * inside this rect. The whole frame until the first render.
+   */
+  visibleDeviceRect(): { minX: number; maxX: number; minY: number; maxY: number } {
+    const view = this.lastView;
+    const rect = this.canvas.getBoundingClientRect();
+    if (!view || view.dispW <= 0 || view.dispH <= 0 || rect.width <= 0) {
+      return { minX: -1, maxX: 1, minY: -1, maxY: 1 };
+    }
+    // Canvas CSS px → device (the overlay's own mirrored cover mapping).
+    const toX = (px: number) => ((px - view.ox) / view.dispW) * 2 - 1;
+    const toY = (py: number) => 1 - ((py - view.oy) / view.dispH) * 2;
+    return {
+      minX: Math.max(-1, toX(0)),
+      maxX: Math.min(1, toX(rect.width)),
+      minY: Math.max(-1, toY(rect.height)),
+      maxY: Math.min(1, toY(0)),
+    };
+  }
+
+  /**
    * Device-space hit test against the last rendered UI buttons (mode bar +
    * SELECT-mode constraint stack + CREATE-mode shape row), e.g. to tell
    * whether a device-space point sits under the overlay's buttons. Runs
