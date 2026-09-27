@@ -94,6 +94,50 @@ import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js';
 import type { CadScene } from './CadScene';
 import { AxisLock } from './axisLock';
 import { boxesClash, evaluateBoolean, overlapBox, worldBounds, type BooleanOperation } from './booleanOps';
+import { solidDimensions, type DimensionEntry, type SolidShape } from './dimensions';
+
+/**
+ * A solid's centimetre dimensions plus where to show them: the top-center
+ * of its world bounding box (plain data for the viewport's label layer).
+ */
+export interface DimensionAnnotation {
+  anchor: THREE.Vector3;
+  entries: DimensionEntry[];
+  /** True for the live build preview (still being sized). */
+  preview: boolean;
+}
+
+/**
+ * The measurable shape of a committed mesh: primitive parameters for boxes,
+ * cylinders and spheres; the local bounding box for anything else (CSG
+ * results), reported as a box.
+ */
+function solidShapeOf(geometry: THREE.BufferGeometry): SolidShape {
+  if (geometry instanceof THREE.BoxGeometry) {
+    const { width, height, depth } = geometry.parameters;
+    return { kind: 'box', width, height, depth };
+  }
+  if (geometry instanceof THREE.CylinderGeometry) {
+    const { radiusTop, height } = geometry.parameters;
+    return { kind: 'cylinder', radius: radiusTop, height };
+  }
+  if (geometry instanceof THREE.SphereGeometry) {
+    return { kind: 'sphere', radius: geometry.parameters.radius };
+  }
+  if (!geometry.boundingBox) geometry.computeBoundingBox();
+  const size = geometry.boundingBox!.getSize(new THREE.Vector3());
+  return { kind: 'box', width: size.x, height: size.y, depth: size.z };
+}
+
+/** Top-center of a mesh's world bounding box (the dimension label anchor). */
+function topAnchor(mesh: THREE.Mesh): THREE.Vector3 {
+  const geometry = mesh.geometry;
+  if (!geometry.boundingBox) geometry.computeBoundingBox();
+  mesh.updateMatrixWorld();
+  const box = geometry.boundingBox!.clone().applyMatrix4(mesh.matrixWorld);
+  const center = box.getCenter(new THREE.Vector3());
+  return center.setY(box.max.y);
+}
 
 /** World up: the fist-rotation yaw axis. */
 const WORLD_Y = new THREE.Vector3(0, 1, 0);
@@ -367,6 +411,36 @@ export class CadBuilder {
   /** Committed meshes (read-only view) — consumed by the AR mirror. */
   get committedMeshes(): readonly THREE.Mesh[] {
     return this.committed;
+  }
+
+  /**
+   * Centimetre dimensions of every committed solid plus the live build
+   * preview (box / cuboid: L W H; cylinder: R H; sphere: R; CSG results:
+   * bounding-box L W H), anchored at each solid's top.
+   */
+  dimensionAnnotations(): DimensionAnnotation[] {
+    const annotations: DimensionAnnotation[] = this.committed.map((mesh) => ({
+      anchor: topAnchor(mesh),
+      entries: solidDimensions(solidShapeOf(mesh.geometry)),
+      preview: false,
+    }));
+    const build = this.build;
+    if (build) {
+      // The preview's unit geometry is scaled to its displayed size.
+      const { x, y, z } = build.preview.fill.scale;
+      const shape: SolidShape =
+        build.tool === 'cylinder'
+          ? { kind: 'cylinder', radius: x / 2, height: y }
+          : build.tool === 'sphere'
+            ? { kind: 'sphere', radius: x / 2 }
+            : { kind: 'box', width: x, height: y, depth: z };
+      annotations.push({
+        anchor: topAnchor(build.preview.fill),
+        entries: solidDimensions(shape),
+        preview: true,
+      });
+    }
+    return annotations;
   }
 
   /** The currently selected committed mesh (AR highlight), or null. */

@@ -460,6 +460,14 @@ export interface DebugOverlayOptions<S extends string = string> {
    * the selected union back into its parts.
    */
   onUngroupRequest?: () => void;
+  /**
+   * Called with the new state when the dimensions (ruler) toggle at the
+   * right end of the mode bar is activated — pointing dwell or mouse click,
+   * in every mode. The button is only drawn when this callback is set.
+   */
+  onDimensionsToggle?: (visible: boolean) => void;
+  /** Initial state of the dimensions toggle. Default false. */
+  dimensionsVisible?: boolean;
 }
 
 /** A hit-testable rectangle in CSS pixels. */
@@ -555,6 +563,16 @@ export class DebugOverlay<S extends string = string> {
   private ungroupRect: ButtonRect | null = null;
   private readonly ungroupDwell = new DwellClock();
   private readonly onUngroupRequest: (() => void) | null;
+  /**
+   * Dimensions toggle (ruler, right end of the mode bar): rect, dwell clock
+   * and a latch so a fingertip left resting on it cannot flip it back — the
+   * hand must leave the button before the next toggle.
+   */
+  private dimensionsRect: ButtonRect | null = null;
+  private readonly dimensionsDwell = new DwellClock();
+  private dimensionsLatched = false;
+  private dimensionsOn: boolean;
+  private readonly onDimensionsToggle: ((visible: boolean) => void) | null;
   /** Last rendered mirrored cover transform (device-space UI hit tests). */
   private lastView: ViewTransform | null = null;
 
@@ -584,6 +602,8 @@ export class DebugOverlay<S extends string = string> {
     this.booleanTriggerFrames = options.booleanTriggerFrames ?? 6;
     this.booleanState = options.booleanState ?? null;
     this.onUngroupRequest = options.onUngroupRequest ?? null;
+    this.onDimensionsToggle = options.onDimensionsToggle ?? null;
+    this.dimensionsOn = options.dimensionsVisible ?? false;
     canvas.addEventListener('click', this.onCanvasClick);
     canvas.addEventListener('mousemove', this.onCanvasMouseMove);
   }
@@ -641,6 +661,16 @@ export class DebugOverlay<S extends string = string> {
     this.confirmOpenedAgo = 0;
   }
 
+  /** Whether the dimensions toggle shows as on. */
+  get dimensionsVisible(): boolean {
+    return this.dimensionsOn;
+  }
+
+  /** Mirror the dimensions state set elsewhere (e.g. the toolbar toggle). */
+  setDimensionsVisible(visible: boolean): void {
+    this.dimensionsOn = visible;
+  }
+
   /** The armed Boolean tool the overlay currently displays (host mirrors it). */
   get booleanTool(): OverlayBooleanTool | null {
     return this.armedBooleanTool;
@@ -660,6 +690,11 @@ export class DebugOverlay<S extends string = string> {
     const trash = this.trashRect;
     if (trash && this.inRect(trash, event.offsetX, event.offsetY)) {
       this.requestTrash();
+      return;
+    }
+    const dimensions = this.dimensionsRect;
+    if (dimensions && this.inRect(dimensions, event.offsetX, event.offsetY)) {
+      this.toggleDimensions();
       return;
     }
     const boolean = this.hitRects(this.booleanRects, event.offsetX, event.offsetY);
@@ -700,6 +735,8 @@ export class DebugOverlay<S extends string = string> {
     const trash = this.trashRect;
     const hovering =
       (trash !== null && this.inRect(trash, event.offsetX, event.offsetY)) ||
+      (this.dimensionsRect !== null &&
+        this.inRect(this.dimensionsRect, event.offsetX, event.offsetY)) ||
       this.hitRects(this.booleanRects, event.offsetX, event.offsetY) >= 0 ||
       (this.ungroupRect !== null && this.canUngroupNow() &&
         this.inRect(this.ungroupRect, event.offsetX, event.offsetY)) ||
@@ -754,6 +791,7 @@ export class DebugOverlay<S extends string = string> {
       this.updateBooleanInteraction(frame, view, dt);
       this.updateUngroupInteraction(frame, view, dt);
       this.updateTrashInteraction(frame, view, dt);
+      this.updateDimensionsInteraction(frame, view, dt);
     }
     this.drawPointerCursors(frame, view);
   }
@@ -838,6 +876,7 @@ export class DebugOverlay<S extends string = string> {
       this.hitRects(this.booleanRects, px, py) >= 0 ||
       (this.ungroupRect !== null && this.inRect(this.ungroupRect, px, py)) ||
       (trash !== null && this.inRect(trash, px, py)) ||
+      (this.dimensionsRect !== null && this.inRect(this.dimensionsRect, px, py)) ||
       (rects !== null &&
         (this.inRect(rects.confirm, px, py) || this.inRect(rects.cancel, px, py)))
     );
@@ -1387,7 +1426,10 @@ export class DebugOverlay<S extends string = string> {
     const ctx = this.ctx;
     const scale = this.fontScale(cssWidth);
     const { margin, gap, height } = this.barMetrics(cssWidth);
-    const width = (cssWidth - margin * 2 - gap * (MODE_BUTTONS.length - 1)) / MODE_BUTTONS.length;
+    // The dimensions toggle (a square as tall as the bar) takes the right end.
+    const toggleRoom = this.onDimensionsToggle ? height + gap : 0;
+    const width =
+      (cssWidth - margin * 2 - toggleRoom - gap * (MODE_BUTTONS.length - 1)) / MODE_BUTTONS.length;
 
     this.buttonRects = [];
     ctx.textAlign = 'center';
@@ -1417,6 +1459,72 @@ export class DebugOverlay<S extends string = string> {
     });
     ctx.textAlign = 'left';
     ctx.textBaseline = 'alphabetic';
+    this.drawDimensionsButton(cssWidth);
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Dimensions toggle (every mode, right end of the mode bar)           */
+  /* ------------------------------------------------------------------ */
+
+  private toggleDimensions(): void {
+    this.dimensionsOn = !this.dimensionsOn;
+    this.dimensionsDwell.reset();
+    this.onDimensionsToggle?.(this.dimensionsOn);
+  }
+
+  /** Pointing dwell flips the toggle once; the hand must leave to re-arm it. */
+  private updateDimensionsInteraction(frame: FrameEvent, view: ViewTransform, dt: number): void {
+    let target = this.pointedButton(frame, view, [this.dimensionsRect]);
+    if (this.dimensionsLatched) {
+      if (target < 0) this.dimensionsLatched = false;
+      target = -1;
+    }
+    if (this.dimensionsDwell.update(target, dt, this.dwellMs) >= 0) {
+      this.dimensionsLatched = true;
+      this.toggleDimensions();
+    }
+  }
+
+  /** Square ruler toggle: inverted while dimensions are shown. */
+  private drawDimensionsButton(cssWidth: number): void {
+    if (!this.onDimensionsToggle) {
+      this.dimensionsRect = null;
+      return;
+    }
+    const { margin, height } = this.barMetrics(cssWidth);
+    const rect = { x: cssWidth - margin - height, y: margin, width: height, height };
+    this.dimensionsRect = rect;
+    let ink: string;
+    if (this.dimensionsOn) {
+      this.drawActiveButton(rect, 6, 3);
+      ink = '#0f172a';
+    } else {
+      const progress = this.dimensionsDwell.progress(0, this.dwellMs);
+      this.drawIdleButton(rect, progress, 1.5);
+      ink = progress !== null ? '#f8fafc' : '#cbd5e1';
+    }
+    this.drawRulerIcon(rect.x + height / 2, rect.y + height / 2 - 1, height * 0.32, ink);
+  }
+
+  /** Ruler line icon (body + graduation ticks), centered at (cx, cy), half-size r. */
+  private drawRulerIcon(cx: number, cy: number, r: number, ink: string): void {
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.strokeStyle = ink;
+    ctx.lineWidth = Math.max(1.25, r * 0.14);
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    const left = cx - r;
+    const top = cy - r * 0.42;
+    ctx.strokeRect(left, top, r * 2, r * 0.84);
+    ctx.beginPath();
+    for (let i = 1; i <= 4; i++) {
+      const x = left + (r * 2 * i) / 5;
+      ctx.moveTo(x, top);
+      ctx.lineTo(x, top + r * (i % 2 === 0 ? 0.48 : 0.3));
+    }
+    ctx.stroke();
+    ctx.restore();
   }
 
   /* ------------------------------------------------------------------ */

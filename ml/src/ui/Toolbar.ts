@@ -2,7 +2,9 @@
  * Toolbar: CAD-styled glass header with camera control and scene utilities.
  * The camera control is a single toggle ("Start camera" ↔ "Stop") whose state
  * is driven by `setCameraRunning`; STL export is exposed through
- * `onExportStl`, camera lifecycle through `onCameraStart` / `onCameraStop`.
+ * `onExportStl`, camera lifecycle through `onCameraStart` / `onCameraStop`,
+ * and the dimension-label toggle through `onDimensionsToggle` (its pressed
+ * state mirrors `setDimensionsVisible`).
  * Scene clearing lives in-vision (the overlay's trash bin + spatial
  * confirmation), so no mouse-only destructive button is mounted here.
  * UI-only module — no vision or CAD imports.
@@ -14,6 +16,8 @@ export interface ToolbarCallbacks {
   onCameraStart?: () => void;
   /** Stop tracking and release the webcam. */
   onCameraStop?: () => void;
+  /** Flip the viewport's dimension labels (cm) on / off. */
+  onDimensionsToggle?: () => void;
 }
 
 /** Lucide-style stroke icons (currentColor). */
@@ -24,6 +28,8 @@ const ICONS = {
   camera:
     '<path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3Z"/><circle cx="12" cy="13" r="3"/>',
   stop: '<rect x="6" y="6" width="12" height="12" rx="2"/>',
+  ruler:
+    '<path d="M21.3 15.3a2.4 2.4 0 0 1 0 3.4l-2.6 2.6a2.4 2.4 0 0 1-3.4 0L2.7 8.7a2.41 2.41 0 0 1 0-3.4l2.6-2.6a2.41 2.41 0 0 1 3.4 0Z"/><path d="m14.5 12.5 2-2"/><path d="m11.5 9.5 2-2"/><path d="m8.5 6.5 2-2"/><path d="m17.5 15.5 2-2"/>',
 } as const;
 
 function icon(id: keyof typeof ICONS): string {
@@ -37,6 +43,7 @@ function icon(id: keyof typeof ICONS): string {
 export class Toolbar {
   private readonly listeners: Array<() => void> = [];
   private cameraButton: HTMLButtonElement | null = null;
+  private dimensionsButton: HTMLButtonElement | null = null;
   private cameraRunning = false;
 
   constructor(
@@ -70,6 +77,11 @@ export class Toolbar {
     }
   }
 
+  /** Reflect whether the dimension labels are shown (pressed toggle). */
+  setDimensionsVisible(visible: boolean): void {
+    this.dimensionsButton?.setAttribute('aria-pressed', String(visible));
+  }
+
   private mount(): void {
     this.root.classList.add('toolbar');
     this.root.setAttribute('role', 'toolbar');
@@ -95,6 +107,15 @@ export class Toolbar {
     utilityGroup.className = 'toolbar-group';
     utilityGroup.setAttribute('role', 'group');
     utilityGroup.setAttribute('aria-label', 'Scene utilities');
+    this.dimensionsButton = this.createButton(
+      'ruler',
+      'Dimensions',
+      'Show / hide object dimensions (cm)',
+      this.callbacks.onDimensionsToggle,
+      'accent'
+    );
+    this.dimensionsButton.setAttribute('aria-pressed', 'false');
+    utilityGroup.appendChild(this.dimensionsButton);
     utilityGroup.appendChild(
       this.createButton('export', 'Export STL', 'Export STL', this.callbacks.onExportStl, 'accent')
     );
@@ -145,6 +166,7 @@ export class Toolbar {
     for (const detach of this.listeners) detach();
     this.listeners.length = 0;
     this.cameraButton = null;
+    this.dimensionsButton = null;
     this.root.classList.remove('toolbar');
     this.root.removeAttribute('role');
     this.root.removeAttribute('aria-label');
