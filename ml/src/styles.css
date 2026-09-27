@@ -48,6 +48,7 @@ body {
 
 .toolbar-brand {
   display: flex;
+  white-space: nowrap;
   align-items: center;
   gap: 8px;
   font-size: 14px;
@@ -55,8 +56,11 @@ body {
   letter-spacing: 0.04em;
 }
 
-.toolbar-brand svg {
-  color: var(--accent);
+.toolbar-logo {
+  width: 30px;
+  height: 30px;
+  border-radius: 7px;
+  flex: none;
 }
 
 .toolbar-group {
@@ -130,6 +134,12 @@ button:disabled {
 .utility-button.accent:hover:not(:disabled) {
   background: rgba(2, 132, 199, 0.1);
   border-color: rgba(2, 132, 199, 0.3);
+}
+
+/* Pressed toggle (e.g. dimensions shown). */
+.utility-button[aria-pressed='true'] {
+  background: rgba(2, 132, 199, 0.12);
+  border-color: rgba(2, 132, 199, 0.4);
 }
 
 /* ---- Workspace: full-bleed 3D viewport + floating camera thumbnail ---- */
@@ -352,86 +362,39 @@ button:disabled {
   display: block;
 }
 
-/* ---- Floating color wheel (SELECT-mode selection repaint) ---- */
-.color-wheel {
+/* ---- Dimension labels (cm), toggled from the toolbar / camera view ---- */
+.dimension-layer {
   position: absolute;
-  /* Below the camera thumbnail (z-index 30) — the control surface wins. */
-  z-index: 20;
-  border-radius: 50%;
-  /* No overflow clip: the canvas paints its own soft circular rim, so the
-     hover cursor's countdown ring may overhang the disc edge. */
-  box-shadow:
-    0 6px 20px rgba(15, 23, 42, 0.28),
-    inset 0 0 0 1px rgba(255, 255, 255, 0.9);
-  opacity: 0;
-  transform: translate(-50%, -50%) scale(0.9);
-  transition: opacity 140ms ease, transform 140ms ease;
-  /* Display-only overlay: gestures (not the mouse) drive the wheel. */
+  inset: 0;
+  overflow: hidden;
+  /* Under the selection HUD (20) and the camera thumbnail (30). */
+  z-index: 10;
   pointer-events: none;
 }
 
-.color-wheel--visible {
-  opacity: 1;
-  transform: translate(-50%, -50%) scale(1);
-}
-
-/* Opt out of the `.viewport canvas` stretch rule; sizes come inline. */
-.color-wheel canvas {
-  position: static;
-  display: block;
-}
-
-/* Live hover cursor: the pointing hand's index fingertip on the disc, with
-   the timed hover lock's countdown ring around it. */
-.color-wheel-cursor {
+.dimension-chip {
   position: absolute;
-  width: 28px;
-  height: 28px;
-  transform: translate(-50%, -50%);
-  opacity: 0;
-  transition: opacity 120ms ease;
+  left: 0;
+  top: 0;
+  margin-top: -8px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(15, 23, 42, 0.18);
+  background: rgba(255, 255, 255, 0.9);
+  color: #0f172a;
+  font: 600 11px/1.3 ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: nowrap;
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.14);
 }
 
-.color-wheel-cursor--visible {
-  opacity: 1;
+.dimension-chip[hidden] {
+  display: none;
 }
 
-.color-wheel-ring {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-}
-
-.color-wheel-ring-track {
-  fill: none;
-  stroke: rgba(15, 23, 42, 0.35);
-  stroke-width: 3;
-}
-
-/* Countdown arc: stroke-dashoffset is driven from TypeScript (pathLength 100). */
-.color-wheel-ring-fill {
-  fill: none;
-  stroke: #ffffff;
-  stroke-width: 3;
-  stroke-linecap: round;
-  stroke-dasharray: 100;
-  stroke-dashoffset: 100;
-  transform: rotate(-90deg);
-  transform-origin: center;
-}
-
-.color-wheel-dot {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  width: 11px;
-  height: 11px;
-  border-radius: 50%;
-  background: #ffffff;
-  border: 2px solid #ffffff;
-  box-shadow: 0 0 0 1.5px rgba(15, 23, 42, 0.6);
-  transform: translate(-50%, -50%);
+/* Live build preview: the size is still changing. */
+.dimension-chip--preview {
+  border-color: rgba(2, 132, 199, 0.55);
+  color: #0369a1;
 }
 
 /* ---- Floating selection action HUD (SELECT mode Delete button) ---- */

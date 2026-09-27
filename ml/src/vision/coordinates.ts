@@ -27,7 +27,7 @@ export function toDeviceSpace(p: RawLandmark): Vec3 {
 }
 
 /** Convert a raw (image-normalized) landmark to pixel space. */
-export function toPixelSpace(p: RawLandmark, width: number, height: number): Vec2 {
+function toPixelSpace(p: RawLandmark, width: number, height: number): Vec2 {
   return { x: p.x * width, y: p.y * height };
 }
 

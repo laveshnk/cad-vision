@@ -6,11 +6,11 @@ export { GestureClassifier } from './GestureClassifier';
 export { PathStraightener } from './PathStraightener';
 export type { PathStraightenerOptions } from './PathStraightener';
 export type { GestureClassifierOptions, ClassifierFrameResult } from './GestureClassifier';
-export { HandTracker, DEFAULT_WASM_CDN, DEFAULT_MODEL_CDN } from './HandTracker';
+export { HandTracker } from './HandTracker';
 export type { HandTrackerOptions, HandResultHandler } from './HandTracker';
 export { HandednessStabilizer, chiralitySign } from './HandednessStabilizer';
 export type { HandednessStabilizerOptions } from './HandednessStabilizer';
-export { DebugOverlay, MODE_LABELS, STATE_COLORS } from './DebugOverlay';
+export { DebugOverlay, MODE_LABELS } from './DebugOverlay';
 export type { DebugOverlayOptions, OverlayShape, OverlayShapeIcon } from './DebugOverlay';
 export type {
   ArPoint,
@@ -33,7 +33,6 @@ export {
   measureHandShape,
   measureWristRoll,
   wrapAngle,
-  isotropicPoints,
   palmCenter2D,
   palmAzimuth,
 } from './handShape';

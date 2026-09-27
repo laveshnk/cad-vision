@@ -1,4 +1,4 @@
-# CAD Vision — Gesture-Driven CAD Workbench (`ml/`)
+# Starfleet aCADemy — Gesture-Driven CAD Workbench (`ml/`)
 
 Self-contained TypeScript application that turns webcam hand tracking into an
 interactive CAD tool. The MediaPipe-based gesture engine emits **normalized CAD
@@ -40,15 +40,18 @@ serving over the network needs HTTPS.
 src/
 ├── main.ts                    # app orchestrator: vision events → CAD + UI wiring
 ├── styles.css                 # light theme; full-bleed viewport, camera thumbnail, glass toolbar
+├── assets/logo.png            # Starfleet aCADemy emblem (toolbar logo + favicon)
 ├── cad/
 │   ├── CadScene.ts            # Three.js viewport: camera rig, lights, grid, orbit
 │   ├── CadBuilder.ts          # gesture-driven primitives, selection, CSG booleans, STL export
 │   ├── booleanOps.ts          # three-bvh-csg wrapper: subtract / union + AABB clash helpers
 │   ├── arProjection.ts        # pure NDC→canvas math + 2D convex hull (AR mirror)
+│   ├── dimensions.ts          # solid dimensions in cm (L/W/H, R/H, R) — pure math
 │   └── ArMirror.ts            # plain-data AR projection of grid + meshes for the overlay
 ├── ui/
-│   ├── Toolbar.ts             # CAD toolbar: camera toggle, Export STL
-│   ├── ColorWheel.ts          # floating HSL color wheel + timed hover lock (dwell tracker)
+│   ├── Toolbar.ts             # CAD toolbar: camera toggle, Dimensions toggle, Export STL
+│   ├── DimensionLabels.ts     # cm measurement chips floating over each solid in the 3D view
+│   ├── ColorWheel.ts          # headless HSL color-wheel model: placement, picking, timed hover lock
 │   ├── SelectionMenu.ts       # floating selection HUD (Delete action, EDIT mode)
 │   ├── MetricsBar.ts          # boxy monospace stats bar under the camera view
 │   ├── hitTest.ts             # root-local DOM hit-tests for the floating overlays
@@ -65,6 +68,7 @@ src/
     ├── GestureClassifier.ts   # pinch/fist/orbit/zoom detection + finite state machine
     ├── GestureEngine.ts       # facade: pipeline + event emitter
     ├── DebugOverlay.ts        # 2D canvas renderer (landmarks, skeleton, in-vision UI)
+    ├── DwellClock.ts          # shared hover-to-press dwell timer for the overlay buttons
     └── index.ts               # public API barrel
 ```
 
@@ -205,8 +209,9 @@ picked the same way (point-and-hold / click); it sets the shape for the next
 build:
 
 1. **Two-hand build** — pinch with both hands: a translucent wireframe
-   preview of the selected shape spawns centered on the origin `(0, 0, 0)`,
-   its base sized by the two pinches (`baseSizeScale` world units per unit
+   preview of the selected shape spawns centered on the origin `(0, 0, 0)`
+   (drawn x-ray style — always on top, so it stays visible inside or behind
+   existing solids), its base sized by the two pinches (`baseSizeScale` world units per unit
    of video width):
    - **Box** — square, side = straight-line pinch gap;
    - **Cuboid** — rectangle, horizontal gap → width, vertical gap → depth;
@@ -272,7 +277,7 @@ build:
    axis, with a compass ring (dashed circle + yaw needle) rendered around
    the object in both the 3D viewport and the AR mirror. An
    **HSL color wheel** appears **in the camera view only** (the 3D view
-   draws none — `ColorWheel` runs headless as the picking model), pinned
+   draws none — `ColorWheel` is a DOM-free picking model), pinned
    at mid-height on the right edge of the part of the webcam image the
    camera view shows (a 16:9 webcam loses its sides in the 4:3 view —
    `DebugOverlay.visibleDeviceRect`). Mid-height matters: a fingertip low
@@ -393,8 +398,18 @@ cancel target. The pinch that triggered the dialog stays
 and while the dialog is open the scene below is frozen. There is no
 `window.confirm()` and no DOM modal anywhere in the delete / clear flows.
 
+**Dimensions (cm).** A ruler toggle in the bottom-right corner of the camera
+view (every mode; the same pointing hold as the mode buttons, or a mouse click —
+the finger must leave the button before it can toggle again) and the
+toolbar's **Dimensions** button (kept in sync) show a measurement chip
+above every solid in the 3D view: cube / cuboid → `L` (along X), `W`
+(along Z), `H`; cylinder → `R`, `H`; sphere → `R`; CSG results → their
+bounding-box `L`/`W`/`H`. The live build preview is measured too (blue
+chip). One ground-grid cell (one world unit) is 10 cm
+(`CM_PER_UNIT` in `cad/dimensions.ts`); values show one decimal.
+
 Toolbar (mouse or programmatic): a single **Start camera / Stop** toggle
-(webcam + tracking lifecycle) and **Export STL** (binary
+(webcam + tracking lifecycle), **Dimensions** (above) and **Export STL** (binary
 `model.stl` download via `three/examples/jsm/exporters/STLExporter`) —
 scene clearing lives in vision (the trash bin + spatial confirmation), so
 no mouse-only destructive button is mounted in the header. New
@@ -546,7 +561,7 @@ The `<canvas id="overlay">` (pure Canvas 2D) mirrors the feed and draws:
 ## Tests
 
 ```bash
-npm test        # vitest — coordinates, filters, handedness stabilizer, path straightener, classifier/FSM (+ pose snapshots), CSG booleanOps, color-wheel math / dwell tracker unit tests
+npm test        # vitest — coordinates, filters, handedness stabilizer, path straightener, classifier/FSM (+ pose snapshots), overlay dwell clock, cm dimensions, CSG booleanOps, color-wheel math / dwell tracker unit tests
 npm run build   # tsc --noEmit + vite production build
 ```
 

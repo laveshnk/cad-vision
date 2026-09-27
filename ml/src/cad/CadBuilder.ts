@@ -94,6 +94,50 @@ import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js';
 import type { CadScene } from './CadScene';
 import { AxisLock } from './axisLock';
 import { boxesClash, evaluateBoolean, overlapBox, worldBounds, type BooleanOperation } from './booleanOps';
+import { solidDimensions, type DimensionEntry, type SolidShape } from './dimensions';
+
+/**
+ * A solid's centimetre dimensions plus where to show them: the top-center
+ * of its world bounding box (plain data for the viewport's label layer).
+ */
+export interface DimensionAnnotation {
+  anchor: THREE.Vector3;
+  entries: DimensionEntry[];
+  /** True for the live build preview (still being sized). */
+  preview: boolean;
+}
+
+/**
+ * The measurable shape of a committed mesh: primitive parameters for boxes,
+ * cylinders and spheres; the local bounding box for anything else (CSG
+ * results), reported as a box.
+ */
+function solidShapeOf(geometry: THREE.BufferGeometry): SolidShape {
+  if (geometry instanceof THREE.BoxGeometry) {
+    const { width, height, depth } = geometry.parameters;
+    return { kind: 'box', width, height, depth };
+  }
+  if (geometry instanceof THREE.CylinderGeometry) {
+    const { radiusTop, height } = geometry.parameters;
+    return { kind: 'cylinder', radius: radiusTop, height };
+  }
+  if (geometry instanceof THREE.SphereGeometry) {
+    return { kind: 'sphere', radius: geometry.parameters.radius };
+  }
+  if (!geometry.boundingBox) geometry.computeBoundingBox();
+  const size = geometry.boundingBox!.getSize(new THREE.Vector3());
+  return { kind: 'box', width: size.x, height: size.y, depth: size.z };
+}
+
+/** Top-center of a mesh's world bounding box (the dimension label anchor). */
+function topAnchor(mesh: THREE.Mesh): THREE.Vector3 {
+  const geometry = mesh.geometry;
+  if (!geometry.boundingBox) geometry.computeBoundingBox();
+  mesh.updateMatrixWorld();
+  const box = geometry.boundingBox!.clone().applyMatrix4(mesh.matrixWorld);
+  const center = box.getCenter(new THREE.Vector3());
+  return center.setY(box.max.y);
+}
 
 /** World up: the fist-rotation yaw axis. */
 const WORLD_Y = new THREE.Vector3(0, 1, 0);
@@ -238,6 +282,8 @@ const UNIT_BOX = new THREE.BoxGeometry(1, 1, 1);
 const UNIT_CYLINDER = new THREE.CylinderGeometry(0.5, 0.5, 1, 32);
 const UNIT_SPHERE = new THREE.SphereGeometry(0.5, 32, 16);
 const MARKER = new THREE.SphereGeometry(0.07, 12, 8);
+/** Build preview draws after every solid (x-ray, see `createPreview`). */
+const PREVIEW_RENDER_ORDER = 1000;
 
 /**
  * EdgesGeometry crease thresholds per tool: boxes show every edge,
@@ -364,22 +410,39 @@ export class CadBuilder {
     return this.tool;
   }
 
-  get objectCount(): number {
-    return this.committed.length;
-  }
-
-  get hasActiveBuild(): boolean {
-    return this.build !== null;
-  }
-
-  /** Number of currently selected meshes (0 or 1). */
-  get selectedCount(): number {
-    return this.selected ? 1 : 0;
-  }
-
   /** Committed meshes (read-only view) — consumed by the AR mirror. */
   get committedMeshes(): readonly THREE.Mesh[] {
     return this.committed;
+  }
+
+  /**
+   * Centimetre dimensions of every committed solid plus the live build
+   * preview (box / cuboid: L W H; cylinder: R H; sphere: R; CSG results:
+   * bounding-box L W H), anchored at each solid's top.
+   */
+  dimensionAnnotations(): DimensionAnnotation[] {
+    const annotations: DimensionAnnotation[] = this.committed.map((mesh) => ({
+      anchor: topAnchor(mesh),
+      entries: solidDimensions(solidShapeOf(mesh.geometry)),
+      preview: false,
+    }));
+    const build = this.build;
+    if (build) {
+      // The preview's unit geometry is scaled to its displayed size.
+      const { x, y, z } = build.preview.fill.scale;
+      const shape: SolidShape =
+        build.tool === 'cylinder'
+          ? { kind: 'cylinder', radius: x / 2, height: y }
+          : build.tool === 'sphere'
+            ? { kind: 'sphere', radius: x / 2 }
+            : { kind: 'box', width: x, height: y, depth: z };
+      annotations.push({
+        anchor: topAnchor(build.preview.fill),
+        entries: solidDimensions(shape),
+        preview: true,
+      });
+    }
+    return annotations;
   }
 
   /** The currently selected committed mesh (AR highlight), or null. */
@@ -801,11 +864,6 @@ export class CadBuilder {
     this.selectionRotationAnchor = null;
     this.rotating = false;
     if (this.rotationRing) this.rotationRing.visible = false;
-  }
-
-  /** Whether an open-palm rotation gesture is currently running. */
-  get isRotating(): boolean {
-    return this.rotating;
   }
 
   /* ------------------------------------------------------------------ */
@@ -1521,31 +1579,36 @@ export class CadBuilder {
     }
   }
 
+  /**
+   * Wireframe build preview ("blueprint"). It is drawn as an x-ray layer:
+   * no depth test and a render order after every solid, so it stays fully
+   * visible even when the new shape sits inside or behind existing objects.
+   */
   private createPreview(): Preview {
     const group = new THREE.Group();
     group.name = 'cad-preview';
+    const xray = { transparent: true, depthTest: false, depthWrite: false } as const;
     const fill = new THREE.Mesh(
       this.unitGeometry(this.tool),
-      new THREE.MeshBasicMaterial({
-        color: this.options.previewColor,
-        transparent: true,
-        opacity: 0.16,
-        depthWrite: false,
-      })
+      new THREE.MeshBasicMaterial({ color: this.options.previewColor, opacity: 0.16, ...xray })
     );
     const wire = new THREE.Mesh(
       this.unitGeometry(this.tool),
       new THREE.MeshBasicMaterial({
         color: this.options.previewColor,
         wireframe: true,
-        transparent: true,
         opacity: 0.55,
+        ...xray,
       })
     );
     const marker = new THREE.Mesh(
       MARKER,
-      new THREE.MeshBasicMaterial({ color: this.options.previewColor })
+      new THREE.MeshBasicMaterial({ color: this.options.previewColor, ...xray })
     );
+    // Fill first, then the lines and marker on top of it.
+    fill.renderOrder = PREVIEW_RENDER_ORDER;
+    wire.renderOrder = PREVIEW_RENDER_ORDER + 1;
+    marker.renderOrder = PREVIEW_RENDER_ORDER + 1;
     group.add(fill, wire, marker);
     return { group, fill, wire, marker };
   }

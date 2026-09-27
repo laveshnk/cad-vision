@@ -35,28 +35,27 @@
  * and resized via its corner grip (`ThumbResizer`).
  */
 
-import { GestureEngine } from './vision/GestureEngine';
-import { DebugOverlay, MODE_LABELS } from './vision/DebugOverlay';
+import { DebugOverlay, GestureEngine, MODE_LABELS } from './vision';
 import type {
   FrameEvent,
   GestureSignalEvent,
   Handedness,
-} from './vision/types';
-import type {
   OverlayConfirmIntent,
   OverlayHudDisc,
   OverlayHudRect,
   OverlaySelectionHud,
-} from './vision/DebugOverlay';
+} from './vision';
 import { CadScene } from './cad/CadScene';
 import { CadBuilder, type CadTool } from './cad/CadBuilder';
 import { buildArSceneFrame } from './cad/ArMirror';
+import { formatDimension } from './cad/dimensions';
 import { Toolbar } from './ui/Toolbar';
 import { ColorWheel } from './ui/ColorWheel';
 import { SelectionMenu } from './ui/SelectionMenu';
 import { MetricsBar } from './ui/MetricsBar';
 import { ThumbDragger } from './ui/ThumbDragger';
 import { ThumbResizer } from './ui/ThumbResizer';
+import { DimensionLabels } from './ui/DimensionLabels';
 
 const video = document.querySelector<HTMLVideoElement>('#video');
 const canvas = document.querySelector<HTMLCanvasElement>('#overlay');
@@ -132,8 +131,14 @@ const HOLD_TO_ACT_MS = 1200;
 /** Shortest two-hand build (ms) that is committed; quicker ones are discarded. */
 const MIN_BUILD_MS = 400;
 
+/** Whether the viewport shows every solid's dimensions (cm). */
+let dimensionsVisible = false;
+
 const overlay = new DebugOverlay<CadTool>(canvas, {
   confirmHoldMs: HOLD_TO_ACT_MS,
+  // Dimensions (ruler) toggle at the right end of the mode bar — in every
+  // mode; mirrored by the toolbar's Dimensions button.
+  onDimensionsToggle: (visible) => setDimensionsVisible(visible),
   // Mode switcher on the vision overlay: the button bar (mouse click, finger
   // dwell or pinch) requests engine mode changes; the engine feeds the
   // active mode back through the per-frame event, which renders the button.
@@ -198,7 +203,40 @@ const toolbar = new Toolbar(toolbarRoot, {
   onExportStl: () => builder.exportStl(),
   onCameraStart: () => startCamera(),
   onCameraStop: () => stopCamera(),
+  onDimensionsToggle: () => setDimensionsVisible(!dimensionsVisible),
 });
+
+// Dimension labels (cm) over the 3D view: one chip per solid (and the live
+// build preview), re-projected after every render so they track the damped
+// camera and dragged / rotated solids exactly.
+const dimensionLabels = new DimensionLabels(viewport);
+cadScene.onFrame(() => {
+  if (!dimensionsVisible) {
+    dimensionLabels.render([]);
+    return;
+  }
+  const width = viewportElement.clientWidth;
+  const height = viewportElement.clientHeight;
+  const labels = [];
+  for (const annotation of builder.dimensionAnnotations()) {
+    const point = cadScene.projectToCanvas(annotation.anchor, width, height);
+    if (point.z > 1) continue; // behind the camera
+    labels.push({
+      x: point.x,
+      y: point.y,
+      entries: annotation.entries.map(formatDimension),
+      preview: annotation.preview,
+    });
+  }
+  dimensionLabels.render(labels);
+});
+
+/** Show / hide the dimension labels, keeping both toggles in sync. */
+function setDimensionsVisible(visible: boolean): void {
+  dimensionsVisible = visible;
+  overlay.setDimensionsVisible(visible);
+  toolbar.setDimensionsVisible(visible);
+}
 
 // HSL color wheel (EDIT mode), headless: nothing is drawn in the 3D view —
 // the wheel lives in the camera view (the overlay draws it from this
@@ -206,7 +244,7 @@ const toolbar = new Toolbar(toolbarRoot, {
 // timed hover lock; the bridge below feeds it viewport-local pixels (the
 // same space the camera-view disc maps to) and applies the picked hex
 // through CadBuilder.setSelectedColor.
-const colorWheel = new ColorWheel(viewport, { dwellMs: HOLD_TO_ACT_MS, headless: true });
+const colorWheel = new ColorWheel(viewport, { dwellMs: HOLD_TO_ACT_MS });
 
 /** Color-wheel zoom while a pointing fingertip hovers it (camera view). */
 const WHEEL_HOVER_ZOOM = 2;

@@ -104,6 +104,8 @@ export class CadScene {
 
   private frameId = 0;
   private disposed = false;
+  /** Called after every render (2D layers that follow the 3D view). */
+  private readonly frameListeners = new Set<() => void>();
 
   constructor(container: HTMLElement, options: CadSceneOptions = {}) {
     this.options = {
@@ -340,6 +342,16 @@ export class CadScene {
     );
   }
 
+  /**
+   * Run `listener` after every rendered frame — for 2D layers that must
+   * track the damped camera exactly (e.g. dimension labels). Returns an
+   * unsubscribe function.
+   */
+  onFrame(listener: () => void): () => void {
+    this.frameListeners.add(listener);
+    return () => this.frameListeners.delete(listener);
+  }
+
   /** Match the drawing buffer to the container size. */
   resize(): void {
     const container = this.renderer.domElement.parentElement;
@@ -355,6 +367,7 @@ export class CadScene {
     if (this.disposed) return;
     this.disposed = true;
     cancelAnimationFrame(this.frameId);
+    this.frameListeners.clear();
     this.resizeObserver.disconnect();
     this.grid.geometry.dispose();
     (this.grid.material as THREE.Material).dispose();
@@ -378,6 +391,7 @@ export class CadScene {
     this.spherical.radius += (this.sphericalTarget.radius - this.spherical.radius) * blend;
     this.updateCameraPosition();
     this.renderer.render(this.scene, this.camera);
+    for (const listener of this.frameListeners) listener();
   };
 
   /**
