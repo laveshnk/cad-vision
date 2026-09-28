@@ -18,6 +18,22 @@ const DEFAULT_WASM_CDN = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0
 const DEFAULT_MODEL_CDN =
   'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
 
+/**
+ * Default camera constraints, hard-clamped to 640 × 480 @ 30 fps: enough
+ * pixels for reliable hand tracking at a fraction of the inference cost —
+ * a 1280 × 720 stream carries 3× the pixels and is the usual cause of a
+ * hot, throttling machine on integrated GPUs. The `max` bounds keep a
+ * picky webcam driver from silently negotiating a bigger stream. User
+ * constraints are merged on top of these in `start`, so explicit
+ * overrides still win.
+ */
+const DEFAULT_CAMERA_CONSTRAINTS: MediaTrackConstraints = {
+  width: { ideal: 640, max: 640 },
+  height: { ideal: 480, max: 480 },
+  frameRate: { ideal: 30, max: 30 },
+  facingMode: 'user',
+};
+
 export interface HandTrackerOptions {
   /** Local WASM runtime location (see `npm run setup:assets`). */
   wasmBasePath?: string;
@@ -39,6 +55,12 @@ export interface HandTrackerOptions {
    * mirrored on-screen preview.
    */
   swapHandedness?: boolean;
+  /**
+   * Camera constraints, merged on top of the 640 × 480 @ 30 fps defaults
+   * (see `DEFAULT_CAMERA_CONSTRAINTS`): entries here override the clamp, so
+   * pass e.g. `{ facingMode: 'environment' }` or an explicit `width` to
+   * deliberately request a different stream.
+   */
   camera?: MediaTrackConstraints;
 }
 
@@ -74,12 +96,7 @@ export class HandTracker {
       minHandPresenceConfidence: options.minHandPresenceConfidence ?? 0.5,
       minTrackingConfidence: options.minTrackingConfidence ?? 0.5,
       swapHandedness: options.swapHandedness ?? true,
-      camera: options.camera ?? {
-        width: { ideal: 1280 },
-        height: { ideal: 720 },
-        facingMode: 'user',
-        frameRate: { ideal: 30 },
-      },
+      camera: options.camera ?? DEFAULT_CAMERA_CONSTRAINTS,
     };
   }
 
@@ -101,8 +118,15 @@ export class HandTracker {
     if (this.running) return;
     this.video = video;
 
+    // Clamp the camera input: 640 × 480 @ 30 fps keeps the webcam from
+    // defaulting to a 720p/1080p stream (3× the pixels → 3× the per-frame
+    // inference work). Explicit user constraints are spread last, so they
+    // still win over the clamp.
     this.stream = await navigator.mediaDevices.getUserMedia({
-      video: this.options.camera,
+      video:
+        typeof this.options.camera === 'object'
+          ? { ...DEFAULT_CAMERA_CONSTRAINTS, ...this.options.camera }
+          : DEFAULT_CAMERA_CONSTRAINTS,
       audio: false,
     });
     video.srcObject = this.stream;
@@ -111,6 +135,18 @@ export class HandTracker {
       video.onloadedmetadata = () => resolve();
     });
     await video.play();
+
+    // Confirm the negotiated stream in the console: a camera driver that
+    // ignores the `max` bounds shows up here as 1280 × 720.
+    const cameraTrack = this.stream?.getVideoTracks()[0];
+    const cameraSettings = cameraTrack?.getSettings();
+    console.log(
+      '[HandTracker] Camera stream:',
+      `${cameraSettings?.width ?? video.videoWidth}×${cameraSettings?.height ?? video.videoHeight}`,
+      '@',
+      cameraSettings?.frameRate ?? 'unknown',
+      'fps'
+    );
 
     this.landmarker = await this.createLandmarker();
     this.running = true;
@@ -135,6 +171,9 @@ export class HandTracker {
 
   private async createLandmarker(): Promise<HandLandmarker> {
     const build = async (wasmPath: string, modelPath: string, delegate: 'GPU' | 'CPU') => {
+      // Make each attempt visible in the browser console: the delegate that
+      // actually initializes is the last of these lines before tracking starts.
+      console.log('[HandTracker] Initializing with delegate:', delegate, wasmPath);
       const fileset = await FilesetResolver.forVisionTasks(wasmPath);
       return HandLandmarker.createFromOptions(fileset, {
         baseOptions: { modelAssetPath: modelPath, delegate },
@@ -157,9 +196,17 @@ export class HandTracker {
         ),
     ];
     if (this.options.delegate === 'GPU') {
-      attempts.push(() =>
-        build(this.options.fallbackWasmBasePath, this.options.fallbackModelAssetPath, 'CPU')
-      );
+      attempts.push(async () => {
+        // Reached only after both GPU attempts threw: CPU inference is
+        // several times slower and the usual cause of a hot, throttling
+        // machine — warn loudly instead of degrading silently.
+        console.warn('[HandTracker] Failed GPU delegate, falling back to CPU!');
+        return build(
+          this.options.fallbackWasmBasePath,
+          this.options.fallbackModelAssetPath,
+          'CPU'
+        );
+      });
     }
 
     let lastError: unknown = null;

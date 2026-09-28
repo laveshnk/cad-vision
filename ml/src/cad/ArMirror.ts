@@ -9,8 +9,8 @@
  * are true (a sphere stays round) and ghosts align with the hands:
  *
  * - the grid becomes semi-transparent cyan polylines matching the 3D
- *   perspective — a 30 × 30 world-unit floor window centered on the origin
- *   by default, drawn as faint 1-unit minor lines plus stronger major
+ *   perspective — a 16 × 16 world-unit floor window centered on the origin
+ *   by default, drawn as faint 2-unit minor lines plus stronger major
  *   divisions (every `gridMajorStep` units) so the extended floor stays
  *   readable on the video thumbnail;
  * - every committed mesh becomes a "ghost": its projected silhouette (convex
@@ -20,11 +20,13 @@
  *   energetic highlight, and while an open-palm rotation gesture is running
  *   the builder's compass ring (circle + yaw needle) is projected too.
  *
- * Culling keeps the per-frame cost flat at 60 FPS: geometry behind the
- * camera (projected NDC depth `z > 1`) is dropped, and segments are
- * additionally trivial-rejected (`isSegmentOnCanvas`) when both endpoints
- * fall into the same outside half-plane of the canvas — no wasted `lineTo`
- * operations for off-screen grid lines.
+ * Culling keeps the per-frame cost flat at 60 FPS: points behind the camera
+ * are rejected cheaply in view space (positive view-space z) *before* the
+ * NDC projection and canvas mapping run, projected geometry past NDC depth
+ * `z > 1` is dropped, and segments are additionally trivial-rejected
+ * (`isSegmentOnCanvas`) when both endpoints fall into the same outside
+ * half-plane of the canvas — no wasted `lineTo` operations for off-screen
+ * grid lines.
  *
  * The returned payload is plain data (no Three.js types), structurally
  * compatible with `DebugOverlay`'s `arScene` provider types — the same
@@ -85,9 +87,16 @@ export interface ArSceneFrame {
 }
 
 export interface ArMirrorOptions {
-  /** Half extent of the mirrored ground grid; 15 → a 30 × 30 world-unit floor. */
+  /**
+   * Half extent of the mirrored ground grid. Clamped to ≤ 8 → at most a
+   * 16 × 16 world-unit floor: the grid is the AR mirror's biggest per-frame
+   * projection cost, so its extent is capped on integrated GPUs' behalf.
+   */
   gridHalfExtent?: number;
-  /** Minor ground-grid line spacing (world units). */
+  /**
+   * Minor ground-grid line spacing (world units). Clamped to ≥ 2 — 1-unit
+   * lines quadruple the projected segment count for no extra readability.
+   */
   gridStep?: number;
   /** Major (stronger) grid division every this many world units. */
   gridMajorStep?: number;
@@ -99,6 +108,13 @@ const segmentTo = new THREE.Vector3();
 /** Scratch vertices for silhouette / edge endpoints. */
 const vertexA = new THREE.Vector3();
 const vertexB = new THREE.Vector3();
+/** Scratch point for the view-space behind-camera pre-check. */
+const viewSpacePoint = new THREE.Vector3();
+
+/** Grid extent cap: at most a 16 × 16 world-unit floor window. */
+const MAX_GRID_HALF_EXTENT = 8;
+/** Grid density floor: at least 2 world units between minor grid lines. */
+const MIN_GRID_STEP = 2;
 
 /**
  * Build one SELECT-mode AR frame: the ground grid + every committed mesh,
@@ -116,9 +132,15 @@ export function buildArSceneFrame(
   // frame): ghosts keep their true proportions on the camera view and line
   // up with the hands, whatever the wide viewport's aspect is.
   const camera = scene.interactionCamera;
-  const halfExtent = options.gridHalfExtent ?? 15;
-  const step = options.gridStep ?? 1;
-  const majorStep = options.gridMajorStep ?? 5;
+  // Grid density is clamped for integrated-GPU performance (see
+  // `ArMirrorOptions`): at most a 16 × 16 world-unit floor with 2-unit minor
+  // lines — roughly a quarter of the previous per-frame segment count.
+  const halfExtent = Math.min(
+    options.gridHalfExtent ?? MAX_GRID_HALF_EXTENT,
+    MAX_GRID_HALF_EXTENT
+  );
+  const step = Math.max(options.gridStep ?? MIN_GRID_STEP, MIN_GRID_STEP);
+  const majorStep = options.gridMajorStep ?? 4;
   const grid: ArGridLine[] = [];
   const cells = Math.max(1, Math.round(halfExtent / step));
   // A major division every `majorEvery` minor lines (index math keeps this
@@ -159,9 +181,26 @@ export function buildArSceneFrame(
 }
 
 /**
+ * Cheap behind-camera pre-check in view space: the camera looks down its
+ * local -Z, so a point with positive view-space z lies behind it. Testing
+ * this first lets culling skip the full projection (vector clone + view and
+ * projection matrix multiplies + canvas mapping) for points the NDC `z > 1`
+ * test would reject anyway; that test still runs after projecting and keeps
+ * catching the rarer beyond-far-plane case, so culling behavior is
+ * unchanged. The camera's world matrix must be synced —
+ * `CadScene.interactionCamera` guarantees that once per frame.
+ */
+function isPointBehindCamera(
+  worldPoint: THREE.Vector3,
+  camera: THREE.PerspectiveCamera
+): boolean {
+  return viewSpacePoint.copy(worldPoint).applyMatrix4(camera.matrixWorldInverse).z > 0;
+}
+
+/**
  * Project a straight world-space segment; `null` when culled — either
- * endpoint behind the camera, or both endpoints in the same outside
- * half-plane of the canvas (trivial reject).
+ * endpoint behind the camera, past NDC depth 1, or both endpoints in the
+ * same outside half-plane of the canvas (trivial reject).
  */
 function projectSegment(
   scene: CadScene,
@@ -171,6 +210,9 @@ function projectSegment(
   canvasWidth: number,
   canvasHeight: number
 ): ArSegment | null {
+  // View-space pre-check: either endpoint behind the camera culls the whole
+  // segment, so skip both projections entirely.
+  if (isPointBehindCamera(a, camera) || isPointBehindCamera(b, camera)) return null;
   const pa = scene.projectToCanvas(a, canvasWidth, canvasHeight, camera);
   const pb = scene.projectToCanvas(b, canvasWidth, canvasHeight, camera);
   if (isBehindCamera(pa.z) || isBehindCamera(pb.z)) return null;
@@ -256,6 +298,9 @@ function meshGhost(
   if (position) {
     for (let i = 0; i < position.count; i++) {
       vertexA.fromBufferAttribute(position, i).applyMatrix4(mesh.matrixWorld);
+      // View-space pre-check: skip the projection for vertices behind the
+      // camera — they would be culled right after projecting anyway.
+      if (isPointBehindCamera(vertexA, camera)) continue;
       const projected = scene.projectToCanvas(vertexA, canvasWidth, canvasHeight, camera);
       if (isBehindCamera(projected.z)) continue;
       silhouette.push({ x: projected.x, y: projected.y });

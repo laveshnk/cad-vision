@@ -124,7 +124,10 @@ export class CadScene {
     };
 
     this.renderer = new THREE.WebGLRenderer({ antialias: true });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    // Pixel ratio is hard-capped at 1: Retina screens report 2, which makes
+    // the Intel integrated GPU shade 4× the pixels for the same scene — the
+    // single biggest render-loop cost on integrated graphics.
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.0));
     // Filmic tone mapping: softer highlight rolloff and richer material shading.
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.12;

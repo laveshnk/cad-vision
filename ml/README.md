@@ -188,7 +188,9 @@ and hands absent > 10 frames re-seed from fresh evidence. Configurable via
 ## CAD application workflow
 
 The full-bleed viewport is a Three.js scene (floor grid, fog, damped orbit
-camera, starting straight on so the grid is square to the screen) driven entirely by the gesture events above, with the camera rendered
+camera, starting straight on so the grid is square to the screen; the render
+pixel ratio is capped at 1 so integrated GPUs aren't shading 4× Retina
+pixels) driven entirely by the gesture events above, with the camera rendered
 as a floating thumbnail (top-left, click ⤢ to expand/collapse, drag the card's
 **outer frame** — header bar or stats bar — to reposition it, drag the grip on
 its bottom-right corner — outside the video — to resize it) over it. A boxy
@@ -268,8 +270,9 @@ build:
    re-anchors, so the mesh never jerks or resets. Pinching empty ground
    deselects (so does leaving EDIT mode), restoring the mesh's normal look
    — the selection outline goes, a picked color stays. While in EDIT mode the camera thumbnail doubles as a live
-   **AR spatial mirror**: the ground grid (30 × 30 world units, 1-unit minor
-   + stronger 5-unit major lines, off-canvas geometry culled) and every
+   **AR spatial mirror**: the ground grid (16 × 16 world units, 2-unit minor
+   + stronger 4-unit major lines, off-canvas and behind-camera geometry
+   culled) and every
    committed mesh are projected through the shared 3D camera and drawn as
    translucent ghosts (the active selection glows amber/cyan) in lockstep
    with the viewport. Keep the pinch held and show an **open palm** with
@@ -460,7 +463,9 @@ on-screen view), +Y up — ready to map into a CAD viewport.
 `new GestureEngine({ tracker, handedness, smoothing, classifier, initialMode })`:
 
 - `tracker` — `HandTrackerOptions`: asset paths, delegate (`GPU`/`CPU`),
-  confidence thresholds, camera constraints.
+  confidence thresholds, camera constraints (640 × 480 @ 30 fps by default —
+  clamped so the webcam never negotiates a 720p/1080p stream; a GPU → CPU
+  delegate fallback logs a console warning).
 - `handedness` — `HandednessStabilizerOptions`: `voteWindow` (5),
   `flipFrames` (3), `highConfidence` (0.9), `geometricWeight` (0.75),
   `reentryFrames` (10) for Left/Right label stabilization.
